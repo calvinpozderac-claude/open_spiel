@@ -279,12 +279,16 @@ class BoopState(pyspiel.State):
       full = mine[_LINE_IDX].all(axis=1)
       if not full.any():
         return
-      # Resolve ONE qualifying line per pass (first in _LINE_IDX order).
-      # Clearing its cells invalidates any OVERLAPPING line, so it is not
-      # picked again this call — matching "choose one, leave the rest" for
-      # a connected run of 4+ (fig.4). An independent (non-overlapping) line
-      # elsewhere still qualifies and is resolved on the loop's next pass.
-      line = _LINE_IDX[full][0]
+      # Resolve ONE qualifying line per pass, chosen UNIFORMLY AT RANDOM
+      # among all lines that currently qualify (not the player's choice —
+      # that would need a new action type, which isn't worth the added
+      # action-space complexity). Clearing the chosen line's cells
+      # invalidates any OVERLAPPING line, so it is not picked again this
+      # call — matching "choose one, leave the rest" for a connected run of
+      # 4+ (fig.4). An independent (non-overlapping) line elsewhere still
+      # qualifies and is resolved on the loop's next pass.
+      candidates = _LINE_IDX[full]
+      line = candidates[np.random.randint(len(candidates))]
       flat[line] = _EMPTY
       self._hand[player][1] += 3
 
