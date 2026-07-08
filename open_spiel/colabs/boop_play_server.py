@@ -627,15 +627,31 @@ class Searcher:
                 snap_cb(self)
                 last_snap = time.time()
 
+    def _proven_wins(self):
+        """Children MCTS-Solver has proven force a win for the mover. Once any
+        exist the search stops early (see run()), so raw visit counts among
+        the (possibly very sparse) explored children are close to meaningless
+        -- a proven win must dominate display and move choice regardless."""
+        return [c for c in self.root.children
+                if c.outcome is not None and c.outcome[c.player] == 1.0]
+
     def snapshot(self):
-        kids = [c for c in self.root.children if c.n > 0]
-        total = sum(c.n for c in kids)
-        probs = {int(c.action): round(c.n / total, 4) for c in kids} if total else {}
+        wins = self._proven_wins()
+        if wins:
+            share = round(1.0 / len(wins), 4)
+            probs = {int(c.action): share for c in wins}
+        else:
+            kids = [c for c in self.root.children if c.n > 0]
+            total = sum(c.n for c in kids)
+            probs = {int(c.action): round(c.n / total, 4) for c in kids} if total else {}
         q = self.root.w / self.root.n if self.root.n else 0.0
         return {'sims': int(self.root.n), 'value': round(float(q), 3),
                 'probs': probs}
 
     def best(self):
+        wins = self._proven_wins()
+        if wins:
+            return max(wins, key=lambda c: c.n).action
         return max(self.root.children, key=lambda c: c.n).action
 
 
