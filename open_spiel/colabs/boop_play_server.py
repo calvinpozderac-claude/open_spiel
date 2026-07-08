@@ -264,18 +264,29 @@ class BoopState(pyspiel.State):
           board[nr, nc] = _EMPTY
 
   def _promote_kittens(self, player):
-    # Faithful rule: the three(+) kittens BECOME cats. Remove them from the
-    # board and add the same number of cats to the pool — pieces are conserved.
+    # Faithful rule (rulebook p.4): a line of 3 of the player's own pieces —
+    # kittens AND/OR cats mixed — graduates. Every kitten in the line becomes
+    # a cat; every cat in the line simply returns to the pool; either way all
+    # three board cells clear and the pool gains 3 cats (pieces conserved).
+    # A pure 3-cats-in-a-row is a WIN, checked before this runs, so it never
+    # reaches here as a live case.
+    kv, cv = _KITTEN_VAL[player], _CAT_VAL[player]
     flat = self.board.reshape(-1)
-    kittens = flat == _KITTEN_VAL[player]
-    if int(kittens.sum()) < 3:
-      return
-    full = kittens[_LINE_IDX].all(axis=1)
-    if not full.any():
-      return
-    cells = np.unique(_LINE_IDX[full])
-    flat[cells] = _EMPTY
-    self._hand[player][1] += int(cells.size)
+    while True:
+      mine = (flat == kv) | (flat == cv)
+      if int(mine.sum()) < 3:
+        return
+      full = mine[_LINE_IDX].all(axis=1)
+      if not full.any():
+        return
+      # Resolve ONE qualifying line per pass (first in _LINE_IDX order).
+      # Clearing its cells invalidates any OVERLAPPING line, so it is not
+      # picked again this call — matching "choose one, leave the rest" for
+      # a connected run of 4+ (fig.4). An independent (non-overlapping) line
+      # elsewhere still qualifies and is resolved on the loop's next pass.
+      line = _LINE_IDX[full][0]
+      flat[line] = _EMPTY
+      self._hand[player][1] += 3
 
   def _check_win(self, player):
     flat = self.board.reshape(-1)
