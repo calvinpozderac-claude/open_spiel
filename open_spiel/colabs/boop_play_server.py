@@ -593,13 +593,19 @@ class Searcher:
                 break
             if self.root.outcome is not None:
                 break
-            if max_sims is not None and self.root.n >= max_sims:
+            # Sims = completed descents into CHILDREN. The root's own
+            # expansion (its first backup) is setup, not a simulation —
+            # counting it meant max_sims=1 expanded the root and stopped with
+            # every child at 0 visits, so best() degenerated to the first
+            # legal action (the top-left cell).
+            if (max_sims is not None and self.root.children
+                    and self.root.n - 1 >= max_sims):
                 break
             if self.root.n >= 2_000_000:
                 break
             wave = 1 if not self.root.children else self.wave
             if max_sims is not None:
-                wave = min(wave, max(1, max_sims - self.root.n))
+                wave = min(wave, max(1, max_sims - (self.root.n - 1)))
             pending = []
             for _ in range(wave):
                 if self.root.outcome is not None:
@@ -643,16 +649,23 @@ class Searcher:
         else:
             kids = [c for c in self.root.children if c.n > 0]
             total = sum(c.n for c in kids)
-            probs = {int(c.action): round(c.n / total, 4) for c in kids} if total else {}
+            if total:
+                probs = {int(c.action): round(c.n / total, 4) for c in kids}
+            else:   # nothing visited yet — show the NN prior, not nothing
+                probs = {int(c.action): round(c.prior, 4)
+                         for c in self.root.children}
         q = self.root.w / self.root.n if self.root.n else 0.0
-        return {'sims': int(self.root.n), 'value': round(float(q), 3),
-                'probs': probs}
+        return {'sims': max(0, int(self.root.n) - 1),
+                'value': round(float(q), 3), 'probs': probs}
 
     def best(self):
         wins = self._proven_wins()
         if wins:
             return max(wins, key=lambda c: c.n).action
-        return max(self.root.children, key=lambda c: c.n).action
+        # Visit count decides; the NN prior breaks ties — without it,
+        # max() returns the FIRST zero-visit child (lowest action id =
+        # top-left cell) whenever no child was visited yet.
+        return max(self.root.children, key=lambda c: (c.n, c.prior)).action
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -768,7 +781,8 @@ class Session:
                 'mode': self.mode,
                 'human': self.human,
                 'manual': self.sims == 0,
-                'thinking_sims': int(self.searcher.root.n) if self.searcher else 0,
+                'thinking_sims': (max(0, int(self.searcher.root.n) - 1)
+                                  if self.searcher else 0),
                 'snapshots': self.snapshots,
                 'move_log': self.move_log,
                 'board_hist': self.board_hist,
