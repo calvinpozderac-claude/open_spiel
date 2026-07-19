@@ -643,7 +643,27 @@ class Searcher:
                 'value': round(_root_value(root), 3), 'probs': probs}
 
     def best(self):
-        return root_pick(self.root, self.rng, thompson=False)
+        """Play the MOST-VISITED root move (AlphaZero-standard), not the
+        highest value-mean edge. The visit count integrates value over every
+        simulation, so it is robust to a single lucky Thompson rollout on a
+        barely-explored edge — the failure mode that makes a weak/uncertain
+        value head shuffle rim/rook moves. It is also exactly what the UI
+        shows as move preferences, so the engine plays what it displays.
+        A proven win is played outright; ties break by value mean, then rng."""
+        root = self.root
+        wins = np.nonzero(root.term == _WIN)[0]
+        pool = wins if len(wins) else np.nonzero(_opened_mask(root))[0]
+        if len(pool) == 0:                       # no search yet — policy prior
+            return int(root.legal[int(root.pol.argmax())])
+        vis = root.visits[pool]
+        cand = pool[vis == vis.max()]
+        if len(cand) > 1:
+            vmean = root.edge[cand] @ _GRID_V
+            cand = cand[vmean >= vmean.max() - 1e-9]
+            i = int(cand[self.rng.randint(len(cand))])
+        else:
+            i = int(cand[0])
+        return int(root.legal[i])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
