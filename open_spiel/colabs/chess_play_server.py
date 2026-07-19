@@ -456,16 +456,36 @@ def _root_value(node):
 
 
 def root_pick(root, rng, thompson):
+    """Commit a root move from the search statistics. VISIT-BASED
+    (AlphaZero-standard), NOT value-mean-based: the visit count integrates the
+    value posterior over every simulation, so it is robust to a single lucky
+    Thompson draw on a barely-visited edge — the failure mode that made a
+    weak/uncertain value head commit rim/rook moves. The Thompson posterior
+    still drives the SEARCH itself; this is only the final commit.
+      thompson=True  (temperature): sample a move ∝ its visit count.
+      thompson=False (greedy): most-visited; a proven win is played outright;
+                     ties break by posterior mean value, then at random."""
     opened = _opened_mask(root)
     if not opened.any():
         return int(root.legal[int(root.pol.argmax())])
-    oi = np.nonzero(opened)[0]
     if thompson:
-        u = rng.random_sample(len(oi))
-        v = np.array([_sample_pmf(root.edge[i], u[j]) for j, i in enumerate(oi)])
+        w = root.visits.astype(np.float64)
+        s = w.sum()
+        if s <= 0:
+            return int(root.legal[int(root.pol.argmax())])
+        i = int((np.cumsum(w / s) < rng.random_sample()).sum())
+        return int(root.legal[min(i, len(root.legal) - 1)])
+    wins = np.nonzero(root.term == _WIN)[0]
+    pool = wins if len(wins) else np.nonzero(opened)[0]
+    vis = root.visits[pool]
+    cand = pool[vis == vis.max()]
+    if len(cand) > 1:
+        vmean = root.edge[cand] @ _GRID_V
+        cand = cand[vmean >= vmean.max() - 1e-9]
+        i = int(cand[rng.randint(len(cand))])
     else:
-        v = root.edge[oi] @ _GRID_V
-    return int(root.legal[int(oi[int(v.argmax())])])
+        i = int(cand[0])
+    return int(root.legal[i])
 
 
 def _expand_state_node(net, device, state, lam, calib):
@@ -643,27 +663,10 @@ class Searcher:
                 'value': round(_root_value(root), 3), 'probs': probs}
 
     def best(self):
-        """Play the MOST-VISITED root move (AlphaZero-standard), not the
-        highest value-mean edge. The visit count integrates value over every
-        simulation, so it is robust to a single lucky Thompson rollout on a
-        barely-explored edge — the failure mode that makes a weak/uncertain
-        value head shuffle rim/rook moves. It is also exactly what the UI
-        shows as move preferences, so the engine plays what it displays.
-        A proven win is played outright; ties break by value mean, then rng."""
-        root = self.root
-        wins = np.nonzero(root.term == _WIN)[0]
-        pool = wins if len(wins) else np.nonzero(_opened_mask(root))[0]
-        if len(pool) == 0:                       # no search yet — policy prior
-            return int(root.legal[int(root.pol.argmax())])
-        vis = root.visits[pool]
-        cand = pool[vis == vis.max()]
-        if len(cand) > 1:
-            vmean = root.edge[cand] @ _GRID_V
-            cand = cand[vmean >= vmean.max() - 1e-9]
-            i = int(cand[self.rng.randint(len(cand))])
-        else:
-            i = int(cand[0])
-        return int(root.legal[i])
+        # Most-visited root move (see root_pick): robust to value-mean noise,
+        # and exactly what the UI shows as preferences — the engine plays what
+        # it displays.
+        return root_pick(self.root, self.rng, thompson=False)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
