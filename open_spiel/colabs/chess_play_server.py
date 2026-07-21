@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
-"""Chess live-play web server — play against a checkpointed ThompsonHybrid model,
-or watch two models play each other, in a browser (works through ngrok).
+"""Chess live-play web server — play against a checkpointed model, or watch two
+models play each other, in a browser (works through ngrok).
+
+Handles BOTH engines from this repo, auto-detected per checkpoint:
+  • ThompsonHybrid — state-value Dirichlet head + policy-prior ordering head,
+    PUCT-style Thompson selection, mixture propagation, MCTS-Solver.
+  • AlphaZero      — policy + scalar-value heads, standard PUCT MCTS +
+    MCTS-Solver (the control notebook's engine).
+Each --model is inspected (its head weights identify the engine) and driven by
+the matching search — identical semantics to that notebook's training worker.
+You can even watch one against the other (--model hybrid.pt --model2 az.pt).
 
 Usage:
     python chess_play_server.py --model chess_checkpoints_thompson_hybrid/bench_2000.pt
+    python chess_play_server.py --model chess_checkpoints_alphazero/bench_2000.pt
     python chess_play_server.py --model A.pt --model2 B.pt      # watch A vs B
     ngrok http 8765                                             # then share URL
 
@@ -14,12 +24,8 @@ Flags:
     --device D      inference device (default cpu — batch-1..8 is CPU's regime)
     --snapshot-secs S   seconds between analysis snapshots while thinking (2)
 
-Network architecture (channels/blocks) is inferred from the checkpoint.
-AUTO-GENERATED from chess_thompson_hybrid_training.ipynb (net + tree-ops cells).
-The engine is the HYBRID Bayesian-MCTS: a state-value Dirichlet head + a
-policy-prior ordering head, PUCT-style Thompson selection, mixture propagation,
-MCTS-Solver, and low-branching terminal scanning — identical semantics to the
-training worker, run interactively here.
+Network architecture (channels/blocks) and engine type are inferred from the
+checkpoint. Net + tree-ops are inlined from the two training notebooks.
 """
 import argparse
 import json as _json
@@ -169,6 +175,38 @@ class ThompsonHybridChessNet(nn.Module):
         p_conf  = POL_CONF_MIN + (POL_CONF_MAX - POL_CONF_MIN) * torch.sigmoid(
             self.p_conf(h).squeeze(-1))
         return v_probs, v_conf, p_logits, p_conf
+
+
+class AlphaZeroChessNet(nn.Module):
+    """Standard AlphaZero net: policy logits over all actions + a scalar value
+    in [-1,1] (mover's perspective). Same shared body as the hybrid; only the
+    heads differ. Inlined from chess_alphazero_training.ipynb."""
+    _HEAD_CH = 8
+
+    def __init__(self, channels=64, num_blocks=6):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(_OBS_SHAPE[0], channels, 3, padding=1, bias=False),
+            _norm(channels),
+            nn.ReLU(inplace=True),
+        )
+        self.body = nn.Sequential(*[ResBlock(channels) for _ in range(num_blocks)])
+        self.head = nn.Sequential(
+            nn.Conv2d(channels, self._HEAD_CH, 1, bias=False),
+            _norm(self._HEAD_CH),
+            nn.ReLU(inplace=True),
+            nn.Flatten(),
+        )
+        flat = self._HEAD_CH * _OBS_SHAPE[1] * _OBS_SHAPE[2]
+        self.policy_out = nn.Linear(flat, _NUM_ACTIONS)
+        self.value_out  = nn.Sequential(
+            nn.Linear(flat, 64), nn.ReLU(inplace=True), nn.Linear(64, 1))
+
+    def forward(self, x):
+        h      = self.head(self.body(self.stem(x)))
+        logits = self.policy_out(h)
+        value  = torch.tanh(self.value_out(h)).squeeze(-1)
+        return logits, value
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -662,11 +700,254 @@ class Searcher:
         return {'sims': int(root.visits.sum()),
                 'value': round(_root_value(root), 3), 'probs': probs}
 
+    def n_sims(self):
+        return int(self.root.visits.sum())
+
     def best(self):
         # Most-visited root move (see root_pick): robust to value-mean noise,
         # and exactly what the UI shows as preferences — the engine plays what
         # it displays.
         return root_pick(self.root, self.rng, thompson=False)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AlphaZero engine (standard PUCT MCTS + MCTS-Solver) — inlined from the control
+# notebook. Names are `_az_`-prefixed so both engines coexist in one process.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_AZ_C_PUCT   = 1.5
+_AZ_FPU      = 0.0
+_TERM_VALUE  = np.array([1.0, 0.0, -1.0])          # value of a proven outcome
+
+
+def _az_softmax_legal(logits):
+    z = logits - logits.max()
+    e = np.exp(z)
+    return e / e.sum()
+
+
+class _AZNode:
+    __slots__ = ('player', 'legal', 'P', 'N', 'W', 'vloss', 'term', 'children',
+                 'obs')
+
+    def __init__(self, player, legal, priors):
+        self.player   = player
+        self.legal    = np.asarray(legal, dtype=np.int32)
+        k = len(self.legal)
+        self.P        = np.asarray(priors, dtype=np.float64)
+        self.N        = np.zeros(k, dtype=np.int64)
+        self.W        = np.zeros(k, dtype=np.float64)
+        self.vloss    = np.zeros(k, dtype=np.int64)
+        self.term     = np.full(k, -1, dtype=np.int8)
+        self.children = [None] * k
+        self.obs      = None
+
+
+def _az_edge_scores(node):
+    N, W, vl, t = node.N, node.W, node.vloss, node.term
+    ne = N + vl
+    Q = np.where(ne > 0, W / np.maximum(ne, 1), _AZ_FPU)
+    Q = Q - vl * 1.0 / np.maximum(ne, 1)
+    if (t >= 0).any():
+        Q = Q.copy()
+        Q[t >= 0] = _TERM_VALUE[t[t >= 0]]
+    sqrt_sum = math.sqrt(max(1, int(ne.sum())))
+    U = _AZ_C_PUCT * node.P * sqrt_sum / (1.0 + ne)
+    return Q + U
+
+
+def _az_select_leaf(root, root_state):
+    node  = root
+    state = root_state.clone()
+    path  = []
+    while True:
+        idx = int(_az_edge_scores(node).argmax())
+        node.vloss[idx] += 1
+        path.append((node, idx))
+        if node.term[idx] >= 0:
+            return path, None, None
+        state.apply_action(int(node.legal[idx]))
+        if state.is_terminal():
+            r = state.returns()[node.player]
+            node.term[idx] = _WIN if r > 0 else (_LOSS if r < 0 else _DRAW)
+            return path, None, None
+        child = node.children[idx]
+        if child is None:
+            return path, state, (node, idx)
+        node = child
+
+
+def _az_backup(path, leaf_value, leaf_player):
+    for node, idx in reversed(path):
+        node.vloss[idx] -= 1
+        node.N[idx] += 1
+        node.W[idx] += leaf_value if node.player == leaf_player else -leaf_value
+
+
+def _az_node_solved(node):
+    t = node.term
+    if (t == _WIN).any():
+        return _WIN
+    if (t >= 0).all():
+        return _DRAW if (t == _DRAW).any() else _LOSS
+    return None
+
+
+def _az_propagate_solved(path):
+    for k in range(len(path) - 1, 0, -1):
+        node = path[k][0]
+        out = _az_node_solved(node)
+        if out is None:
+            break
+        parent, pidx = path[k - 1]
+        if parent.term[pidx] >= 0:
+            break
+        parent.term[pidx] = _FLIP_TERM[out]
+
+
+def _az_backup_terminal(path, leaf_value, leaf_player):
+    _az_backup(path, leaf_value, leaf_player)
+    _az_propagate_solved(path)
+
+
+def _az_solved_adjust_counts(node, counts):
+    t = node.term
+    if (t == _WIN).any():
+        out = np.zeros_like(counts)
+        out[t == _WIN] = 1.0
+        return out
+    if (t == _LOSS).any() and not (t == _LOSS).all():
+        out = counts.copy()
+        out[t == _LOSS] = 0.0
+        if out.sum() > 0:
+            return out
+    return counts
+
+
+def _az_root_value(node):
+    ne = node.N
+    tot = ne.sum()
+    return float(node.W[ne > 0].sum() / tot) if tot > 0 else 0.0
+
+
+def _az_policy_move(net, device, state):
+    """Search-free move: argmax of the legal-action policy logits."""
+    with torch.no_grad():
+        logits, _ = net(state_to_tensor(state, device))
+    legal = state.legal_actions()
+    p = _az_softmax_legal(logits[0].cpu().numpy()[legal])
+    return int(legal[int(p.argmax())])
+
+
+class AZSearcher:
+    """Incremental AlphaZero PUCT MCTS with the same run()/snapshot()/best()
+    interface as the hybrid Searcher, so the Session drives either engine
+    identically. Batched waves (virtual loss diversifies a wave into one NN
+    forward pass); snapshots on a wall-clock cadence."""
+
+    def __init__(self, net, state, device, wave=8):
+        self.net = net
+        self.state = state.clone()
+        self.device = device
+        self.wave = wave
+        logits, _ = self._eval([self.state])
+        legal = state.legal_actions()
+        self.root = _AZNode(state.current_player(), legal,
+                            _az_softmax_legal(logits[0][legal]))
+        self.uci_map = {int(a): _action_uci(state, int(a))
+                        for a in legal}
+
+    def _eval(self, states):
+        obs = [s.observation_tensor(s.current_player()) for s in states]
+        x = batch_to_tensor(obs, self.device)
+        with torch.no_grad():
+            logits, values = self.net(x)
+        return logits.cpu().numpy(), values.cpu().numpy()
+
+    def _wave(self):
+        root = self.root
+        pending = []
+        for _ in range(self.wave):
+            if _az_node_solved(root) is not None:
+                break
+            path, st, edge = _az_select_leaf(root, self.state)
+            if st is None:
+                node, idx = path[-1]
+                _az_backup_terminal(path, float(_TERM_VALUE[node.term[idx]]),
+                                    node.player)
+            else:
+                pending.append((path, st, edge))
+        unique = {}
+        for path, st, (node, idx) in pending:
+            unique.setdefault((id(node), idx), (node, idx, st))
+        if unique:
+            entries = list(unique.values())
+            lg, vl = self._eval([st for _, _, st in entries])
+            made = {}
+            for (node, idx, st), l_row, v_row in zip(entries, lg, vl):
+                leg = st.legal_actions()
+                node.children[idx] = _AZNode(st.current_player(), leg,
+                                             _az_softmax_legal(l_row[leg]))
+                made[(id(node), idx)] = float(v_row)
+            for path, st, (node, idx) in pending:
+                _az_backup(path, made[(id(node), idx)],
+                           node.children[idx].player)
+
+    def run(self, max_sims=None, stop_evt=None, snap_cb=None, snap_secs=2.0):
+        last = time.time()
+        while True:
+            if stop_evt is not None and stop_evt.is_set():
+                break
+            if _az_node_solved(self.root) is not None:
+                break
+            n = int(self.root.N.sum())
+            if max_sims is not None and n >= max_sims:
+                break
+            if n >= 2_000_000:
+                break
+            self._wave()
+            if snap_cb is not None and time.time() - last >= snap_secs:
+                snap_cb(self)
+                last = time.time()
+
+    def snapshot(self):
+        root = self.root
+        probs = {}
+        if _az_node_solved(root) == _WIN:
+            wins = np.nonzero(root.term == _WIN)[0]
+            share = round(1.0 / len(wins), 4)
+            for i in wins:
+                u = self.uci_map.get(int(root.legal[i]))
+                if u:
+                    probs[u] = share
+        else:
+            vis = root.N.astype(float)
+            tot = vis.sum()
+            if tot > 0:
+                for i, a in enumerate(root.legal):
+                    if vis[i] > 0:
+                        u = self.uci_map.get(int(a))
+                        if u:
+                            probs[u] = round(float(vis[i] / tot), 4)
+        return {'sims': int(root.N.sum()),
+                'value': round(_az_root_value(root), 3), 'probs': probs}
+
+    def n_sims(self):
+        return int(self.root.N.sum())
+
+    def best(self):
+        root = self.root
+        counts = _az_solved_adjust_counts(root, root.N.astype(np.float64))
+        idx = int(np.argmax(counts + 1e-6 * root.P))
+        return int(root.legal[idx])
+
+
+# Engine dispatch: (net, engine-tag) → the matching incremental searcher.
+_SEARCHERS = {'hybrid': Searcher, 'alphazero': AZSearcher}
+
+
+def make_searcher(net, engine, state, device):
+    return _SEARCHERS[engine](net, state, device)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -914,7 +1195,10 @@ function render(){
     st.textContent = w>0?'🏆 White wins (checkmate)':w<0?'🏆 Black wins (checkmate)':'½–½ Draw';
   } else if(S.status==='human_turn'){ st.textContent='Your move';
   } else if(S.status==='thinking'){
-    st.textContent=(S.mode==='watch'?`${S.current_player===S.white_player?'White':'Black'} (model) thinking…`:'AI thinking…');
+    const eng=(S.current_player===S.white_player?S.white_engine:S.black_engine)||'';
+    const who=S.current_player===S.white_player?'White':'Black';
+    st.textContent=(S.mode==='watch'?`${who} (${eng}) thinking…`
+                                    :`AI thinking… (${eng})`);
   } else st.textContent=S.status;
 
   document.getElementById('thinkinfo').textContent=
@@ -953,11 +1237,12 @@ function render(){
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class Session:
-    def __init__(self, mode, human, sims, nets, device, snap_secs):
+    def __init__(self, mode, human, sims, nets, engines, device, snap_secs):
         self.mode = mode                    # 'play' | 'watch'
         self.human = human                  # player id in play mode, None in watch
         self.sims = sims                    # >0 fixed budget, 0 = manual/indefinite
         self.nets = nets
+        self.engines = engines              # player id -> 'hybrid' | 'alphazero'
         self.device = device
         self.snap_secs = snap_secs
         self.state = GAME.new_initial_state()
@@ -996,7 +1281,8 @@ class Session:
     def _think_loop(self):
         while self.engine_to_move():
             cur = self.state.current_player()
-            searcher = Searcher(self.nets[cur], self.state, self.device)
+            searcher = make_searcher(self.nets[cur], self.engines[cur],
+                                     self.state, self.device)
             with self.lock:
                 self.snapshots = []
                 self.searcher = searcher
@@ -1055,8 +1341,10 @@ class Session:
                 'human': self.human,
                 'white_player': WHITE_PLAYER,
                 'current_player': int(st.current_player()) if not st.is_terminal() else -1,
+                'white_engine': self.engines.get(WHITE_PLAYER, ''),
+                'black_engine': self.engines.get(1 - WHITE_PLAYER, ''),
                 'manual': self.sims == 0,
-                'thinking_sims': int(self.searcher.root.visits.sum()) if self.searcher else 0,
+                'thinking_sims': self.searcher.n_sims() if self.searcher else 0,
                 'snapshots': self.snapshots,
                 'move_log': self.move_log,
                 'fen_hist': self.fen_hist,
@@ -1068,6 +1356,7 @@ class Session:
 
 SESSIONS = {}
 NETS = {}
+ENGINES = {}            # player id -> 'hybrid' | 'alphazero'
 DEVICE_ARG = 'cpu'
 SNAP_SECS = 2.0
 
@@ -1117,7 +1406,8 @@ class Handler(BaseHTTPRequestHandler):
                 human = WHITE_PLAYER if color == 'white' else 1 - WHITE_PLAYER
             sims = max(0, int(req.get('sims', 400)))
             sid = uuid.uuid4().hex[:12]
-            SESSIONS[sid] = Session(mode, human, sims, NETS, DEVICE_ARG, SNAP_SECS)
+            SESSIONS[sid] = Session(mode, human, sims, NETS, ENGINES,
+                                    DEVICE_ARG, SNAP_SECS)
             self._json({'sid': sid})
         elif self.path == '/move':
             s = SESSIONS.get(req.get('sid', ''))
@@ -1138,17 +1428,28 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def load_model(path, device):
+    """Load a checkpoint and AUTO-DETECT the engine from its head weights:
+    `policy_out.*` ⇒ AlphaZero, `v_dist.*` ⇒ ThompsonHybrid. Returns
+    (net, engine-tag). channels/blocks are inferred from the trunk."""
     sd = torch.load(path, map_location='cpu', weights_only=True)
     if isinstance(sd, dict) and 'model' in sd and isinstance(sd['model'], dict):
         sd = sd['model']                      # latest.pt full checkpoint
     channels = sd['stem.0.weight'].shape[0]
     blocks = 1 + max(int(k.split('.')[1]) for k in sd if k.startswith('body.'))
-    net = ThompsonHybridChessNet(channels, blocks).to(device)
+    if 'policy_out.weight' in sd:
+        engine = 'alphazero'
+        net = AlphaZeroChessNet(channels, blocks).to(device)
+    elif 'v_dist.weight' in sd:
+        engine = 'hybrid'
+        net = ThompsonHybridChessNet(channels, blocks).to(device)
+    else:
+        raise ValueError(f'{path}: unrecognized checkpoint (no policy_out/v_dist '
+                         f'head — not an AlphaZero or ThompsonHybrid chess net)')
     net.load_state_dict(sd)
     net.eval()
-    print(f'Loaded {path}: {channels} channels x {blocks} blocks '
-          f'({sum(p.numel() for p in net.parameters()):,} params)')
-    return net
+    print(f'Loaded {path}: {engine} engine, {channels} channels x {blocks} '
+          f'blocks ({sum(p.numel() for p in net.parameters()):,} params)')
+    return net, engine
 
 
 def main():
@@ -1162,9 +1463,13 @@ def main():
     args = ap.parse_args()
     DEVICE_ARG = args.device
     SNAP_SECS = args.snapshot_secs
-    NETS[WHITE_PLAYER] = load_model(args.model, args.device)
-    NETS[1 - WHITE_PLAYER] = (load_model(args.model2, args.device)
-                              if args.model2 else NETS[WHITE_PLAYER])
+    NETS[WHITE_PLAYER], ENGINES[WHITE_PLAYER] = load_model(args.model, args.device)
+    if args.model2:
+        NETS[1 - WHITE_PLAYER], ENGINES[1 - WHITE_PLAYER] = load_model(
+            args.model2, args.device)
+    else:
+        NETS[1 - WHITE_PLAYER] = NETS[WHITE_PLAYER]
+        ENGINES[1 - WHITE_PLAYER] = ENGINES[WHITE_PLAYER]
     srv = ThreadingHTTPServer(('0.0.0.0', args.port), Handler)
     print(f'Serving on http://localhost:{args.port}')
     print(f'To share:  ngrok http {args.port}')
