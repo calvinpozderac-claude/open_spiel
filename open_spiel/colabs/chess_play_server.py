@@ -977,6 +977,7 @@ PAGE = r'''<!doctype html>
       user-select:none}
  .light{background:#b7c0cc}.dark{background:#6d7787}
  .sq.sel{outline:4px solid #ffd479;outline-offset:-4px}
+ .sq.hint{outline:3px dashed #46d17a;outline-offset:-3px}
  .sq.tgt::after{content:"";position:absolute;width:20px;height:20px;
       border-radius:50%;background:rgba(58,109,240,.55)}
  .wp{color:#f7f9fc;text-shadow:0 1px 2px #000,0 0 2px #000}
@@ -1029,6 +1030,12 @@ PAGE = r'''<!doctype html>
     <div id="status">…</div>
     <div class="stat" id="thinkinfo"></div>
     <button id="commitbtn" style="display:none" onclick="commitAI()">Make AI move now</button>
+    <div id="actionbtns" style="margin:6px 0">
+      <button class="kbtn" id="takebackbtn" style="display:none" onclick="takeback()">↩ Take back</button>
+      <button class="kbtn" id="analyzebtn" style="display:none" onclick="analyze()">🔍 What would the AI do?</button>
+      <button class="kbtn" id="stopanalyzebtn" style="display:none" onclick="stopAnalyze()">⏹ Stop analysis</button>
+      <button class="kbtn" id="playhintbtn" style="display:none" onclick="playHint()">▶ Play the AI&rsquo;s move</button>
+    </div>
     <div id="prefsbox">
       <label><input type="checkbox" id="prefs" checked> Show AI move preferences</label>
       <div id="sliderbox" style="display:none">
@@ -1108,6 +1115,10 @@ async function newGame(){
 }
 async function poll(){ if(!SID)return; S=await api('/state?sid='+SID); render(); }
 async function commitAI(){ await api('/ai_commit',{sid:SID}); }
+async function takeback(){ viewMove=null; sel=null; const r=await api('/takeback',{sid:SID}); if(!r.ok&&r.error) alert(r.error); poll(); }
+async function analyze(){ viewMove=null; await api('/analyze',{sid:SID}); poll(); }
+async function stopAnalyze(){ await api('/stop_analyze',{sid:SID}); poll(); }
+async function playHint(){ const r=await api('/play_hint',{sid:SID}); if(!r.ok&&r.error) alert(r.error); poll(); }
 
 async function clickSq(r,c){
   if(!S||S.status!=='human_turn'||viewMove!==null) return;
@@ -1150,13 +1161,19 @@ function render(){
   const fen=hist.length?hist[showIdx]:S.fen;
   const pm=pieceMap(fen);
   const showPrefs=document.getElementById('prefs').checked;
-  const liveThink=live && S.status==='thinking';
+  const liveThink=live && (S.status==='thinking'||S.status==='analyzing');
+  // Show preferences when the checkbox is on, OR whenever an analysis is
+  // running / a fresh AI suggestion is available for the live position.
+  const prefsOn=showPrefs || S.status==='analyzing' || (live && !!S.hint);
 
-  // preference source (live growing snapshots, or saved analysis of that move)
+  // preference source (live growing snapshots, the AI suggestion, or the saved
+  // analysis of the move that was played from the viewed position)
   let sn=null, snInfo='';
-  if(showPrefs){
+  if(prefsOn){
     if(liveThink){ const c=snapNow(); if(c) sn=c.snap; }
-    else{
+    else if(live && S.hint && showIdx===last){
+      sn=S.hint; snInfo=`AI suggestion (${S.hint_uci||'?'}) — ${S.hint.sims} sims`;
+    } else{
       const a=(S.analysis_hist||[])[showIdx];
       if(a){ sn=a; snInfo=`saved analysis of move ${showIdx} — ${a.sims} sims`; }
       else if(showIdx>0 && showIdx<=(S.move_log||[]).length) snInfo='(that move was yours)';
@@ -1165,6 +1182,9 @@ function render(){
   const ov={};
   if(sn){ for(const [u,p] of Object.entries(sn.probs)){
       const t=u.slice(2,4); if(!(t in ov)||p>ov[t]) ov[t]=p; } }
+  // Highlight the AI's suggested move (from+to) once analysis is done.
+  const hintSq=(live && !liveThink && S.hint_uci)
+      ? [S.hint_uci.slice(0,2), S.hint_uci.slice(2,4)] : [];
 
   const board=document.getElementById('board'); board.innerHTML='';
   for(let r=0;r<8;r++) for(let c=0;c<8;c++){
@@ -1172,6 +1192,7 @@ function render(){
     const d=document.createElement('div');
     d.className='sq '+(((r+c)&1)?'dark':'light');
     if(sel===sq) d.classList.add('sel');
+    if(hintSq.includes(sq)) d.classList.add('hint');
     if(sel && Object.keys(S.legal).some(u=>u.slice(0,4)===sel+sq)) d.classList.add('tgt');
     const pc=pm[sq];
     if(pc){ const sp=document.createElement('span');
@@ -1193,7 +1214,11 @@ function render(){
   if(S.terminal){
     const w=S.returns[S.white_player];
     st.textContent = w>0?'🏆 White wins (checkmate)':w<0?'🏆 Black wins (checkmate)':'½–½ Draw';
-  } else if(S.status==='human_turn'){ st.textContent='Your move';
+  } else if(S.status==='human_turn'){
+    st.textContent = S.hint ? 'Your move — AI suggestion shown' : 'Your move';
+  } else if(S.status==='analyzing'){
+    const eng=(S.current_player===S.white_player?S.white_engine:S.black_engine)||'';
+    st.textContent=`Analyzing your position… (${eng})`;
   } else if(S.status==='thinking'){
     const eng=(S.current_player===S.white_player?S.white_engine:S.black_engine)||'';
     const who=S.current_player===S.white_player?'White':'Black';
@@ -1202,12 +1227,17 @@ function render(){
   } else st.textContent=S.status;
 
   document.getElementById('thinkinfo').textContent=
-    S.status==='thinking'?`simulations so far: ${S.thinking_sims}`:'';
+    (S.status==='thinking'||S.status==='analyzing')?`simulations so far: ${S.thinking_sims}`:'';
   document.getElementById('commitbtn').style.display=
     (S.status==='thinking' && S.manual)?'inline-block':'none';
+  const showBtn=(id,on)=>document.getElementById(id).style.display=on?'inline-block':'none';
+  showBtn('takebackbtn', live && !S.terminal && S.can_takeback);
+  showBtn('analyzebtn', live && !S.terminal && S.status==='human_turn' && !S.analyzing);
+  showBtn('stopanalyzebtn', S.status==='analyzing');
+  showBtn('playhintbtn', live && !S.terminal && S.status==='human_turn' && !!S.hint_uci);
 
   const box=document.getElementById('sliderbox'), ev=document.getElementById('evalline');
-  if(liveThink && showPrefs && S.snapshots.length>0){
+  if(liveThink && prefsOn && S.snapshots.length>0){
     box.style.display='block';
     const sl=document.getElementById('simslider'); sl.max=S.snapshots.length-1;
     if(sliderStick) sl.value=sl.max;
@@ -1250,10 +1280,17 @@ class Session:
         self.move_log = []
         self.analysis_hist = [None]         # per position: AI snapshot or None
         self.fen_hist = []
+        self.actions = []                   # applied action ints (for take-back)
+        self.movers = []                    # player who made each ply
         self._snap_board()
         self.status = 'init'
         self.searcher = None
-        self.stop_evt = threading.Event()
+        self.stop_evt = threading.Event()   # interrupt search -> AI commits best
+        self.abort_evt = threading.Event()  # interrupt search -> DON'T commit
+        self.analyze_stop = threading.Event()
+        self.analyzing = False
+        self.hint = None                    # analysis of the current human position
+        self.hint_action = None
         self.lock = threading.RLock()
         self.thread = None
         self.kick()
@@ -1289,12 +1326,17 @@ class Session:
                 self.status = 'thinking'
             searcher.run(max_sims=(self.sims or None), stop_evt=self.stop_evt,
                          snap_cb=self._snap, snap_secs=self.snap_secs)
+            if self.abort_evt.is_set():          # take-back aborted the search
+                with self.lock:
+                    self.searcher = None
+                return
             self._snap(searcher)
             with self.lock:
                 action = searcher.best()
                 self.analysis_hist.append(searcher.snapshot())
                 self.move_log.append(self.state.action_to_string(cur, action))
                 self.state.apply_action(action)
+                self.actions.append(int(action)); self.movers.append(cur)
                 self._snap_board()
                 self.stop_evt.clear()
                 self.searcher = None
@@ -1309,7 +1351,7 @@ class Session:
             if not self.snapshots or snap['sims'] > self.snapshots[-1]['sims']:
                 self.snapshots.append(snap)
 
-    def human_move(self, uci):
+    def human_move(self, uci, analysis=None):
         with self.lock:
             if self.status != 'human_turn':
                 return False, 'not your turn'
@@ -1317,16 +1359,105 @@ class Session:
             if uci not in amap:
                 return False, 'illegal move'
             action = amap[uci]
-            self.analysis_hist.append(None)
-            self.move_log.append(
-                self.state.action_to_string(self.state.current_player(), action))
+            mover = self.state.current_player()
+            self.analysis_hist.append(analysis)   # None, or the played hint
+            self.move_log.append(self.state.action_to_string(mover, action))
             self.state.apply_action(action)
+            self.actions.append(int(action)); self.movers.append(mover)
             self._snap_board()
+            self.hint = None; self.hint_action = None
+            self.snapshots = []
         self.kick()
         return True, ''
 
     def commit_ai(self):
         self.stop_evt.set()
+
+    # ── Take-back ────────────────────────────────────────────────────────────
+    def take_back(self):
+        """Undo back to the human's previous decision point (their last move +
+        any AI reply). Works whether it's the human's turn or the AI is still
+        thinking (the search is aborted WITHOUT committing)."""
+        if self.human is None:
+            return False, 'take-back is only available in play mode'
+        with self.lock:
+            idxs = [i for i, m in enumerate(self.movers) if m == self.human]
+            if not idxs:
+                return False, 'no moves to take back'
+        self.abort_evt.set(); self.stop_evt.set(); self.analyze_stop.set()
+        th = self.thread
+        if th is not None and th.is_alive():
+            th.join(timeout=5.0)
+        with self.lock:
+            i = [j for j, m in enumerate(self.movers) if m == self.human][-1]
+            del self.actions[i:]; del self.movers[i:]
+            del self.move_log[i:]; del self.analysis_hist[i + 1:]  # [0]=start
+            del self.fen_hist[i + 1:]
+            st = GAME.new_initial_state()
+            for a in self.actions:
+                st.apply_action(int(a))
+            self.state = st
+            self.snapshots = []; self.searcher = None
+            self.hint = None; self.hint_action = None; self.analyzing = False
+            self.abort_evt.clear(); self.stop_evt.clear(); self.analyze_stop.clear()
+            self.status = 'human_turn'
+        return True, ''
+
+    # ── Analyze the current (human) position without committing a move ────────
+    def analyze(self):
+        with self.lock:
+            if self.status != 'human_turn' or self.state.is_terminal():
+                return False, 'can only analyze on your turn'
+            if self.analyzing:
+                return True, ''
+            self.analyzing = True
+            self.analyze_stop.clear()
+            self.snapshots = []
+            self.hint = None; self.hint_action = None
+            self.status = 'analyzing'
+            cur = self.state.current_player()
+            net, eng, st = self.nets[cur], self.engines[cur], self.state.clone()
+        self.thread = threading.Thread(target=self._analyze_loop,
+                                       args=(net, eng, st), daemon=True)
+        self.thread.start()
+        return True, ''
+
+    def _analyze_loop(self, net, eng, st):
+        searcher = make_searcher(net, eng, st, self.device)
+        with self.lock:
+            self.searcher = searcher
+        # Manual (sims==0) analysis runs until the human stops it; else a fixed
+        # budget (a bit deeper than a normal move so the hint is worth showing).
+        budget = self.sims if self.sims else None
+        searcher.run(max_sims=budget, stop_evt=self.analyze_stop,
+                     snap_cb=self._snap, snap_secs=self.snap_secs)
+        self._snap(searcher)
+        with self.lock:
+            snap = searcher.snapshot()
+            self.hint = snap
+            self.hint_action = searcher.best()
+            self.searcher = None
+            self.analyzing = False
+            if self.status == 'analyzing':
+                self.status = 'human_turn'
+
+    def stop_analyze(self):
+        self.analyze_stop.set()
+        return True, ''
+
+    def play_hint(self):
+        """Commit the AI's suggested move (from the last analysis) as your own."""
+        with self.lock:
+            if self.hint_action is None or self.status != 'human_turn':
+                return False, 'no suggestion to play'
+            uci = self.uci_of(self.hint_action)
+            analysis = self.hint
+        if uci is None:
+            return False, 'suggestion unavailable'
+        return self.human_move(uci, analysis=analysis)
+
+    def uci_of(self, action):
+        return _action_uci(self.state, int(action))
 
     def to_json(self):
         with self.lock:
@@ -1349,6 +1480,12 @@ class Session:
                 'move_log': self.move_log,
                 'fen_hist': self.fen_hist,
                 'analysis_hist': self.analysis_hist,
+                'analyzing': self.analyzing,
+                'can_takeback': self.human is not None and self.human in self.movers,
+                'hint': self.hint,
+                'hint_uci': (_action_uci(st, int(self.hint_action))
+                             if self.hint_action is not None and not st.is_terminal()
+                             else None),
                 'terminal': st.is_terminal(),
                 'returns': st.returns() if st.is_terminal() else None,
             }
@@ -1416,13 +1553,22 @@ class Handler(BaseHTTPRequestHandler):
                 return
             ok, msg = s.human_move(str(req.get('uci', '')))
             self._json({'ok': ok, 'error': msg})
-        elif self.path == '/ai_commit':
+        elif self.path in ('/ai_commit', '/takeback', '/analyze',
+                           '/stop_analyze', '/play_hint'):
             s = SESSIONS.get(req.get('sid', ''))
             if s is None:
                 self._json({'error': 'no such session'}, 404)
                 return
-            s.commit_ai()
-            self._json({'ok': True})
+            if self.path == '/ai_commit':
+                s.commit_ai(); self._json({'ok': True})
+            elif self.path == '/takeback':
+                ok, msg = s.take_back(); self._json({'ok': ok, 'error': msg})
+            elif self.path == '/analyze':
+                ok, msg = s.analyze(); self._json({'ok': ok, 'error': msg})
+            elif self.path == '/stop_analyze':
+                ok, msg = s.stop_analyze(); self._json({'ok': ok, 'error': msg})
+            else:  # /play_hint
+                ok, msg = s.play_hint(); self._json({'ok': ok, 'error': msg})
         else:
             self._json({'error': 'not found'}, 404)
 

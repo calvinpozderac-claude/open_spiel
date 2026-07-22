@@ -483,7 +483,7 @@ class BoopNet(nn.Module):
 
 
 
-PAGE = '<!doctype html>\n<meta charset="utf-8">\n<title>Boop — play the model</title>\n<style>\n body{font-family:system-ui,sans-serif;background:#1c1e22;color:#eee;margin:0;\n      display:flex;flex-wrap:wrap;gap:24px;padding:24px;justify-content:center}\n h1{font-size:20px;margin:0 0 12px}\n #setup{background:#26292f;padding:24px;border-radius:12px;max-width:420px}\n #setup label{display:block;margin:10px 0 4px;color:#aab}\n #setup .row{margin-bottom:6px}\n select,input[type=number]{background:#15171a;color:#eee;border:1px solid #444;\n      border-radius:6px;padding:6px 8px}\n button{background:#3a6df0;color:#fff;border:0;border-radius:8px;\n      padding:8px 14px;cursor:pointer;font-size:14px}\n button:disabled{background:#444;cursor:default}\n #game{display:none;gap:24px;flex-wrap:wrap;justify-content:center}\n #board{display:grid;grid-template-columns:repeat(6,64px);gap:4px}\n .cell{width:64px;height:64px;background:#2e3138;border-radius:8px;position:relative;\n      display:flex;align-items:center;justify-content:center;font-size:30px;\n      cursor:pointer;user-select:none}\n .cell:hover{outline:2px solid #3a6df0}\n .pc{display:flex;align-items:center;justify-content:center;\n     filter:drop-shadow(0 2px 3px rgba(0,0,0,.45))}\n .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;\n     vertical-align:middle}\n .d0{background:#ff9d2e}.d1{background:#9aa2ad}\n .ov{position:absolute;inset:0;border-radius:8px;pointer-events:none;\n     display:flex;align-items:flex-end;justify-content:flex-end}\n .ov span{font-size:11px;color:#fff;background:rgba(0,0,0,.55);\n     border-radius:4px;padding:0 3px;margin:2px}\n #side{max-width:360px;background:#26292f;padding:18px;border-radius:12px}\n #side .stat{margin:6px 0;color:#ccd}\n #status{font-weight:600;color:#ffd479;margin:8px 0}\n #prefsbox{margin-top:12px;border-top:1px solid #3a3d44;padding-top:10px}\n #simslider{width:100%}\n .pill{display:inline-block;background:#15171a;border-radius:6px;\n      padding:2px 8px;margin:2px;color:#9fb}\n #movelog{max-height:140px;overflow-y:auto;font-size:12px;color:#889;margin-top:8px}\n .kbtn{background:#2e3138;border:1px solid #555;margin-right:6px}\n .kbtn.sel{background:#3a6df0;border-color:#3a6df0}\n .mv{cursor:pointer}\n .mv:hover{color:#fff}\n .mv.cur{color:#ffd479;font-weight:600}\n #navlabel{color:#9ab;font-size:12px;margin-left:6px}\n</style>\n\n<div id="setup">\n  <h1>🐱 Boop — play the model</h1>\n  <div class="row"><label>Mode</label>\n    <select id="mode">\n      <option value="play">Play against the model</option>\n      <option value="watch">Watch model vs model</option>\n    </select></div>\n  <div class="row" id="siderow"><label>Your side</label>\n    <select id="human">\n      <option value="0">First player (orange)</option>\n      <option value="1">Second player (grey)</option>\n    </select></div>\n  <div class="row"><label>AI thinking per move</label>\n    <select id="thinkmode">\n      <option value="fixed">Fixed number of MCTS simulations</option>\n      <option value="manual">Think until I click “Make AI move”</option>\n    </select></div>\n  <div class="row" id="simsrow"><label>Simulations per move</label>\n    <input type="number" id="sims" value="200" min="1" max="100000"></div>\n  <div class="row" style="margin-top:14px">\n    <button onclick="newGame()">Start game</button></div>\n</div>\n\n<div id="game">\n  <div>\n    <div id="board"></div>\n    <div style="margin-top:10px" id="piecepick">\n      <button class="kbtn sel" id="pickk" onclick="pick(\'k\')">Place kitten</button>\n      <button class="kbtn" id="pickc" onclick="pick(\'c\')">Place cat</button>\n    </div>\n  </div>\n  <div id="side">\n    <div id="status">…</div>\n    <div class="stat" id="hands"></div>\n    <div class="stat" id="thinkinfo"></div>\n    <button id="commitbtn" style="display:none" onclick="commitAI()">Make AI move now</button>\n    <div id="prefsbox">\n      <label><input type="checkbox" id="prefs"> Show AI move preferences</label>\n      <div id="sliderbox" style="display:none">\n        <input type="range" id="simslider" min="0" max="0" value="0">\n        <div class="stat" id="sliderlabel"></div>\n      </div>\n      <div class="stat" id="evalline"></div>\n    </div>\n    <div class="stat" style="margin-top:10px">\n      <button class="kbtn" onclick="nav(-1e9)">⏮</button>\n      <button class="kbtn" onclick="nav(-1)">◀</button>\n      <button class="kbtn" onclick="nav(1)">▶</button>\n      <button class="kbtn" onclick="nav(1e9)">live ⏭</button>\n      <span id="navlabel"></span>\n    </div>\n    <div id="movelog"></div>\n    <div style="margin-top:12px"><button class="kbtn" onclick="location.reload()">New game</button></div>\n  </div>\n</div>\n\n<script>\nlet SID=null, S=null, piece=\'k\', sliderStick=true, viewMove=null;\n\nfunction nav(d){\n  if(!S || !S.board_hist) return;\n  const last = S.board_hist.length-1;\n  let cur = viewMove===null ? last : viewMove;\n  cur = Math.max(0, Math.min(last, cur+d));\n  viewMove = (cur >= last) ? null : cur;   // at the end = follow live\n  render();\n}\nfunction viewAt(i){\n  if(!S || !S.board_hist) return;\n  viewMove = (i >= S.board_hist.length-1) ? null : i;\n  render();\n}\n\nfunction pieceSVG(isP0, isCat){\n  // kitten: small head, rounded ears; cat: bigger head, tall ears + whiskers\n  const col = isP0 ? \'#ff9d2e\' : \'#9aa2ad\';\n  const sz  = isCat ? 54 : 38;\n  const earL = isCat ? \'22,40 10,2 46,24\' : \'25,44 19,16 47,29\';\n  const earR = isCat ? \'78,40 90,2 54,24\' : \'75,44 81,16 53,29\';\n  const whisk = isCat ? `\n    <g stroke="#fff" stroke-width="3" opacity=".8">\n      <line x1="7"  y1="60" x2="33" y2="63"/><line x1="7"  y1="73" x2="33" y2="69"/>\n      <line x1="93" y1="60" x2="67" y2="63"/><line x1="93" y1="73" x2="67" y2="69"/>\n    </g>` : \'\';\n  return `<svg viewBox="0 0 100 100" width="${sz}" height="${sz}">\n    <polygon points="${earL}" fill="${col}"/>\n    <polygon points="${earR}" fill="${col}"/>\n    <circle cx="50" cy="62" r="34" fill="${col}"/>\n    <circle cx="38" cy="56" r="4.5" fill="#1c1e22"/>\n    <circle cx="62" cy="56" r="4.5" fill="#1c1e22"/>\n    <polygon points="50,67 45,73 55,73" fill="#1c1e22"/>\n    ${whisk}\n  </svg>`;\n}\n\nfunction pick(p){piece=p; render();}\ndocument.getElementById(\'mode\').onchange = e => {\n  document.getElementById(\'siderow\').style.display =\n    e.target.value===\'play\' ? \'block\':\'none\';\n};\ndocument.getElementById(\'thinkmode\').onchange = e => {\n  document.getElementById(\'simsrow\').style.display =\n    e.target.value===\'fixed\' ? \'block\':\'none\';\n};\ndocument.getElementById(\'simslider\').oninput = e => {\n  sliderStick = (+e.target.value === +e.target.max); render();\n};\n\nasync function api(path, body){\n  const r = await fetch(path, body?{method:\'POST\',body:JSON.stringify(body)}:{});\n  return r.json();\n}\n\nasync function newGame(){\n  const mode = document.getElementById(\'mode\').value;\n  const sims = document.getElementById(\'thinkmode\').value===\'fixed\'\n             ? +document.getElementById(\'sims\').value : 0;\n  const r = await api(\'/new\', {mode, sims,\n      human:+document.getElementById(\'human\').value});\n  SID = r.sid;\n  document.getElementById(\'setup\').style.display=\'none\';\n  document.getElementById(\'game\').style.display=\'flex\';\n  poll();\n  setInterval(poll, 1000);\n}\n\nasync function poll(){\n  if(!SID) return;\n  S = await api(\'/state?sid=\'+SID);\n  render();\n}\n\nasync function commitAI(){ await api(\'/ai_commit\',{sid:SID}); }\n\nasync function clickCell(idx){\n  if(!S || S.status!==\'human_turn\' || viewMove!==null) return;\n  const grads = S.legal.filter(a=>a>=72);\n  let action;\n  if(grads.length){ action = 72+idx; }\n  else{ action = (piece===\'c\'?36:0)+idx; }\n  if(!S.legal.includes(action)){\n    // fall back to whichever piece IS legal on this cell\n    const alt = (piece===\'c\'?0:36)+idx;\n    if(S.legal.includes(alt)) action = alt; else return;\n  }\n  const r = await api(\'/move\',{sid:SID, action});\n  if(r.ok) poll();\n}\n\nfunction snapNow(){\n  if(!S || !S.snapshots.length) return null;\n  const sl = document.getElementById(\'simslider\');\n  const idx = sliderStick ? S.snapshots.length-1\n                          : Math.min(+sl.value, S.snapshots.length-1);\n  return {snap:S.snapshots[idx], idx};\n}\n\nfunction render(){\n  if(!S) return;\n  const board  = document.getElementById(\'board\');\n  const hist = S.board_hist || [];\n  const lastIdx = Math.max(0, hist.length-1);\n  const showIdx = viewMove===null ? lastIdx : Math.min(viewMove, lastIdx);\n  const live = viewMove===null;\n  const shown = hist.length ? hist[showIdx] : {board:S.board, hands:S.hands};\n  const showPrefs = document.getElementById(\'prefs\').checked;\n  const liveThink = live && S.status===\'thinking\';\n  // Preference source: while the AI thinks on the live position, use the\n  // growing snapshot list (slider-scrubbable); on any other position show\n  // the SAVED analysis of the move that was played from that position.\n  let sn=null, snInfo=\'\';\n  if(showPrefs){\n    if(liveThink){\n      const c=snapNow(); if(c) sn=c.snap;\n    } else {\n      const a=(S.analysis_hist||[])[showIdx];\n      if(a){ sn=a; snInfo=`saved analysis of move ${showIdx+1} — ${a.sims} sims`; }\n      else if(showIdx < (S.move_log||[]).length)\n        snInfo=\'(that move was yours — no AI analysis)\';\n    }\n  }\n\n  // per-cell best preference from the selected snapshot\n  const ov = {};\n  if(sn){\n    for(const [a,p] of Object.entries(sn.probs)){\n      const ai=+a, cell = ai>=72 ? ai-72 : ai%36;\n      const kind = ai>=72 ? \'G\' : (ai>=36 ? \'C\' : \'k\');\n      if(!(cell in ov) || p>ov[cell].p) ov[cell]={p, kind};\n    }\n  }\n  board.innerHTML=\'\';\n  for(let i=0;i<36;i++){\n    const v=shown.board[i];\n    const d=document.createElement(\'div\');\n    d.className=\'cell\';\n    if(v){\n      const pc=document.createElement(\'div\');\n      pc.className=\'pc\';\n      pc.innerHTML=pieceSVG(v===1||v===2, v===2||v===4);\n      d.appendChild(pc);\n    }\n    d.onclick=()=>clickCell(i);\n    if(ov[i]){\n      const o=document.createElement(\'div\'); o.className=\'ov\';\n      o.style.background=`rgba(58,109,240,${Math.min(.65,ov[i].p*1.3)})`;\n      o.innerHTML=`<span>${ov[i].kind} ${(ov[i].p*100).toFixed(0)}%</span>`;\n      d.appendChild(o);\n    }\n    board.appendChild(d);\n  }\n\n  const st=document.getElementById(\'status\');\n  if(S.terminal){\n    const r=S.returns;\n    st.textContent = r[0]>0?\'🏆 First player (orange) wins!\'\n                   : r[1]>0?\'🏆 Second player (grey) wins!\':\'Draw\';\n  } else if(S.status===\'human_turn\'){\n    const grads = S.legal.filter(a=>a>=72);\n    st.textContent = grads.length\n      ? \'Your turn — pool empty: click one of your kittens to graduate it\'\n      : \'Your turn\';\n  } else if(S.status===\'thinking\'){\n    st.textContent = (S.mode===\'watch\'?`Model ${S.current_player===0?\'A\':\'B\'} thinking…`\n                                       :\'AI thinking…\');\n  } else st.textContent = S.status;\n\n  document.getElementById(\'hands\').innerHTML =\n    `<span class="pill"><span class="dot d0"></span>pool: ${shown.hands[0][0]} kittens, ${shown.hands[0][1]} cats</span>`+\n    `<span class="pill"><span class="dot d1"></span>pool: ${shown.hands[1][0]} kittens, ${shown.hands[1][1]} cats</span>`;\n  document.getElementById(\'thinkinfo\').textContent =\n    S.status===\'thinking\' ? `simulations so far: ${S.thinking_sims}` : \'\';\n  document.getElementById(\'commitbtn\').style.display =\n    (S.status===\'thinking\' && S.manual) ? \'inline-block\':\'none\';\n\n  // kitten/cat picker enable state on human turns\n  const canK = S.legal.some(a=>a<36), canC = S.legal.some(a=>a>=36&&a<72);\n  document.getElementById(\'pickk\').disabled=!canK;\n  document.getElementById(\'pickc\').disabled=!canC;\n  if(piece===\'k\'&&!canK&&canC) piece=\'c\';\n  if(piece===\'c\'&&!canC&&canK) piece=\'k\';\n  document.getElementById(\'pickk\').classList.toggle(\'sel\',piece===\'k\');\n  document.getElementById(\'pickc\').classList.toggle(\'sel\',piece===\'c\');\n\n  // snapshot slider (live thinking) / saved-analysis line (history)\n  const box=document.getElementById(\'sliderbox\');\n  const ev=document.getElementById(\'evalline\');\n  if(liveThink && showPrefs && S.snapshots.length>0){\n    box.style.display=\'block\';\n    const sl=document.getElementById(\'simslider\');\n    sl.max = S.snapshots.length-1;\n    if(sliderStick) sl.value = sl.max;\n    const cur=snapNow();\n    document.getElementById(\'sliderlabel\').textContent =\n      `preferences after ${cur.snap.sims} simulations `+\n      `(snapshot ${(+cur.idx)+1}/${S.snapshots.length})`;\n    ev.textContent =\n      `AI eval (side to move): ${cur.snap.value>0?\'+\':\'\'}${cur.snap.value}`;\n  } else {\n    box.style.display=\'none\';\n    ev.textContent = sn && !liveThink\n      ? `${snInfo} · eval (side to move): ${sn.value>0?\'+\':\'\'}${sn.value}`\n      : snInfo;\n  }\n\n  document.getElementById(\'navlabel\').textContent = live\n    ? `live (after move ${lastIdx})`\n    : `viewing after move ${showIdx} of ${lastIdx} — “live ⏭” to return`;\n  document.getElementById(\'movelog\').innerHTML =\n    S.move_log.map((m,i)=>\n      `<span class="mv ${(!live && showIdx===i+1)?\'cur\':\'\'}" `+\n      `onclick="viewAt(${i+1})">${i+1}. ${m}</span>`).join(\'<br>\');\n}\n</script>\n'
+PAGE = '<!doctype html>\n<meta charset="utf-8">\n<title>Boop — play the model</title>\n<style>\n body{font-family:system-ui,sans-serif;background:#1c1e22;color:#eee;margin:0;\n      display:flex;flex-wrap:wrap;gap:24px;padding:24px;justify-content:center}\n h1{font-size:20px;margin:0 0 12px}\n #setup{background:#26292f;padding:24px;border-radius:12px;max-width:420px}\n #setup label{display:block;margin:10px 0 4px;color:#aab}\n #setup .row{margin-bottom:6px}\n select,input[type=number]{background:#15171a;color:#eee;border:1px solid #444;\n      border-radius:6px;padding:6px 8px}\n button{background:#3a6df0;color:#fff;border:0;border-radius:8px;\n      padding:8px 14px;cursor:pointer;font-size:14px}\n button:disabled{background:#444;cursor:default}\n #game{display:none;gap:24px;flex-wrap:wrap;justify-content:center}\n #board{display:grid;grid-template-columns:repeat(6,64px);gap:4px}\n .cell{width:64px;height:64px;background:#2e3138;border-radius:8px;position:relative;\n      display:flex;align-items:center;justify-content:center;font-size:30px;\n      cursor:pointer;user-select:none}\n .cell:hover{outline:2px solid #3a6df0}\n .pc{display:flex;align-items:center;justify-content:center;\n     filter:drop-shadow(0 2px 3px rgba(0,0,0,.45))}\n .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;\n     vertical-align:middle}\n .d0{background:#ff9d2e}.d1{background:#9aa2ad}\n .ov{position:absolute;inset:0;border-radius:8px;pointer-events:none;\n     display:flex;align-items:flex-end;justify-content:flex-end}\n .ov span{font-size:11px;color:#fff;background:rgba(0,0,0,.55);\n     border-radius:4px;padding:0 3px;margin:2px}\n #side{max-width:360px;background:#26292f;padding:18px;border-radius:12px}\n #side .stat{margin:6px 0;color:#ccd}\n #status{font-weight:600;color:#ffd479;margin:8px 0}\n #prefsbox{margin-top:12px;border-top:1px solid #3a3d44;padding-top:10px}\n #simslider{width:100%}\n .pill{display:inline-block;background:#15171a;border-radius:6px;\n      padding:2px 8px;margin:2px;color:#9fb}\n #movelog{max-height:140px;overflow-y:auto;font-size:12px;color:#889;margin-top:8px}\n .kbtn{background:#2e3138;border:1px solid #555;margin-right:6px}\n .kbtn.sel{background:#3a6df0;border-color:#3a6df0}\n .mv{cursor:pointer}\n .mv:hover{color:#fff}\n .mv.cur{color:#ffd479;font-weight:600}\n #navlabel{color:#9ab;font-size:12px;margin-left:6px}\n</style>\n\n<div id="setup">\n  <h1>🐱 Boop — play the model</h1>\n  <div class="row"><label>Mode</label>\n    <select id="mode">\n      <option value="play">Play against the model</option>\n      <option value="watch">Watch model vs model</option>\n    </select></div>\n  <div class="row" id="siderow"><label>Your side</label>\n    <select id="human">\n      <option value="0">First player (orange)</option>\n      <option value="1">Second player (grey)</option>\n    </select></div>\n  <div class="row"><label>AI thinking per move</label>\n    <select id="thinkmode">\n      <option value="fixed">Fixed number of MCTS simulations</option>\n      <option value="manual">Think until I click “Make AI move”</option>\n    </select></div>\n  <div class="row" id="simsrow"><label>Simulations per move</label>\n    <input type="number" id="sims" value="200" min="1" max="100000"></div>\n  <div class="row" style="margin-top:14px">\n    <button onclick="newGame()">Start game</button></div>\n</div>\n\n<div id="game">\n  <div>\n    <div id="board"></div>\n    <div style="margin-top:10px" id="piecepick">\n      <button class="kbtn sel" id="pickk" onclick="pick(\'k\')">Place kitten</button>\n      <button class="kbtn" id="pickc" onclick="pick(\'c\')">Place cat</button>\n    </div>\n  </div>\n  <div id="side">\n    <div id="status">…</div>\n    <div class="stat" id="hands"></div>\n    <div class="stat" id="thinkinfo"></div>\n    <button id="commitbtn" style="display:none" onclick="commitAI()">Make AI move now</button>\n    <div id="actionbtns" style="margin:6px 0">\n      <button class="kbtn" id="takebackbtn" style="display:none" onclick="takeback()">↩ Take back</button>\n      <button class="kbtn" id="analyzebtn" style="display:none" onclick="analyze()">🔍 What would the AI do?</button>\n      <button class="kbtn" id="stopanalyzebtn" style="display:none" onclick="stopAnalyze()">⏹ Stop analysis</button>\n      <button class="kbtn" id="playhintbtn" style="display:none" onclick="playHint()">▶ Play the AI&rsquo;s move</button>\n    </div>\n    <div id="prefsbox">\n      <label><input type="checkbox" id="prefs"> Show AI move preferences</label>\n      <div id="sliderbox" style="display:none">\n        <input type="range" id="simslider" min="0" max="0" value="0">\n        <div class="stat" id="sliderlabel"></div>\n      </div>\n      <div class="stat" id="evalline"></div>\n    </div>\n    <div class="stat" style="margin-top:10px">\n      <button class="kbtn" onclick="nav(-1e9)">⏮</button>\n      <button class="kbtn" onclick="nav(-1)">◀</button>\n      <button class="kbtn" onclick="nav(1)">▶</button>\n      <button class="kbtn" onclick="nav(1e9)">live ⏭</button>\n      <span id="navlabel"></span>\n    </div>\n    <div id="movelog"></div>\n    <div style="margin-top:12px"><button class="kbtn" onclick="location.reload()">New game</button></div>\n  </div>\n</div>\n\n<script>\nlet SID=null, S=null, piece=\'k\', sliderStick=true, viewMove=null;\n\nfunction nav(d){\n  if(!S || !S.board_hist) return;\n  const last = S.board_hist.length-1;\n  let cur = viewMove===null ? last : viewMove;\n  cur = Math.max(0, Math.min(last, cur+d));\n  viewMove = (cur >= last) ? null : cur;   // at the end = follow live\n  render();\n}\nfunction viewAt(i){\n  if(!S || !S.board_hist) return;\n  viewMove = (i >= S.board_hist.length-1) ? null : i;\n  render();\n}\n\nfunction pieceSVG(isP0, isCat){\n  // kitten: small head, rounded ears; cat: bigger head, tall ears + whiskers\n  const col = isP0 ? \'#ff9d2e\' : \'#9aa2ad\';\n  const sz  = isCat ? 54 : 38;\n  const earL = isCat ? \'22,40 10,2 46,24\' : \'25,44 19,16 47,29\';\n  const earR = isCat ? \'78,40 90,2 54,24\' : \'75,44 81,16 53,29\';\n  const whisk = isCat ? `\n    <g stroke="#fff" stroke-width="3" opacity=".8">\n      <line x1="7"  y1="60" x2="33" y2="63"/><line x1="7"  y1="73" x2="33" y2="69"/>\n      <line x1="93" y1="60" x2="67" y2="63"/><line x1="93" y1="73" x2="67" y2="69"/>\n    </g>` : \'\';\n  return `<svg viewBox="0 0 100 100" width="${sz}" height="${sz}">\n    <polygon points="${earL}" fill="${col}"/>\n    <polygon points="${earR}" fill="${col}"/>\n    <circle cx="50" cy="62" r="34" fill="${col}"/>\n    <circle cx="38" cy="56" r="4.5" fill="#1c1e22"/>\n    <circle cx="62" cy="56" r="4.5" fill="#1c1e22"/>\n    <polygon points="50,67 45,73 55,73" fill="#1c1e22"/>\n    ${whisk}\n  </svg>`;\n}\n\nfunction pick(p){piece=p; render();}\ndocument.getElementById(\'mode\').onchange = e => {\n  document.getElementById(\'siderow\').style.display =\n    e.target.value===\'play\' ? \'block\':\'none\';\n};\ndocument.getElementById(\'thinkmode\').onchange = e => {\n  document.getElementById(\'simsrow\').style.display =\n    e.target.value===\'fixed\' ? \'block\':\'none\';\n};\ndocument.getElementById(\'simslider\').oninput = e => {\n  sliderStick = (+e.target.value === +e.target.max); render();\n};\n\nasync function api(path, body){\n  const r = await fetch(path, body?{method:\'POST\',body:JSON.stringify(body)}:{});\n  return r.json();\n}\n\nasync function newGame(){\n  const mode = document.getElementById(\'mode\').value;\n  const sims = document.getElementById(\'thinkmode\').value===\'fixed\'\n             ? +document.getElementById(\'sims\').value : 0;\n  const r = await api(\'/new\', {mode, sims,\n      human:+document.getElementById(\'human\').value});\n  SID = r.sid;\n  document.getElementById(\'setup\').style.display=\'none\';\n  document.getElementById(\'game\').style.display=\'flex\';\n  poll();\n  setInterval(poll, 1000);\n}\n\nasync function poll(){\n  if(!SID) return;\n  S = await api(\'/state?sid=\'+SID);\n  render();\n}\n\nasync function commitAI(){ await api(\'/ai_commit\',{sid:SID}); }\nasync function takeback(){ viewMove=null; const r=await api(\'/takeback\',{sid:SID}); if(!r.ok&&r.error) alert(r.error); poll(); }\nasync function analyze(){ viewMove=null; await api(\'/analyze\',{sid:SID}); poll(); }\nasync function stopAnalyze(){ await api(\'/stop_analyze\',{sid:SID}); poll(); }\nasync function playHint(){ const r=await api(\'/play_hint\',{sid:SID}); if(!r.ok&&r.error) alert(r.error); poll(); }\n\nasync function clickCell(idx){\n  if(!S || S.status!==\'human_turn\' || viewMove!==null) return;\n  const grads = S.legal.filter(a=>a>=72);\n  let action;\n  if(grads.length){ action = 72+idx; }\n  else{ action = (piece===\'c\'?36:0)+idx; }\n  if(!S.legal.includes(action)){\n    // fall back to whichever piece IS legal on this cell\n    const alt = (piece===\'c\'?0:36)+idx;\n    if(S.legal.includes(alt)) action = alt; else return;\n  }\n  const r = await api(\'/move\',{sid:SID, action});\n  if(r.ok) poll();\n}\n\nfunction snapNow(){\n  if(!S || !S.snapshots.length) return null;\n  const sl = document.getElementById(\'simslider\');\n  const idx = sliderStick ? S.snapshots.length-1\n                          : Math.min(+sl.value, S.snapshots.length-1);\n  return {snap:S.snapshots[idx], idx};\n}\n\nfunction render(){\n  if(!S) return;\n  const board  = document.getElementById(\'board\');\n  const hist = S.board_hist || [];\n  const lastIdx = Math.max(0, hist.length-1);\n  const showIdx = viewMove===null ? lastIdx : Math.min(viewMove, lastIdx);\n  const live = viewMove===null;\n  const shown = hist.length ? hist[showIdx] : {board:S.board, hands:S.hands};\n  const showPrefs = document.getElementById(\'prefs\').checked;\n  const liveThink = live && (S.status===\'thinking\'||S.status===\'analyzing\');\n  const prefsOn = showPrefs || S.status===\'analyzing\' || (live && !!S.hint);\n  // Preference source: while the AI thinks on the live position, use the\n  // growing snapshot list (slider-scrubbable); on any other position show\n  // the SAVED analysis of the move that was played from that position.\n  let sn=null, snInfo=\'\';\n  if(prefsOn){\n    if(liveThink){\n      const c=snapNow(); if(c) sn=c.snap;\n    } else if(live && S.hint && showIdx===lastIdx){\n      sn=S.hint; snInfo=`AI suggestion — ${S.hint.sims} sims`;\n    } else {\n      const a=(S.analysis_hist||[])[showIdx];\n      if(a){ sn=a; snInfo=`saved analysis of move ${showIdx+1} — ${a.sims} sims`; }\n      else if(showIdx < (S.move_log||[]).length)\n        snInfo=\'(that move was yours — no AI analysis)\';\n    }\n  }\n\n  // per-cell best preference from the selected snapshot\n  const ov = {};\n  if(sn){\n    for(const [a,p] of Object.entries(sn.probs)){\n      const ai=+a, cell = ai>=72 ? ai-72 : ai%36;\n      const kind = ai>=72 ? \'G\' : (ai>=36 ? \'C\' : \'k\');\n      if(!(cell in ov) || p>ov[cell].p) ov[cell]={p, kind};\n    }\n  }\n  board.innerHTML=\'\';\n  const hintCell=(live && !liveThink && S.hint_action!=null)?(S.hint_action>=72?S.hint_action-72:S.hint_action%36):-1;\n  for(let i=0;i<36;i++){\n    const v=shown.board[i];\n    const d=document.createElement(\'div\');\n    d.className=\'cell\';\n    if(i===hintCell) d.style.outline=\'3px dashed #46d17a\';\n    if(v){\n      const pc=document.createElement(\'div\');\n      pc.className=\'pc\';\n      pc.innerHTML=pieceSVG(v===1||v===2, v===2||v===4);\n      d.appendChild(pc);\n    }\n    d.onclick=()=>clickCell(i);\n    if(ov[i]){\n      const o=document.createElement(\'div\'); o.className=\'ov\';\n      o.style.background=`rgba(58,109,240,${Math.min(.65,ov[i].p*1.3)})`;\n      o.innerHTML=`<span>${ov[i].kind} ${(ov[i].p*100).toFixed(0)}%</span>`;\n      d.appendChild(o);\n    }\n    board.appendChild(d);\n  }\n\n  const st=document.getElementById(\'status\');\n  if(S.terminal){\n    const r=S.returns;\n    st.textContent = r[0]>0?\'🏆 First player (orange) wins!\'\n                   : r[1]>0?\'🏆 Second player (grey) wins!\':\'Draw\';\n  } else if(S.status===\'human_turn\'){\n    const grads = S.legal.filter(a=>a>=72);\n    st.textContent = grads.length\n      ? \'Your turn — pool empty: click one of your kittens to graduate it\'\n      : (S.hint?\'Your turn — AI suggestion shown\':\'Your turn\');\n  } else if(S.status===\'analyzing\'){\n    st.textContent = \'Analyzing your position…\';\n  } else if(S.status===\'thinking\'){\n    st.textContent = (S.mode===\'watch\'?`Model ${S.current_player===0?\'A\':\'B\'} thinking…`\n                                       :\'AI thinking…\');\n  } else st.textContent = S.status;\n\n  document.getElementById(\'hands\').innerHTML =\n    `<span class="pill"><span class="dot d0"></span>pool: ${shown.hands[0][0]} kittens, ${shown.hands[0][1]} cats</span>`+\n    `<span class="pill"><span class="dot d1"></span>pool: ${shown.hands[1][0]} kittens, ${shown.hands[1][1]} cats</span>`;\n  document.getElementById(\'thinkinfo\').textContent =\n    (S.status===\'thinking\'||S.status===\'analyzing\') ? `simulations so far: ${S.thinking_sims}` : \'\';\n  document.getElementById(\'commitbtn\').style.display =\n    (S.status===\'thinking\' && S.manual) ? \'inline-block\':\'none\';\n  const showBtn=(id,on)=>document.getElementById(id).style.display=on?\'inline-block\':\'none\';\n  showBtn(\'takebackbtn\', live && !S.terminal && S.can_takeback);\n  showBtn(\'analyzebtn\', live && !S.terminal && S.status===\'human_turn\' && !S.analyzing);\n  showBtn(\'stopanalyzebtn\', S.status===\'analyzing\');\n  showBtn(\'playhintbtn\', live && !S.terminal && S.status===\'human_turn\' && S.hint_action!=null);\n\n  // kitten/cat picker enable state on human turns\n  const canK = S.legal.some(a=>a<36), canC = S.legal.some(a=>a>=36&&a<72);\n  document.getElementById(\'pickk\').disabled=!canK;\n  document.getElementById(\'pickc\').disabled=!canC;\n  if(piece===\'k\'&&!canK&&canC) piece=\'c\';\n  if(piece===\'c\'&&!canC&&canK) piece=\'k\';\n  document.getElementById(\'pickk\').classList.toggle(\'sel\',piece===\'k\');\n  document.getElementById(\'pickc\').classList.toggle(\'sel\',piece===\'c\');\n\n  // snapshot slider (live thinking) / saved-analysis line (history)\n  const box=document.getElementById(\'sliderbox\');\n  const ev=document.getElementById(\'evalline\');\n  if(liveThink && prefsOn && S.snapshots.length>0){\n    box.style.display=\'block\';\n    const sl=document.getElementById(\'simslider\');\n    sl.max = S.snapshots.length-1;\n    if(sliderStick) sl.value = sl.max;\n    const cur=snapNow();\n    document.getElementById(\'sliderlabel\').textContent =\n      `preferences after ${cur.snap.sims} simulations `+\n      `(snapshot ${(+cur.idx)+1}/${S.snapshots.length})`;\n    ev.textContent =\n      `AI eval (side to move): ${cur.snap.value>0?\'+\':\'\'}${cur.snap.value}`;\n  } else {\n    box.style.display=\'none\';\n    ev.textContent = sn && !liveThink\n      ? `${snInfo} · eval (side to move): ${sn.value>0?\'+\':\'\'}${sn.value}`\n      : snInfo;\n  }\n\n  document.getElementById(\'navlabel\').textContent = live\n    ? `live (after move ${lastIdx})`\n    : `viewing after move ${showIdx} of ${lastIdx} — “live ⏭” to return`;\n  document.getElementById(\'movelog\').innerHTML =\n    S.move_log.map((m,i)=>\n      `<span class="mv ${(!live && showIdx===i+1)?\'cur\':\'\'}" `+\n      `onclick="viewAt(${i+1})">${i+1}. ${m}</span>`).join(\'<br>\');\n}\n</script>\n'
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -675,10 +675,17 @@ class Session:
         self.move_log = []
         self.analysis_hist = []            # per move: final AI snapshot or None
         self.board_hist = []               # board after every move (incl. start)
+        self.actions = []                  # applied action ints (for take-back)
+        self.movers = []                   # player who made each ply
         self._snap_board()
         self.status = 'init'
         self.searcher = None
-        self.stop_evt = threading.Event()
+        self.stop_evt = threading.Event()   # interrupt search -> AI commits best
+        self.abort_evt = threading.Event()  # interrupt search -> DON'T commit
+        self.analyze_stop = threading.Event()
+        self.analyzing = False
+        self.hint = None                    # analysis of the current human position
+        self.hint_action = None
         self.lock = threading.RLock()
         self.thread = None
         self.kick()
@@ -717,6 +724,10 @@ class Session:
                 self.status = 'thinking'
             searcher.run(max_sims=(self.sims or None), stop_evt=self.stop_evt,
                          snap_cb=self._snap, snap_secs=self.snap_secs)
+            if self.abort_evt.is_set():                # take-back aborted search
+                with self.lock:
+                    self.searcher = None
+                return
             self._snap(searcher)                      # final snapshot
             with self.lock:
                 if searcher.root.children:
@@ -725,6 +736,7 @@ class Session:
                     self.move_log.append(
                         self.state.action_to_string(cur, action))
                     self.state.apply_action(action)
+                    self.actions.append(int(action)); self.movers.append(cur)
                     self._snap_board()
                 self.stop_evt.clear()
                 self.searcher = None
@@ -739,22 +751,102 @@ class Session:
             if not self.snapshots or snap['sims'] > self.snapshots[-1]['sims']:
                 self.snapshots.append(snap)
 
-    def human_move(self, action):
+    def human_move(self, action, analysis=None):
         with self.lock:
             if self.status != 'human_turn':
                 return False, 'not your turn'
             if action not in self.state.legal_actions():
                 return False, 'illegal move'
-            self.analysis_hist.append(None)          # human move: no analysis
-            self.move_log.append(
-                self.state.action_to_string(self.state.current_player(), action))
+            mover = self.state.current_player()
+            self.analysis_hist.append(analysis)      # None, or the played hint
+            self.move_log.append(self.state.action_to_string(mover, action))
             self.state.apply_action(action)
+            self.actions.append(int(action)); self.movers.append(mover)
             self._snap_board()
+            self.hint = None; self.hint_action = None
+            self.snapshots = []
         self.kick()
         return True, ''
 
     def commit_ai(self):
         self.stop_evt.set()
+
+    # ── Take-back ────────────────────────────────────────────────────────────
+    def take_back(self):
+        """Undo back to the human's previous decision point (their last move +
+        any AI reply). Works whether it's the human's turn or the AI is still
+        thinking (the search is aborted WITHOUT committing)."""
+        if self.human is None:
+            return False, 'take-back is only available in play mode'
+        with self.lock:
+            if self.human not in self.movers:
+                return False, 'no moves to take back'
+        self.abort_evt.set(); self.stop_evt.set(); self.analyze_stop.set()
+        th = self.thread
+        if th is not None and th.is_alive():
+            th.join(timeout=5.0)
+        with self.lock:
+            i = [j for j, m in enumerate(self.movers) if m == self.human][-1]
+            del self.actions[i:]; del self.movers[i:]
+            del self.move_log[i:]; del self.analysis_hist[i:]
+            del self.board_hist[i + 1:]          # board_hist[0] is the start
+            st = GAME.new_initial_state()
+            for a in self.actions:
+                st.apply_action(int(a))
+            self.state = st
+            self.snapshots = []; self.searcher = None
+            self.hint = None; self.hint_action = None; self.analyzing = False
+            self.abort_evt.clear(); self.stop_evt.clear(); self.analyze_stop.clear()
+            self.status = 'human_turn'
+        return True, ''
+
+    # ── Analyze the current (human) position without committing a move ────────
+    def analyze(self):
+        with self.lock:
+            if self.status != 'human_turn' or self.state.is_terminal():
+                return False, 'can only analyze on your turn'
+            if self.analyzing:
+                return True, ''
+            self.analyzing = True
+            self.analyze_stop.clear()
+            self.snapshots = []
+            self.hint = None; self.hint_action = None
+            self.status = 'analyzing'
+            cur = self.state.current_player()
+            net, st = self.nets[cur], self.state.clone()
+        self.thread = threading.Thread(target=self._analyze_loop,
+                                       args=(net, st), daemon=True)
+        self.thread.start()
+        return True, ''
+
+    def _analyze_loop(self, net, st):
+        searcher = Searcher(net, st, self.device)
+        with self.lock:
+            self.searcher = searcher
+        budget = self.sims if self.sims else None    # manual → until stopped
+        searcher.run(max_sims=budget, stop_evt=self.analyze_stop,
+                     snap_cb=self._snap, snap_secs=self.snap_secs)
+        self._snap(searcher)
+        with self.lock:
+            if searcher.root.children:
+                self.hint = searcher.snapshot()
+                self.hint_action = searcher.best()
+            self.searcher = None
+            self.analyzing = False
+            if self.status == 'analyzing':
+                self.status = 'human_turn'
+
+    def stop_analyze(self):
+        self.analyze_stop.set()
+        return True, ''
+
+    def play_hint(self):
+        """Commit the AI's suggested move (from the last analysis) as your own."""
+        with self.lock:
+            if self.hint_action is None or self.status != 'human_turn':
+                return False, 'no suggestion to play'
+            action, analysis = self.hint_action, self.hint
+        return self.human_move(action, analysis=analysis)
 
     def to_json(self):
         with self.lock:
@@ -773,6 +865,11 @@ class Session:
                 'move_log': self.move_log,
                 'board_hist': self.board_hist,
                 'analysis_hist': self.analysis_hist,
+                'analyzing': self.analyzing,
+                'can_takeback': self.human is not None and self.human in self.movers,
+                'hint': self.hint,
+                'hint_action': (int(self.hint_action)
+                                if self.hint_action is not None else None),
                 'terminal': st.is_terminal(),
                 'returns': st.returns() if st.is_terminal() else None,
             }
@@ -838,13 +935,22 @@ class Handler(BaseHTTPRequestHandler):
                 return
             ok, msg = s.human_move(int(req.get('action', -1)))
             self._json({'ok': ok, 'error': msg})
-        elif self.path == '/ai_commit':
+        elif self.path in ('/ai_commit', '/takeback', '/analyze',
+                           '/stop_analyze', '/play_hint'):
             s = SESSIONS.get(req.get('sid', ''))
             if s is None:
                 self._json({'error': 'no such session'}, 404)
                 return
-            s.commit_ai()
-            self._json({'ok': True})
+            if self.path == '/ai_commit':
+                s.commit_ai(); self._json({'ok': True})
+            elif self.path == '/takeback':
+                ok, msg = s.take_back(); self._json({'ok': ok, 'error': msg})
+            elif self.path == '/analyze':
+                ok, msg = s.analyze(); self._json({'ok': ok, 'error': msg})
+            elif self.path == '/stop_analyze':
+                ok, msg = s.stop_analyze(); self._json({'ok': ok, 'error': msg})
+            else:  # /play_hint
+                ok, msg = s.play_hint(); self._json({'ok': ok, 'error': msg})
         else:
             self._json({'error': 'not found'}, 404)
 
