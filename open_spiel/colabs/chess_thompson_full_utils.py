@@ -383,6 +383,205 @@ def restart_prefix(seq, rng, k_min, k_max):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  Multiprocess self-play worker (top-level so `spawn` can import it)
+# ══════════════════════════════════════════════════════════════════════════════
+# Same design as the sibling ThompsonZero notebooks: N CPU worker processes run
+# the trees; a central inference-server THREAD in the parent batches all their
+# NN requests into one forward pass (see MPSelfPlayPool).  This is the dominant
+# self-play speedup on a multi-core box — the tree work (numpy, per node) is
+# CPU-bound and serial within a process, so parallelising it across cores while
+# the GPU serves big fused batches is what makes the sibling runs fast.
+#
+# Wire format (crosses pickling queues, so kept tiny):
+#   request : (worker_id, net_id, obs (n, D) fp16, [legals int32, ...])
+#   response: [(p3 (k,3) f32, conf (k,) f32, plog (k,) f32, beta float), ...]
+#             — only the gathered legal entries, never the dense 4674-wide rows.
+
+def _mp_load_game(cfg):
+    loader = cfg.get('game_loader')                 # dotted 'module:function'
+    if loader:
+        mod, fn = loader.split(':')
+        import importlib
+        return getattr(importlib.import_module(mod), fn)()
+    import pyspiel
+    return pyspiel.load_game(cfg.get('game_name', 'chess'))
+
+
+def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
+    game = _mp_load_game(cfg)
+    try:
+        set_game(game)
+    except Exception:
+        pass
+    rng = np.random.RandomState(cfg['seed'] + worker_id * 7919)
+    conf_cap = cfg['conf_cap']; pwb = cfg.get('proven_win_bonus', 0.0)
+    max_plies = cfg.get('max_plies', 400)
+    z_mix = cfg.get('z_mix', 0.5); z_gamma = cfg.get('z_gamma', 0.97)
+    temp_thr = cfg.get('temp_threshold', 20); late_temp = cfg.get('late_temp', 8.0)
+    pool_prob = cfg.get('pool_prob', 0.0); pool_dir = cfg.get('checkpoint_dir')
+    rand_pool_frac = cfg.get('random_pool_frac', 0.5)
+    restart_prob = cfg.get('restart_prob', 0.0)
+    restart_kmin = cfg.get('restart_k_min', 2); restart_kmax = cfg.get('restart_k_max', 30)
+    restart_cap = cfg.get('restart_pool_cap', 128)
+    restart_pool = []
+
+    def _temp(move):
+        return 1.0 if move < temp_thr else late_temp
+
+    def _push_seed(seq):
+        if len(seq) >= 2:
+            restart_pool.append(list(seq))
+            if len(restart_pool) > restart_cap:
+                del restart_pool[0]
+
+    def new_game():
+        sims = cfg['fast_sims'] if rng.rand() < cfg['fast_prob'] else cfg['full_sims']
+        state, actions = game.new_initial_state(), []
+        if restart_pool and rng.rand() < restart_prob:
+            seq = restart_pool[rng.randint(len(restart_pool))]
+            pref = restart_prefix(seq, rng, restart_kmin, restart_kmax)
+            st = game.new_initial_state(); ok = True
+            for a in pref:
+                if st.is_terminal() or a not in st.legal_actions():
+                    ok = False; break
+                st.apply_action(int(a))
+            if ok and pref and not st.is_terminal():
+                state, actions = st, list(pref)
+        slot = {'state': state, 'hist': [], 'aux': [], 'actions': actions,
+                'move': 0, 'sims': sims, 'root': None, 'n': 0, 'pool': None}
+        if pool_prob > 0 and rng.rand() < pool_prob:
+            try:
+                labels = [f[6:-3] for f in os.listdir(pool_dir)
+                          if f.startswith('bench_') and f.endswith('.pt')] \
+                    if pool_dir else []
+            except OSError:
+                labels = []
+            label = ('random' if not labels or rng.rand() < rand_pool_frac
+                     else labels[rng.randint(len(labels))])
+            slot['pool'] = {'label': label, 'side': int(rng.randint(2))}
+        return slot
+
+    def finish_and_reset(i):
+        s = slots[i]; st = s['state']
+        if st.is_terminal():
+            ret = st.returns()
+            z_mix_episode(s['hist'], ret, z_mix, z_gamma)
+            result = 'draw' if ret[0] == 0.0 else 'decisive'
+            if restart_prob > 0 and result == 'decisive':
+                _push_seed(s['actions'])
+        else:
+            strip_episode_meta(s['hist']); result = 'cutoff'
+        episode_q.put((s['hist'] + s['aux'], len(s['aux']), result, int(s['move'])))
+        slots[i] = new_game()
+
+    slots = [new_game() for _ in range(cfg['games_per_worker'])]
+    mid = max(1, cfg['games_per_worker'] // 2)
+    halves = [list(range(mid)), list(range(mid, cfg['games_per_worker']))]
+
+    def collect(idxs):
+        evals, paths, obs, legals = [], [], [], []
+        seen = set()
+        for i in idxs:
+            s = slots[i]; st0 = s['state']; pool = s['pool']
+            if pool is not None and st0.current_player() == pool['side']:
+                continue
+            if s['root'] is None:
+                leg = st0.legal_actions()
+                o = np.asarray(st0.observation_tensor(st0.current_player()),
+                               dtype=np.float16)
+                evals.append(('root', i, leg, o)); obs.append(o)
+                legals.append(np.asarray(leg, dtype=np.int32)); continue
+            if _node_solved_outcome(s['root']) is not None:
+                continue
+            wave = min(cfg['wave'], s['sims'] - s['n'])
+            for _ in range(max(wave, 0)):
+                path, st, edge = _select_leaf(s['root'], st0, rng, _temp(s['move']),
+                                              pwb)
+                if st is None:
+                    _backup_terminal(path, s['aux'], conf_cap, CONF_MAX, pwb)
+                    s['n'] += 1; continue
+                node, idx = edge
+                paths.append((i, path, node, idx))
+                if (id(node), idx) not in seen:
+                    seen.add((id(node), idx))
+                    leg = st.legal_actions()
+                    o = np.asarray(st.observation_tensor(st.current_player()),
+                                   dtype=np.float16)
+                    evals.append(('leaf', node, idx, st.current_player(), leg, o))
+                    obs.append(o); legals.append(np.asarray(leg, dtype=np.int32))
+        return evals, paths, obs, legals
+
+    def apply_and_advance(idxs, evals, paths, resp):
+        if evals:
+            for e, (p3, c, pl, bt) in zip(evals, resp):
+                if e[0] == 'root':
+                    _, i, leg, o = e; st = slots[i]['state']
+                    nd = _TNode(st.current_player(), leg, p3, c, pl, bt)
+                    nd.obs = o; slots[i]['root'] = nd
+                else:
+                    _, node, idx, player, leg, o = e
+                    nd = _TNode(player, leg, p3, c, pl, bt)
+                    nd.obs = o; node.children[idx] = nd
+        for i, path, node, idx in paths:
+            _backup(path); slots[i]['n'] += 1
+        for i in idxs:
+            s = slots[i]
+            if s['root'] is None:
+                continue
+            if s['n'] < s['sims'] and _node_solved_outcome(s['root']) is None:
+                continue
+            root = s['root']
+            s['hist'].append(make_target(root, conf_cap))
+            a = root_pick(root, rng, thompson=(s['move'] < temp_thr),
+                          temp=_temp(s['move']))
+            pidx = int(np.nonzero(root.legal == a)[0][0])
+            s['actions'].append(int(a))
+            s['root'] = root.children[pidx]
+            s['state'].apply_action(a); s['move'] += 1; s['n'] = 0
+            if s['state'].is_terminal() or s['move'] >= max_plies:
+                finish_and_reset(i)
+
+    def resolve_pool_moves(idxs):
+        for i in idxs:
+            s = slots[i]; pool = s['pool']
+            if pool is None:
+                continue
+            state = s['state']
+            if state.current_player() != pool['side']:
+                continue
+            legal = state.legal_actions()
+            if pool['label'] == 'random':
+                a = int(legal[rng.randint(len(legal))])
+            else:
+                o = np.asarray(state.observation_tensor(state.current_player()),
+                               dtype=np.float16)
+                req_q.put((worker_id, pool['label'], o[None],
+                           [np.asarray(legal, dtype=np.int32)]))
+                (p3, _c, pl, _b), = pool_resp_q.get()
+                lg = pl - pl.max(); pi = np.exp(lg); pi /= pi.sum()
+                a = int(legal[int(pi.argmax())])
+            s['root'] = _descend(s['root'], a)
+            state.apply_action(a); s['actions'].append(a); s['move'] += 1
+            if state.is_terminal() or s['move'] >= max_plies:
+                finish_and_reset(i)
+
+    inflight = [None, None]
+    while True:
+        for h in (0, 1):
+            if inflight[h] is not None:
+                evals, paths, sent = inflight[h]
+                resp = resp_q.get() if sent else None
+                apply_and_advance(halves[h], evals, paths, resp)
+                inflight[h] = None
+            resolve_pool_moves(halves[h])
+            evals, paths, obs, legals = collect(halves[h])
+            sent = False
+            if evals:
+                req_q.put((worker_id, 'live', np.stack(obs), legals)); sent = True
+            inflight[h] = (evals, paths, sent)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  Game wiring (obs shape + action count), set once from the notebook
 # ══════════════════════════════════════════════════════════════════════════════
 _OBS_SHAPE = None
@@ -993,6 +1192,171 @@ if _HAS_TORCH:
                     yield data
 
     # ══════════════════════════════════════════════════════════════════════════
+    #  Multiprocess self-play pool: worker processes + central GPU inference server
+    # ══════════════════════════════════════════════════════════════════════════
+    import threading as _threading, queue as _queue, time as _time
+    import multiprocessing as _mp
+
+    def _probe_gather(device):
+        """Does index_select run on this device (forward)?  Lets the server
+        gather the ~1% legal entries ON-device so only those cross the bus."""
+        if str(device) == 'cpu':
+            return True
+        try:
+            x = torch.arange(12.0, device=device).reshape(4, 3)
+            idx = torch.tensor([2, 0, 3], device=device)
+            y = x.index_select(0, idx).cpu()
+            return bool(torch.equal(y, torch.tensor([[6., 7., 8.], [0., 1., 2.],
+                                                     [9., 10., 11.]])))
+        except Exception:
+            return False
+
+    class MPSelfPlayPool:
+        """n_workers CPU processes run the trees; an inference-server thread here
+        batches ALL their NN requests into one forward pass on `device`.  Exposes
+        the same .episodes()/.stats/.last_aux interface as ThompsonParallelSelfPlay,
+        so the training loop is identical.  `lock` serialises model access between
+        the server thread and training (DirectML is not thread-safe)."""
+
+        def __init__(self, network, device, n_workers, cfg, batch_window_s=0.002,
+                     checkpoint_dir=None, channels=None, num_blocks=None,
+                     max_batch_rows=1024):
+            self.network, self.device = network, device
+            self.checkpoint_dir = checkpoint_dir
+            self.channels, self.num_blocks = channels, num_blocks
+            self._pool_nets = {}
+            self.lock = _threading.Lock()
+            self._stop = _threading.Event()
+            self.window, self.max_batch_rows = batch_window_s, max_batch_rows
+            self._gather_ok = _probe_gather(device)
+            self.last_aux = 0
+            self.stats = {'games': 0, 'draw': 0, 'cutoff': 0, 'plies': 0}
+            ctx = _mp.get_context('spawn')
+            self.req_q = ctx.Queue()
+            self.episode_q = ctx.Queue(maxsize=64)
+            self.resp_qs = [ctx.Queue() for _ in range(n_workers)]
+            self.pool_resp_qs = [ctx.Queue() for _ in range(n_workers)]
+            # Initialise the autograd engine's device state from the MAIN thread
+            # before any other thread touches the device (DirectML assert).
+            if str(device) != 'cpu':
+                _t = torch.zeros(4, device=device, requires_grad=True)
+                (_t * 2.0).sum().backward()
+            self.procs = [ctx.Process(target=mp_worker,
+                          args=(i, self.req_q, self.resp_qs[i],
+                                self.pool_resp_qs[i], self.episode_q, cfg),
+                          daemon=True) for i in range(n_workers)]
+            for p in self.procs:
+                p.start()
+            self.server = _threading.Thread(target=self._serve, daemon=True)
+            self.server.start()
+
+        def _get_net(self, net_id):
+            if net_id == 'live':
+                return self.network, self.device, True
+            net = self._pool_nets.get(net_id)
+            if net is None:
+                net = ThompsonFullNet(self.channels, self.num_blocks)
+                net.load_state_dict(torch.load(
+                    os.path.join(self.checkpoint_dir, f'bench_{net_id}.pt'),
+                    map_location='cpu', weights_only=True))
+                net.eval(); self._pool_nets[net_id] = net
+            return net, 'cpu', False
+
+        def _forward_gathered(self, net, dev, xin, flat, rowsel):
+            x = torch.from_numpy(xin).to(dev)
+            probs, conf, plog, beta = net(x)
+            if self._gather_ok and str(dev) != 'cpu':
+                ft = torch.from_numpy(flat).to(dev)
+                rs = torch.from_numpy(rowsel).to(dev)
+                p = probs.reshape(-1, 3).index_select(0, ft).cpu().numpy()
+                c = conf.reshape(-1).index_select(0, ft).cpu().numpy()
+                pl = plog.reshape(-1).index_select(0, ft).cpu().numpy()
+                bt = beta.index_select(0, rs).cpu().numpy()
+            else:
+                p = probs.reshape(-1, 3).cpu().numpy()[flat]
+                c = conf.reshape(-1).cpu().numpy()[flat]
+                pl = plog.reshape(-1).cpu().numpy()[flat]
+                bt = beta.cpu().numpy()[rowsel]
+            return p, c, pl, bt
+
+        def _serve(self):
+            A = _NUM_ACTIONS
+            while not self._stop.is_set():
+                try:
+                    reqs = [self.req_q.get(timeout=0.1)]
+                except _queue.Empty:
+                    continue
+                rows = reqs[0][2].shape[0]
+                deadline = _time.monotonic() + self.window
+                while _time.monotonic() < deadline and rows < self.max_batch_rows:
+                    try:
+                        r = self.req_q.get_nowait(); reqs.append(r)
+                        rows += r[2].shape[0]
+                    except _queue.Empty:
+                        _time.sleep(0.0003)
+                groups = {}
+                for wid, net_id, obs, legals in reqs:
+                    groups.setdefault(net_id, []).append((wid, obs, legals))
+                for net_id, group in groups.items():
+                    net, dev, needs_lock = self._get_net(net_id)
+                    obs = np.concatenate([o for _, o, _ in group], axis=0)
+                    xin = obs.reshape(-1, *_OBS_SHAPE).astype(np.float32)
+                    row_legals = [l for _, _, ls in group for l in ls]
+                    flat = np.concatenate([l.astype(np.int64) + r * A
+                                           for r, l in enumerate(row_legals)])
+                    rowsel = np.concatenate([np.full(len(l), r, dtype=np.int64)
+                                             for r, l in enumerate(row_legals)])
+                    # rowsel maps each gathered entry to its row; beta needs the
+                    # per-ROW index, so take unique row ids in order.
+                    beta_rows = np.arange(len(row_legals), dtype=np.int64)
+                    offs = np.zeros(len(row_legals) + 1, dtype=np.int64)
+                    np.cumsum([len(l) for l in row_legals], out=offs[1:])
+                    if needs_lock:
+                        with self.lock, torch.no_grad():
+                            p, c, pl, bt = self._forward_gathered(
+                                net, dev, xin, flat, beta_rows)
+                    else:
+                        with torch.no_grad():
+                            p, c, pl, bt = self._forward_gathered(
+                                net, dev, xin, flat, beta_rows)
+                    tqs = self.resp_qs if net_id == 'live' else self.pool_resp_qs
+                    ri = 0
+                    for wid, o, ls in group:
+                        out = []
+                        for _ in ls:
+                            a, b = offs[ri], offs[ri + 1]
+                            out.append((p[a:b], c[a:b], pl[a:b], float(bt[ri])))
+                            ri += 1
+                        tqs[wid].put(out)
+
+        def episodes(self):
+            while True:
+                samples, n_aux, result, plies = self.episode_q.get()
+                self.last_aux = n_aux
+                self.stats['games'] += 1
+                self.stats['plies'] += plies
+                if result == 'draw':   self.stats['draw'] += 1
+                if result == 'cutoff': self.stats['cutoff'] += 1
+                yield samples
+
+        def shutdown(self):
+            self._stop.set()
+            try:
+                self.server.join(timeout=2.0)
+            except Exception:
+                pass
+            for p in self.procs:
+                p.terminate()
+            for p in self.procs:
+                p.join(timeout=2.0)
+            for q in ([self.req_q, self.episode_q] + self.resp_qs
+                      + self.pool_resp_qs):
+                try:
+                    q.close(); q.cancel_join_thread()
+                except Exception:
+                    pass
+
+    # ══════════════════════════════════════════════════════════════════════════
     #  Sparse deep eval — running-Elo pool of checkpoints@MCTS-128 + random
     # ══════════════════════════════════════════════════════════════════════════
     # Every checkpoint enters a SINGLE Elo table, each rated at MCTS=`eval_sims`
@@ -1003,9 +1367,10 @@ if _HAS_TORCH:
     # the number of games a pair has already played, so ratings settle.
     class EloPool:
         def __init__(self, game, device, eval_sims=128, k_base=32.0,
-                     k_halflife=30.0, games_per_pair=6, last_n=3,
+                     k_halflife=30.0, games_per_pair=2, last_n=3,
                      refresh_pairs=10, opening_plies=4, batch_size=16,
-                     start_elo=1000.0, eval_temp=6.0, seed=0):
+                     start_elo=1000.0, eval_temp=6.0, max_eval_plies=200,
+                     seed=0):
             self.game, self.device = game, device
             self.eval_sims = eval_sims
             self.eval_temp = eval_temp
@@ -1013,6 +1378,8 @@ if _HAS_TORCH:
             self.games_per_pair = games_per_pair
             self.last_n, self.refresh_pairs = last_n, refresh_pairs
             self.opening_plies = opening_plies
+            self.max_eval_plies = max_eval_plies      # cap: uncapped games vs a
+                                                      # weak/random net run forever
             self.batch_size = batch_size
             self.start_elo = start_elo
             self.rng = np.random.RandomState(seed)
@@ -1044,11 +1411,15 @@ if _HAS_TORCH:
                     break
                 leg = state.legal_actions()
                 state.apply_action(int(leg[self.rng.randint(len(leg))]))
-            while not state.is_terminal():
+            ply = 0
+            while not state.is_terminal() and ply < self.max_eval_plies:
                 lab = a if state.current_player() == 0 else b
                 state.apply_action(self._move(lab, bot_cache, state))
-            r = state.returns()[0]
-            return 1.0 if r > 0 else (0.0 if r < 0 else 0.5)
+                ply += 1
+            if state.is_terminal():
+                r = state.returns()[0]
+                return 1.0 if r > 0 else (0.0 if r < 0 else 0.5)
+            return 0.5                             # adjudicate a capped game a draw
 
         def _update(self, a, b, sa):
             key = frozenset((a, b))
@@ -1077,11 +1448,25 @@ if _HAS_TORCH:
             opponents = self.order[-self.last_n:] + ['random']
             for opp in opponents:
                 self._match(label, opp, bot_cache)
-            # Refresh random pairs across the whole pool.
-            if len(self.players) >= 2:
-                for _ in range(self.refresh_pairs):
-                    a, b = self.rng.choice(len(self.players), 2, replace=False)
-                    self._match(self.players[a], self.players[b], bot_cache)
+            # Refresh random pairs across the whole pool — only once the pool is
+            # big enough that these are genuinely NEW pairings (not the same two
+            # players replayed).  With <= last_n+2 players every pair was already
+            # played above, so refresh would just burn eval time (the iter-0
+            # blocker: 10 refresh matches of the ONLY pair, '0' vs random).
+            existing = self.order + ['random']       # players before this add
+            n_new_pairs = len(existing) * (len(existing) - 1) // 2 - \
+                len(opponents)
+            if n_new_pairs > 0:
+                seen = set()
+                for _ in range(min(self.refresh_pairs, n_new_pairs)):
+                    for _try in range(20):
+                        a, b = self.rng.choice(len(existing), 2, replace=False)
+                        key = frozenset((existing[a], existing[b]))
+                        if key not in seen and label not in key:
+                            seen.add(key); break
+                    else:
+                        break
+                    self._match(existing[a], existing[b], bot_cache)
             self.order.append(label)
             return dict(self.elo)
 
