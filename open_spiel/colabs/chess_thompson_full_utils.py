@@ -992,6 +992,49 @@ if _HAS_TORCH:
             return int(leg[rng.choice(len(leg), p=pi)])
         return int(leg[int(pi.argmax())])
 
+    def thompson_value_move(network, state, device, rng, temp=1.0):
+        """Search-free move via ONE Thompson sample of the NN's per-action value
+        beliefs: draw v=p_win−p_loss from each legal action's Dir(conf·probs) and
+        play the argmax.  No tree — this is exactly the in-tree selection rule
+        applied directly to the raw network output (the cheap quick-eval mover)."""
+        pr, cf, pl, bt, _ = nn_eval_states(network, device, [state])
+        leg = state.legal_actions()
+        a = np.maximum(cf[0][leg, None] * pr[0][leg], ALPHA_FLOOR) * temp
+        g = rng.standard_gamma(a)
+        x = g / g.sum(1, keepdims=True)
+        v = x[:, _WIN] - x[:, _LOSS]
+        return int(leg[int(v.argmax())])
+
+    def quick_match(net_a, net_b, game, n_games, device, rng=None,
+                    opening_plies=2, max_plies=200, temp=1.0):
+        """Search-free Thompson-value match, net_a vs net_b, alternating colours.
+        net == None → uniform-random mover.  Returns (wins_a, draws, wins_b).
+        A lightweight progress pulse (no MCTS) — used by the quick eval."""
+        rng = rng or np.random.RandomState()
+        wa = d = wb = 0
+        for i in range(n_games):
+            a_side = i % 2
+            state = game.new_initial_state()
+            for _ in range(opening_plies):
+                if state.is_terminal():
+                    break
+                leg = state.legal_actions()
+                state.apply_action(int(leg[rng.randint(len(leg))]))
+            ply = 0
+            while not state.is_terminal() and ply < max_plies:
+                net = net_a if state.current_player() == a_side else net_b
+                if net is None:
+                    leg = state.legal_actions()
+                    mv = int(leg[rng.randint(len(leg))])
+                else:
+                    mv = thompson_value_move(net, state, device, rng, temp)
+                state.apply_action(mv); ply += 1
+            if not state.is_terminal():
+                d += 1; continue
+            r = state.returns()[a_side]
+            wa += r > 0; wb += r < 0; d += r == 0
+        return int(wa), int(d), int(wb)
+
     # ══════════════════════════════════════════════════════════════════════════
     #  Parallel self-play (single process, batched across games)
     # ══════════════════════════════════════════════════════════════════════════
