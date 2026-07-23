@@ -387,6 +387,17 @@ def restart_prefix(seq, rng, k_min, k_max):
 # ══════════════════════════════════════════════════════════════════════════════
 _OBS_SHAPE = None
 _NUM_ACTIONS = None
+_HEAD_CH_DEFAULT = 8        # width of the 1x1 conv feeding the flat action heads;
+                           # THE dominant lever on parameter count (see the net)
+
+
+def set_head_ch(n):
+    """Set the default head width for every ThompsonFullNet built afterwards.
+    head_ch controls the flat penultimate width (head_ch*8*8) that feeds the
+    three action-wide heads, so it (not channels/num_blocks) sets the param
+    count: 8→~12M, 4→~6.5M, 2→~3.5M, 1→~2.0M for chess's 4674 actions."""
+    global _HEAD_CH_DEFAULT
+    _HEAD_CH_DEFAULT = int(n)
 
 
 def set_game(game):
@@ -492,11 +503,19 @@ if _HAS_TORCH:
                       plogits (B,A), beta (B,) in [CONF_MIN,POLICY_CONC_MAX]).
         The per-action value belief is Dir(conf[a]*probs[a]); the policy-prior is
         Dir(beta*softmax(plogits)); v and qv are DERIVED (see full_loss / the
-        tree), never separate parameters."""
-        _HEAD_CH = 8
+        tree), never separate parameters.
 
-        def __init__(self, channels=128, num_blocks=10):
+        NOTE ON SIZE: with 4674 chess actions the three action-wide heads
+        (dist_out 3*A, conf_out A, plog_out A) dominate the parameter count and
+        scale with `head_ch` (which sets the flat width = head_ch*8*8), NOT with
+        `channels`/`num_blocks` (the trunk is <0.5M).  head_ch=8→~12M, 4→~6.5M,
+        2→~3.5M, 1→~2.0M.  Defaults to the module global set by set_head_ch()
+        so every construction site (self-play, eval, resume) stays consistent."""
+
+        def __init__(self, channels=128, num_blocks=10, head_ch=None):
             super().__init__()
+            hc = int(head_ch if head_ch is not None else _HEAD_CH_DEFAULT)
+            self._head_ch = hc
             in_ch = _OBS_SHAPE[0]
             self.stem = nn.Sequential(
                 nn.Conv2d(in_ch, channels, 3, padding=1, bias=False),
@@ -504,9 +523,9 @@ if _HAS_TORCH:
             self.body = nn.Sequential(*[ResBlock(channels)
                                         for _ in range(num_blocks)])
             self.head = nn.Sequential(
-                nn.Conv2d(channels, self._HEAD_CH, 1, bias=False),
-                _norm(self._HEAD_CH), nn.ReLU(inplace=True), nn.Flatten())
-            flat = self._HEAD_CH * _OBS_SHAPE[1] * _OBS_SHAPE[2]
+                nn.Conv2d(channels, hc, 1, bias=False),
+                _norm(hc), nn.ReLU(inplace=True), nn.Flatten())
+            flat = hc * _OBS_SHAPE[1] * _OBS_SHAPE[2]
             self.dist_out = nn.Linear(flat, _NUM_ACTIONS * 3)   # value: W/D/L
             self.conf_out = nn.Linear(flat, _NUM_ACTIONS)       # value: conf
             self.plog_out = nn.Linear(flat, _NUM_ACTIONS)       # policy: logits
