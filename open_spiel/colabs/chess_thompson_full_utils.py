@@ -479,6 +479,31 @@ def restart_prefix(seq, rng, k_min, k_max):
     return list(seq[:len(seq) - k])
 
 
+def random_backbone(game, rng, depth, max_plies):
+    """Adaptive backward curriculum.  Play a uniform-RANDOM game to its terminal
+    (capped at max_plies), then resume `depth` plies before the end: the random
+    prefix is the (untrained) opening, and MCTS self-play takes over only for the
+    last ~`depth` plies.  Early in training `depth` is small, so MCTS + training
+    focus on near-terminal ENDGAME positions (high signal: short horizon, dense
+    solver proofs); as the net masters them, the training loop grows `depth`,
+    pushing the MCTS frontier back toward the opening.  When `depth` >= the game
+    length, resume=0 and it's an ordinary full self-play game.
+
+    Returns (resume_state, replayed_actions, resume_ply).  A cheap all-random
+    rollout (no NN) is used to find a realistic terminal to back up from."""
+    st = game.new_initial_state()
+    seq = []
+    while not st.is_terminal() and len(seq) < max_plies:
+        legal = st.legal_actions()
+        a = int(legal[rng.integers(len(legal))])
+        st.apply_action(a); seq.append(a)
+    resume = max(0, len(seq) - int(round(depth)))
+    state = game.new_initial_state()
+    for a in seq[:resume]:
+        state.apply_action(a)
+    return state, seq[:resume], resume
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Multiprocess self-play worker (top-level so `spawn` can import it)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -522,6 +547,12 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
     restart_kmin = cfg.get('restart_k_min', 2); restart_kmax = cfg.get('restart_k_max', 30)
     restart_cap = cfg.get('restart_pool_cap', 128)
     restart_pool = []
+    curriculum = cfg.get('curriculum', False)
+    curr_shared = cfg.get('curr_depth_shared')     # mp.Value updated by the parent
+    curr_depth0 = cfg.get('curr_depth0', 8.0)
+
+    def _curr_depth():
+        return curr_shared.value if curr_shared is not None else curr_depth0
 
     def _temp(move):
         return 1.0 if move < temp_thr else late_temp
@@ -534,8 +565,11 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
 
     def new_game():
         sims = cfg['fast_sims'] if rng.random() < cfg['fast_prob'] else cfg['full_sims']
-        state, actions = game.new_initial_state(), []
-        if restart_pool and rng.random() < restart_prob:
+        state, actions, resume = game.new_initial_state(), [], 0
+        if curriculum:
+            state, actions, resume = random_backbone(
+                game, rng, _curr_depth(), max_plies)
+        elif restart_pool and rng.random() < restart_prob:
             seq = restart_pool[rng.integers(len(restart_pool))]
             pref = restart_prefix(seq, rng, restart_kmin, restart_kmax)
             st = game.new_initial_state(); ok = True
@@ -546,7 +580,8 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
             if ok and pref and not st.is_terminal():
                 state, actions = st, list(pref)
         slot = {'state': state, 'hist': [], 'aux': [], 'actions': actions,
-                'move': 0, 'sims': sims, 'root': None, 'n': 0, 'pool': None}
+                'move': resume, 'resume': resume, 'sims': sims,
+                'root': None, 'n': 0, 'pool': None}
         if pool_prob > 0 and rng.random() < pool_prob:
             try:
                 labels = [f[6:-3] for f in os.listdir(pool_dir)
@@ -593,8 +628,8 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                 continue
             wave = min(cfg['wave'], s['sims'] - s['n'])
             for _ in range(max(wave, 0)):
-                path, st, edge = _select_leaf(s['root'], st0, rng, _temp(s['move']),
-                                              pwb)
+                path, st, edge = _select_leaf(s['root'], st0, rng,
+                                              _temp(s['move'] - s['resume']), pwb)
                 if st is None:
                     _backup_terminal(path, s['aux'], conf_cap, CONF_MAX, pwb)
                     s['n'] += 1; continue
@@ -630,8 +665,8 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                 continue
             root = s['root']
             s['hist'].append(make_target(root, conf_cap))
-            a = root_pick(root, rng, thompson=(s['move'] < temp_thr),
-                          temp=_temp(s['move']))
+            mm = s['move'] - s['resume']         # plies since MCTS took over
+            a = root_pick(root, rng, thompson=(mm < temp_thr), temp=_temp(mm))
             pidx = int(np.nonzero(root.legal == a)[0][0])
             s['actions'].append(int(a))
             s['root'] = root.children[pidx]
@@ -1256,8 +1291,10 @@ if _HAS_TORCH:
                      pool_prob=0.0, checkpoint_dir=None, channels=None,
                      num_blocks=None, restart_prob=0.0, restart_k_min=2,
                      restart_k_max=30, restart_pool_cap=128, random_pool_frac=0.5,
-                     seed=None):
+                     curriculum=False, curr_depth0=8.0, seed=None):
             self.game, self.network, self.device = game, network, device
+            self.curriculum = curriculum
+            self.curr_depth = float(curr_depth0)   # plies-from-end MCTS covers
             self.n_parallel, self.wave = n_parallel, wave_per_game
             self.fast_sims, self.full_sims = fast_sims, full_sims
             self.fast_prob = fast_prob
@@ -1298,12 +1335,18 @@ if _HAS_TORCH:
                 self._pool_nets[label] = net
             return net
 
+        def set_curr_depth(self, d):
+            self.curr_depth = float(d)
+
         def _new_game(self):
             rng = self._rng
             sims = (self.fast_sims if rng.random() < self.fast_prob
                     else self.full_sims)
-            state, actions = self.game.new_initial_state(), []
-            if self._restart_pool and rng.random() < self.restart_prob:
+            state, actions, resume = self.game.new_initial_state(), [], 0
+            if self.curriculum:
+                state, actions, resume = random_backbone(
+                    self.game, rng, self.curr_depth, self.max_plies)
+            elif self._restart_pool and rng.random() < self.restart_prob:
                 seq = self._restart_pool[rng.integers(len(self._restart_pool))]
                 pref = restart_prefix(seq, rng, self.restart_k_min,
                                       self.restart_k_max)
@@ -1315,7 +1358,8 @@ if _HAS_TORCH:
                 if ok and not st.is_terminal():
                     state, actions = st, list(pref)
             slot = {'state': state, 'hist': [], 'aux': [], 'actions': actions,
-                    'move': 0, 'sims': sims, 'root': None, 'n': 0, 'pool': None}
+                    'move': resume, 'resume': resume, 'sims': sims,
+                    'root': None, 'n': 0, 'pool': None}
             if (self.pool_prob > 0 and self.checkpoint_dir
                     and rng.random() < self.pool_prob):
                 try:
@@ -1373,10 +1417,10 @@ if _HAS_TORCH:
             return done
 
         def _play_move(self, i):
-            s = self.slots[i]; root = s['root']
+            s = self.slots[i]; root = s['root']; mm = s['move'] - s['resume']
             s['hist'].append(make_target(root, self.conf_cap))
-            a = root_pick(root, self._rng, thompson=(s['move'] < self.temp_threshold),
-                          temp=self._temp(s['move']))
+            a = root_pick(root, self._rng, thompson=(mm < self.temp_threshold),
+                          temp=self._temp(mm))
             pidx = int(np.nonzero(root.legal == a)[0][0])
             s['actions'].append(int(a))
             s['root'] = root.children[pidx]
@@ -1398,7 +1442,8 @@ if _HAS_TORCH:
                 wave = min(self.wave, s['sims'] - s['n'])
                 for _ in range(max(wave, 0)):
                     path, st, edge = _select_leaf(s['root'], s['state'], rng,
-                                                  self._temp(s['move']), self.pwb)
+                                                  self._temp(s['move'] - s['resume']),
+                                                  self.pwb)
                     if st is None:
                         _backup_terminal(path, s['aux'], self.conf_cap, CONF_MAX,
                                          self.pwb)
@@ -1488,6 +1533,10 @@ if _HAS_TORCH:
             self.episode_q = ctx.Queue(maxsize=64)
             self.resp_qs = [ctx.Queue() for _ in range(n_workers)]
             self.pool_resp_qs = [ctx.Queue() for _ in range(n_workers)]
+            # Adaptive-curriculum depth: shared with the workers so the training
+            # loop can advance the MCTS frontier (set_curr_depth) mid-run.
+            self._curr = ctx.Value('d', float(cfg.get('curr_depth0', 8.0)))
+            cfg = dict(cfg); cfg['curr_depth_shared'] = self._curr
             # Initialise the autograd engine's device state from the MAIN thread
             # before any other thread touches the device (DirectML assert).
             if str(device) != 'cpu':
@@ -1501,6 +1550,15 @@ if _HAS_TORCH:
                 p.start()
             self.server = _threading.Thread(target=self._serve, daemon=True)
             self.server.start()
+
+        def set_curr_depth(self, d):
+            """Advance the adaptive-curriculum MCTS frontier (plies from game end);
+            workers read it via the shared Value on their next new_game."""
+            self._curr.value = float(d)
+
+        @property
+        def curr_depth(self):
+            return self._curr.value
 
         def _get_net(self, net_id):
             if net_id == 'live':
