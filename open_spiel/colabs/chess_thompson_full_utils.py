@@ -479,6 +479,25 @@ def restart_prefix(seq, rng, k_min, k_max):
     return list(seq[:len(seq) - k])
 
 
+def opening_decision(p3, conf, plog, rng, conf_thresh):
+    """One cheap (search-free) opening step from a gathered NN eval at a position.
+    p3 (k,3), conf (k,), plog (k,) are the LEGAL-action rows.  Returns
+    (local_action_idx, confident):
+      - move = Thompson sample of the per-action value beliefs, argmax of v=w−l
+        (same rule the tree uses, applied to the raw net — no search);
+      - confident = the moment-matched STATE value-distribution concentration
+        (α0 of qv = Σ_a π_a·pv_a) ≥ conf_thresh, i.e. the net is sure of this
+        position's outcome.  As the net learns endgames this fires earlier, so
+        MCTS self-play takes over earlier and earlier — no global schedule."""
+    pv = np.maximum(conf[:, None] * np.asarray(p3, float), ALPHA_FLOOR)   # (k,3)
+    g = rng.standard_gamma(pv); x = g / g.sum(1, keepdims=True)
+    a = int((x[:, _WIN] - x[:, _LOSS]).argmax())
+    lg = np.asarray(plog, float); lg = lg - lg.max()
+    pi = np.exp(lg); pi /= pi.sum()
+    conc = moment_match_mixture(pi, pv).sum()
+    return a, bool(conc >= conf_thresh)
+
+
 def random_backbone(game, rng, depth, max_plies):
     """Adaptive backward curriculum.  Play a uniform-RANDOM game to its terminal
     (capped at max_plies), then resume `depth` plies before the end: the random
@@ -548,11 +567,8 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
     restart_cap = cfg.get('restart_pool_cap', 128)
     restart_pool = []
     curriculum = cfg.get('curriculum', False)
-    curr_shared = cfg.get('curr_depth_shared')     # mp.Value updated by the parent
-    curr_depth0 = cfg.get('curr_depth0', 8.0)
-
-    def _curr_depth():
-        return curr_shared.value if curr_shared is not None else curr_depth0
+    curr_conf_thresh = cfg.get('curr_conf_thresh', 8.0)
+    curr_backup = cfg.get('curr_backup', 3)
 
     def _temp(move):
         return 1.0 if move < temp_thr else late_temp
@@ -563,12 +579,21 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
             if len(restart_pool) > restart_cap:
                 del restart_pool[0]
 
+    def handoff(i):
+        s = slots[i]
+        resume = max(0, len(s['open_actions']) - curr_backup)
+        st = game.new_initial_state()
+        for a in s['open_actions'][:resume]:
+            st.apply_action(a)
+        s['state'] = st; s['actions'] = list(s['open_actions'][:resume])
+        s['resume'] = resume; s['move'] = resume
+        s['phase'] = 'mcts'; s['root'] = None; s['n'] = 0
+
     def new_game():
         sims = cfg['fast_sims'] if rng.random() < cfg['fast_prob'] else cfg['full_sims']
-        state, actions, resume = game.new_initial_state(), [], 0
+        state, actions, resume, phase = game.new_initial_state(), [], 0, 'mcts'
         if curriculum:
-            state, actions, resume = random_backbone(
-                game, rng, _curr_depth(), max_plies)
+            phase = 'open'
         elif restart_pool and rng.random() < restart_prob:
             seq = restart_pool[rng.integers(len(restart_pool))]
             pref = restart_prefix(seq, rng, restart_kmin, restart_kmax)
@@ -580,8 +605,8 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
             if ok and pref and not st.is_terminal():
                 state, actions = st, list(pref)
         slot = {'state': state, 'hist': [], 'aux': [], 'actions': actions,
-                'move': resume, 'resume': resume, 'sims': sims,
-                'root': None, 'n': 0, 'pool': None}
+                'move': resume, 'resume': resume, 'sims': sims, 'phase': phase,
+                'open_actions': [], 'root': None, 'n': 0, 'pool': None}
         if pool_prob > 0 and rng.random() < pool_prob:
             try:
                 labels = [f[6:-3] for f in os.listdir(pool_dir)
@@ -604,7 +629,8 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                 _push_seed(s['actions'])
         else:
             strip_episode_meta(s['hist']); result = 'cutoff'
-        episode_q.put((s['hist'] + s['aux'], len(s['aux']), result, int(s['move'])))
+        episode_q.put((s['hist'] + s['aux'], len(s['aux']), result,
+                       int(s['move']), int(s['resume'])))
         slots[i] = new_game()
 
     slots = [new_game() for _ in range(cfg['games_per_worker'])]
@@ -617,6 +643,16 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
         for i in idxs:
             s = slots[i]; st0 = s['state']; pool = s['pool']
             if pool is not None and st0.current_player() == pool['side']:
+                continue
+            if s['phase'] == 'open':               # cheap Thompson opening
+                if st0.is_terminal():
+                    handoff(i)
+                else:
+                    leg = st0.legal_actions()
+                    o = np.asarray(st0.observation_tensor(st0.current_player()),
+                                   dtype=np.float16)
+                    evals.append(('open', i, leg)); obs.append(o)
+                    legals.append(np.asarray(leg, dtype=np.int32))
                 continue
             if s['root'] is None:
                 leg = st0.legal_actions()
@@ -647,6 +683,20 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
     def apply_and_advance(idxs, evals, paths, resp):
         if evals:
             for e, (p3, c, pl, bt) in zip(evals, resp):
+                if e[0] == 'open':
+                    _, i, leg = e
+                    loc, confident = opening_decision(p3, c, pl, rng,
+                                                      curr_conf_thresh)
+                    s = slots[i]
+                    if confident:
+                        handoff(i)
+                    else:
+                        a = int(leg[loc])
+                        s['open_actions'].append(a); s['state'].apply_action(a)
+                        s['move'] += 1
+                        if s['state'].is_terminal() or s['move'] >= max_plies:
+                            handoff(i)
+                    continue
                 if e[0] == 'root':
                     _, i, leg, o = e; st = slots[i]['state']
                     nd = _TNode(st.current_player(), leg, p3, c, pl, bt)
@@ -1291,10 +1341,12 @@ if _HAS_TORCH:
                      pool_prob=0.0, checkpoint_dir=None, channels=None,
                      num_blocks=None, restart_prob=0.0, restart_k_min=2,
                      restart_k_max=30, restart_pool_cap=128, random_pool_frac=0.5,
-                     curriculum=False, curr_depth0=8.0, seed=None):
+                     curriculum=False, curr_conf_thresh=8.0, curr_backup=3,
+                     seed=None):
             self.game, self.network, self.device = game, network, device
             self.curriculum = curriculum
-            self.curr_depth = float(curr_depth0)   # plies-from-end MCTS covers
+            self.curr_conf_thresh = float(curr_conf_thresh)   # α0 handoff gate
+            self.curr_backup = int(curr_backup)               # plies to back up
             self.n_parallel, self.wave = n_parallel, wave_per_game
             self.fast_sims, self.full_sims = fast_sims, full_sims
             self.fast_prob = fast_prob
@@ -1313,7 +1365,7 @@ if _HAS_TORCH:
             self._restart_pool = []
             self._pool_nets = {}
             self.last_aux = 0
-            self.stats = {'games': 0, 'draw': 0, 'cutoff': 0, 'plies': 0}
+            self.stats = {'games': 0, 'draw': 0, 'cutoff': 0, 'plies': 0, 'open': 0}
             self.fwd_calls = 0     # NN forward passes + rows served — the loop
             self.fwd_rows = 0      # diffs these to report avg GPU batch size
             self.slots = [self._new_game() for _ in range(n_parallel)]
@@ -1335,17 +1387,26 @@ if _HAS_TORCH:
                 self._pool_nets[label] = net
             return net
 
-        def set_curr_depth(self, d):
-            self.curr_depth = float(d)
+        def _handoff(self, i):
+            """Curriculum: the cheap Thompson opening reached a confident/terminal
+            node — back up curr_backup plies and start full MCTS self-play there.
+            The opening moves are the (untrained) prefix; MCTS covers the rest."""
+            s = self.slots[i]
+            resume = max(0, len(s['open_actions']) - self.curr_backup)
+            state = self.game.new_initial_state()
+            for a in s['open_actions'][:resume]:
+                state.apply_action(a)
+            s['state'] = state; s['actions'] = list(s['open_actions'][:resume])
+            s['resume'] = resume; s['move'] = resume
+            s['phase'] = 'mcts'; s['root'] = None; s['n'] = 0
 
         def _new_game(self):
             rng = self._rng
             sims = (self.fast_sims if rng.random() < self.fast_prob
                     else self.full_sims)
-            state, actions, resume = self.game.new_initial_state(), [], 0
+            state, actions, resume, phase = self.game.new_initial_state(), [], 0, 'mcts'
             if self.curriculum:
-                state, actions, resume = random_backbone(
-                    self.game, rng, self.curr_depth, self.max_plies)
+                phase = 'open'                     # cheap Thompson opening first
             elif self._restart_pool and rng.random() < self.restart_prob:
                 seq = self._restart_pool[rng.integers(len(self._restart_pool))]
                 pref = restart_prefix(seq, rng, self.restart_k_min,
@@ -1358,8 +1419,8 @@ if _HAS_TORCH:
                 if ok and not st.is_terminal():
                     state, actions = st, list(pref)
             slot = {'state': state, 'hist': [], 'aux': [], 'actions': actions,
-                    'move': resume, 'resume': resume, 'sims': sims,
-                    'root': None, 'n': 0, 'pool': None}
+                    'move': resume, 'resume': resume, 'sims': sims, 'phase': phase,
+                    'open_actions': [], 'root': None, 'n': 0, 'pool': None}
             if (self.pool_prob > 0 and self.checkpoint_dir
                     and rng.random() < self.pool_prob):
                 try:
@@ -1393,6 +1454,7 @@ if _HAS_TORCH:
             self.last_aux = len(s['aux'])
             self.stats['games'] += 1
             self.stats['plies'] += int(s['move'])
+            self.stats['open'] += int(s['resume'])   # opening length (frontier)
             if result == 'draw':   self.stats['draw'] += 1
             if result == 'cutoff': self.stats['cutoff'] += 1
             data = s['hist'] + s['aux']
@@ -1435,6 +1497,12 @@ if _HAS_TORCH:
                 pool = s['pool']
                 if pool is not None and s['state'].current_player() == pool['side']:
                     continue
+                if s['phase'] == 'open':               # cheap Thompson opening
+                    if s['state'].is_terminal():
+                        self._handoff(i)
+                    else:
+                        evals.append(('open', i, None, s['state']))
+                    continue
                 if s['root'] is None:
                     evals.append(('root', i, None, s['state'])); continue
                 if _node_solved_outcome(s['root']) is not None:
@@ -1461,6 +1529,20 @@ if _HAS_TORCH:
                 for (kind, a, b, st), pr_i, cf_i, pl_i, bt_i, ob_i in zip(
                         evals, pr, cf, pl, bt, ob):
                     leg = st.legal_actions()
+                    if kind == 'open':             # opening move + confidence gate
+                        loc, confident = opening_decision(
+                            pr_i[leg], cf_i[leg], pl_i[leg], rng,
+                            self.curr_conf_thresh)
+                        s = self.slots[a]
+                        if confident:
+                            self._handoff(a)
+                        else:
+                            s['open_actions'].append(int(leg[loc]))
+                            s['state'].apply_action(int(leg[loc])); s['move'] += 1
+                            if (s['state'].is_terminal()
+                                    or s['move'] >= self.max_plies):
+                                self._handoff(a)
+                        continue
                     node = _TNode(st.current_player(), leg, pr_i[leg], cf_i[leg],
                                   pl_i[leg], bt_i)
                     node.obs = ob_i
@@ -1525,7 +1607,7 @@ if _HAS_TORCH:
             self.window, self.max_batch_rows = batch_window_s, max_batch_rows
             self._gather_ok = _probe_gather(device)
             self.last_aux = 0
-            self.stats = {'games': 0, 'draw': 0, 'cutoff': 0, 'plies': 0}
+            self.stats = {'games': 0, 'draw': 0, 'cutoff': 0, 'plies': 0, 'open': 0}
             self.fwd_calls = 0     # NN forward passes + rows served — the loop
             self.fwd_rows = 0      # diffs these to report avg GPU batch size
             ctx = _mp.get_context('spawn')
@@ -1533,10 +1615,6 @@ if _HAS_TORCH:
             self.episode_q = ctx.Queue(maxsize=64)
             self.resp_qs = [ctx.Queue() for _ in range(n_workers)]
             self.pool_resp_qs = [ctx.Queue() for _ in range(n_workers)]
-            # Adaptive-curriculum depth: shared with the workers so the training
-            # loop can advance the MCTS frontier (set_curr_depth) mid-run.
-            self._curr = ctx.Value('d', float(cfg.get('curr_depth0', 8.0)))
-            cfg = dict(cfg); cfg['curr_depth_shared'] = self._curr
             # Initialise the autograd engine's device state from the MAIN thread
             # before any other thread touches the device (DirectML assert).
             if str(device) != 'cpu':
@@ -1550,15 +1628,6 @@ if _HAS_TORCH:
                 p.start()
             self.server = _threading.Thread(target=self._serve, daemon=True)
             self.server.start()
-
-        def set_curr_depth(self, d):
-            """Advance the adaptive-curriculum MCTS frontier (plies from game end);
-            workers read it via the shared Value on their next new_game."""
-            self._curr.value = float(d)
-
-        @property
-        def curr_depth(self):
-            return self._curr.value
 
         def _get_net(self, net_id):
             if net_id == 'live':
@@ -1645,10 +1714,11 @@ if _HAS_TORCH:
 
         def episodes(self):
             while True:
-                samples, n_aux, result, plies = self.episode_q.get()
+                samples, n_aux, result, plies, resume = self.episode_q.get()
                 self.last_aux = n_aux
                 self.stats['games'] += 1
                 self.stats['plies'] += plies
+                self.stats['open'] += resume        # opening length (frontier)
                 if result == 'draw':   self.stats['draw'] += 1
                 if result == 'cutoff': self.stats['cutoff'] += 1
                 yield samples
