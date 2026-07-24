@@ -250,11 +250,16 @@ def _set_term(node, idx, outcome, proven_win_bonus=0.0):
 def _sample_edge_values(node, rng, temp=1.0):
     """One Thompson draw of each edge's value v=p_win-p_loss from Dir(temp*alpha)
     (temp>1 sharpens toward the mean → argmax≈max; temp=1 samples as-is), minus
-    a virtual-loss penalty on in-flight edges for within-wave diversification."""
-    a = node.alpha * temp
-    g = rng.standard_gamma(a)                       # (k,3) Gamma(a_i,1)
-    x = g / g.sum(1, keepdims=True)                 # ~ Dir(temp*alpha)
-    v = x[:, _WIN] - x[:, _LOSS]
+    a virtual-loss penalty on in-flight edges for within-wave diversification.
+
+    Exact Dirichlet sampling via 3 gamma draws/edge (optimal per the standard
+    method); the only shaved cost is dropping the no-op temp copy and forming
+    v directly from two gamma columns + a (k,) sum instead of normalising the
+    full (k,3).  With `rng` a numpy Generator (PCG64) the gammas are ~15% faster
+    than legacy RandomState; the draw is identical in distribution either way."""
+    g = rng.standard_gamma(node.alpha if temp == 1.0 else node.alpha * temp)
+    s = g.sum(1)                                    # (k,)  Dir normaliser
+    v = (g[:, _WIN] - g[:, _LOSS]) / s              # p_win - p_loss, exact
     if node.vloss.any():
         v = v - 2.0 * node.vloss                    # push in-flight edges down
     return v
@@ -439,7 +444,7 @@ def restart_prefix(seq, rng, k_min, k_max):
     """A backward-restart curriculum prefix: drop a random tail of `seq`."""
     if len(seq) <= k_min:
         return []
-    k = rng.randint(k_min, min(k_max, len(seq)) + 1)
+    k = rng.integers(k_min, min(k_max, len(seq)) + 1)
     return list(seq[:len(seq) - k])
 
 
@@ -474,7 +479,7 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
         set_game(game)
     except Exception:
         pass
-    rng = np.random.RandomState(cfg['seed'] + worker_id * 7919)
+    rng = np.random.default_rng(cfg['seed'] + worker_id * 7919)
     conf_cap = cfg['conf_cap']; pwb = cfg.get('proven_win_bonus', 0.0)
     max_plies = cfg.get('max_plies', 400)
     z_mix = cfg.get('z_mix', 0.5); z_gamma = cfg.get('z_gamma', 0.97)
@@ -496,10 +501,10 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                 del restart_pool[0]
 
     def new_game():
-        sims = cfg['fast_sims'] if rng.rand() < cfg['fast_prob'] else cfg['full_sims']
+        sims = cfg['fast_sims'] if rng.random() < cfg['fast_prob'] else cfg['full_sims']
         state, actions = game.new_initial_state(), []
-        if restart_pool and rng.rand() < restart_prob:
-            seq = restart_pool[rng.randint(len(restart_pool))]
+        if restart_pool and rng.random() < restart_prob:
+            seq = restart_pool[rng.integers(len(restart_pool))]
             pref = restart_prefix(seq, rng, restart_kmin, restart_kmax)
             st = game.new_initial_state(); ok = True
             for a in pref:
@@ -510,16 +515,16 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                 state, actions = st, list(pref)
         slot = {'state': state, 'hist': [], 'aux': [], 'actions': actions,
                 'move': 0, 'sims': sims, 'root': None, 'n': 0, 'pool': None}
-        if pool_prob > 0 and rng.rand() < pool_prob:
+        if pool_prob > 0 and rng.random() < pool_prob:
             try:
                 labels = [f[6:-3] for f in os.listdir(pool_dir)
                           if f.startswith('bench_') and f.endswith('.pt')] \
                     if pool_dir else []
             except OSError:
                 labels = []
-            label = ('random' if not labels or rng.rand() < rand_pool_frac
-                     else labels[rng.randint(len(labels))])
-            slot['pool'] = {'label': label, 'side': int(rng.randint(2))}
+            label = ('random' if not labels or rng.random() < rand_pool_frac
+                     else labels[rng.integers(len(labels))])
+            slot['pool'] = {'label': label, 'side': int(rng.integers(2))}
         return slot
 
     def finish_and_reset(i):
@@ -612,7 +617,7 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                 continue
             legal = state.legal_actions()
             if pool['label'] == 'random':
-                a = int(legal[rng.randint(len(legal))])
+                a = int(legal[rng.integers(len(legal))])
             else:
                 o = np.asarray(state.observation_tensor(state.current_player()),
                                dtype=np.float16)
@@ -992,7 +997,7 @@ if _HAS_TORCH:
             self.temp = temp
             self.pwb = proven_win_bonus
             self.conf_cap = conf_cap
-            self._rng = random_state or np.random.RandomState()
+            self._rng = random_state or np.random.default_rng()
 
         def _expand(self, state):
             pr, cf, pl, bt, ob = nn_eval_states(self.network, self.device,
@@ -1071,7 +1076,7 @@ if _HAS_TORCH:
         """Search-free Thompson-value match, net_a vs net_b, alternating colours.
         net == None → uniform-random mover.  Returns (wins_a, draws, wins_b).
         A lightweight progress pulse (no MCTS) — used by the quick eval."""
-        rng = rng or np.random.RandomState()
+        rng = rng or np.random.default_rng()
         wa = d = wb = 0
         for i in range(n_games):
             a_side = i % 2
@@ -1080,13 +1085,13 @@ if _HAS_TORCH:
                 if state.is_terminal():
                     break
                 leg = state.legal_actions()
-                state.apply_action(int(leg[rng.randint(len(leg))]))
+                state.apply_action(int(leg[rng.integers(len(leg))]))
             ply = 0
             while not state.is_terminal() and ply < max_plies:
                 net = net_a if state.current_player() == a_side else net_b
                 if net is None:
                     leg = state.legal_actions()
-                    mv = int(leg[rng.randint(len(leg))])
+                    mv = int(leg[rng.integers(len(leg))])
                 else:
                     mv = thompson_value_move(net, state, device, rng, temp)
                 state.apply_action(mv); ply += 1
@@ -1129,7 +1134,7 @@ if _HAS_TORCH:
             self.restart_k_min, self.restart_k_max = restart_k_min, restart_k_max
             self.restart_pool_cap = restart_pool_cap
             self.random_pool_frac = random_pool_frac
-            self._rng = np.random.RandomState(seed)
+            self._rng = np.random.default_rng(seed)
             self._restart_pool = []
             self._pool_nets = {}
             self.last_aux = 0
@@ -1155,11 +1160,11 @@ if _HAS_TORCH:
 
         def _new_game(self):
             rng = self._rng
-            sims = (self.fast_sims if rng.rand() < self.fast_prob
+            sims = (self.fast_sims if rng.random() < self.fast_prob
                     else self.full_sims)
             state, actions = self.game.new_initial_state(), []
-            if self._restart_pool and rng.rand() < self.restart_prob:
-                seq = self._restart_pool[rng.randint(len(self._restart_pool))]
+            if self._restart_pool and rng.random() < self.restart_prob:
+                seq = self._restart_pool[rng.integers(len(self._restart_pool))]
                 pref = restart_prefix(seq, rng, self.restart_k_min,
                                       self.restart_k_max)
                 st = self.game.new_initial_state(); ok = True
@@ -1172,18 +1177,18 @@ if _HAS_TORCH:
             slot = {'state': state, 'hist': [], 'aux': [], 'actions': actions,
                     'move': 0, 'sims': sims, 'root': None, 'n': 0, 'pool': None}
             if (self.pool_prob > 0 and self.checkpoint_dir
-                    and rng.rand() < self.pool_prob):
+                    and rng.random() < self.pool_prob):
                 try:
                     labels = [f[6:-3] for f in os.listdir(self.checkpoint_dir)
                               if f.startswith('bench_') and f.endswith('.pt')]
                 except OSError:
                     labels = []
-                if not labels or rng.rand() < self.random_pool_frac:
+                if not labels or rng.random() < self.random_pool_frac:
                     slot['pool'] = {'label': 'random',
-                                    'side': int(rng.randint(2)), 'net': None}
+                                    'side': int(rng.integers(2)), 'net': None}
                 else:
-                    lb = labels[rng.randint(len(labels))]
-                    slot['pool'] = {'label': lb, 'side': int(rng.randint(2)),
+                    lb = labels[rng.integers(len(labels))]
+                    slot['pool'] = {'label': lb, 'side': int(rng.integers(2)),
                                     'net': self._load_pool_net(lb)}
             return slot
 
@@ -1218,7 +1223,7 @@ if _HAS_TORCH:
                     continue
                 if pool['label'] == 'random':
                     leg = state.legal_actions()
-                    a = int(leg[self._rng.randint(len(leg))])
+                    a = int(leg[self._rng.integers(len(leg))])
                 else:
                     a = policy_move(pool['net'], state, 'cpu')
                 s['root'] = _descend(s['root'], a)
@@ -1486,7 +1491,7 @@ if _HAS_TORCH:
                                                       # weak/random net run forever
             self.batch_size = batch_size
             self.start_elo = start_elo
-            self.rng = np.random.RandomState(seed)
+            self.rng = np.random.default_rng(seed)
             self.players = ['random']
             self.nets = {'random': None}
             self.elo = {'random': start_elo}
@@ -1501,7 +1506,7 @@ if _HAS_TORCH:
         def _move(self, label, bot_cache, state):
             if self.nets[label] is None:
                 leg = state.legal_actions()
-                return int(leg[self.rng.randint(len(leg))])
+                return int(leg[self.rng.integers(len(leg))])
             bot = bot_cache.setdefault(label, self._bot(label))
             root = bot.mcts_search(state)
             return root_pick(root, self.rng, thompson=False)
@@ -1514,7 +1519,7 @@ if _HAS_TORCH:
                 if state.is_terminal():
                     break
                 leg = state.legal_actions()
-                state.apply_action(int(leg[self.rng.randint(len(leg))]))
+                state.apply_action(int(leg[self.rng.integers(len(leg))]))
             ply = 0
             while not state.is_terminal() and ply < self.max_eval_plies:
                 lab = a if state.current_player() == 0 else b
