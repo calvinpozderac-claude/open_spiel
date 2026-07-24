@@ -1202,6 +1202,8 @@ if _HAS_TORCH:
             self._pool_nets = {}
             self.last_aux = 0
             self.stats = {'games': 0, 'draw': 0, 'cutoff': 0, 'plies': 0}
+            self.fwd_calls = 0     # NN forward passes + rows served — the loop
+            self.fwd_rows = 0      # diffs these to report avg GPU batch size
             self.slots = [self._new_game() for _ in range(n_parallel)]
 
         def _push_seed(self, seq):
@@ -1333,6 +1335,7 @@ if _HAS_TORCH:
                             seen.add((id(node), idx))
                             evals.append(('leaf', node, idx, st))
             if evals:
+                self.fwd_calls += 1; self.fwd_rows += len(evals)
                 pr, cf, pl, bt, ob = nn_eval_states(self.network, self.device,
                                                     [e[3] for e in evals])
                 for (kind, a, b, st), pr_i, cf_i, pl_i, bt_i, ob_i in zip(
@@ -1403,6 +1406,8 @@ if _HAS_TORCH:
             self._gather_ok = _probe_gather(device)
             self.last_aux = 0
             self.stats = {'games': 0, 'draw': 0, 'cutoff': 0, 'plies': 0}
+            self.fwd_calls = 0     # NN forward passes + rows served — the loop
+            self.fwd_rows = 0      # diffs these to report avg GPU batch size
             ctx = _mp.get_context('spawn')
             self.req_q = ctx.Queue()
             self.episode_q = ctx.Queue(maxsize=64)
@@ -1473,6 +1478,8 @@ if _HAS_TORCH:
                     net, dev, needs_lock = self._get_net(net_id)
                     obs = np.concatenate([o for _, o, _ in group], axis=0)
                     xin = obs.reshape(-1, *_OBS_SHAPE).astype(np.float32)
+                    if net_id == 'live':
+                        self.fwd_calls += 1; self.fwd_rows += xin.shape[0]
                     row_legals = [l for _, _, ls in group for l in ls]
                     flat = np.concatenate([l.astype(np.int64) + r * A
                                            for r, l in enumerate(row_legals)])
