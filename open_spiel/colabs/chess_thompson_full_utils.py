@@ -854,14 +854,24 @@ if _HAS_TORCH:
             nn.init.constant_(self.beta_out.bias, 1.4)
 
         def forward(self, x):
+            # Returns RAW dist logits + RAW conf (softmax-over-3 and softplus are
+            # per-action/elementwise, so they're deferred and applied only to the
+            # ~35 LEGAL entries by the consumer — never the full 4674 actions).
             h = self.head(self.body(self.stem(x)))
-            probs = F.softmax(self.dist_out(h).view(-1, _NUM_ACTIONS, 3), dim=-1)
-            conf = torch.clamp(CONF_MIN + _softplus(self.conf_out(h)),
-                               max=CONF_MAX)
+            dist_logits = self.dist_out(h).view(-1, _NUM_ACTIONS, 3)
+            conf_raw = self.conf_out(h)
             plog = self.plog_out(h)
             beta = torch.clamp(CONF_MIN + _softplus(self.beta_out(h)).squeeze(-1),
                                max=POLICY_CONC_MAX)
-            return probs, conf, plog, beta
+            return dist_logits, conf_raw, plog, beta
+
+    def _act_p3(logits):
+        """RAW dist logits → (p_win, p_draw, p_loss) probabilities."""
+        return F.softmax(logits, dim=-1)
+
+    def _act_conf(raw):
+        """RAW conf output → concentration α0 ∈ [CONF_MIN, CONF_MAX]."""
+        return torch.clamp(CONF_MIN + _softplus(raw), max=CONF_MAX)
 
     # ── lgamma / digamma with a DirectML-friendly fallback ────────────────────
     # The closed-form Dirichlet KL is already minimal; its ONLY expensive pieces
@@ -913,18 +923,19 @@ if _HAS_TORCH:
         return (_lg(a0) - _lg(a).sum(-1) - _lg(b0) + _lg(b).sum(-1)
                 + ((a - b) * (_dg(a) - _dg(a0).unsqueeze(-1))).sum(-1))
 
-    def full_loss(probs, conf, plog, beta, meta, weights):
-        """All four losses on a batch, from the network's dense head outputs and
-        the padded per-sample targets in `meta` (a dict of tensors on the same
-        device).  Padded legal layout (B, K): entries beyond a sample's legal
-        count are masked out.  Returns (total, parts-dict-of-floats)."""
+    def full_loss(dist_logits, conf_raw, plog, beta, meta, weights):
+        """All four losses on a batch.  `dist_logits` (B,A,3) and `conf_raw` (B,A)
+        are the network's RAW head outputs; softmax/softplus are applied only to
+        the gathered LEGAL entries (never the full 4674 actions).  Padded legal
+        layout (B, K): entries beyond a sample's legal count are masked out.
+        Returns (total, parts-dict-of-floats)."""
         FLOOR = ALPHA_FLOOR
         act = meta['pad_act']                       # (B,K) long
         mask = meta['pad_mask']                     # (B,K) bool
         maskf = mask.float()
         idx3 = act.unsqueeze(-1).expand(-1, -1, 3)
-        p3 = probs.gather(1, idx3)                  # (B,K,3)
-        cf = conf.gather(1, act)                    # (B,K)
+        p3 = _act_p3(dist_logits.gather(1, idx3))   # (B,K,3) softmax on legal only
+        cf = _act_conf(conf_raw.gather(1, act))     # (B,K)   softplus on legal only
         pl = plog.gather(1, act)                    # (B,K)
         # Per-sample policy π = softmax over legal (masked).
         pl = pl.masked_fill(~mask, -1e9)
@@ -965,18 +976,21 @@ if _HAS_TORCH:
         L_pol = (_lg(Tsum) - lgt - _lg(Bsum) + lgb + dig).mean()
         wv, wvd, wav, wpol = weights
         total = wpol * L_pol + wav * L_av + wvd * L_vd + wv * L_value
-        # Concentration (α0) diagnostics: predicted vs target total pseudo-counts
-        # for each Dirichlet head — how confident the net is vs the search target.
+        # Loss values + concentration (α0) diagnostics (predicted vs target total
+        # pseudo-counts per Dirichlet head).  Stack every reported scalar and pull
+        # it back in ONE .cpu() transfer — each separate float()/.item() is a full
+        # pipeline sync on DirectML, so 11 of them per step (×TRAIN_STEPS_PER_EP)
+        # was pure stall.  parts['loss'] is returned so the caller needn't sync
+        # the loss tensor again.
         with torch.no_grad():
             evc = evm.sum().clamp_min(1.0)
             av_p = (pv.reshape(-1, 3).sum(-1) * evm).sum() / evc      # ≈ conf
             av_t = (meta['ev_alpha'].reshape(-1, 3).sum(-1) * evm).sum() / evc
-            parts = {'pol': float(L_pol.detach()), 'av': float(L_av.detach()),
-                     'vd': float(L_vd.detach()), 'val': float(L_value.detach()),
-                     'cav_p': float(av_p), 'cav_t': float(av_t),
-                     'cqv_p': float(qv_pred.sum(1).mean()),
-                     'cqv_t': float(meta['qv_t'].sum(1).mean()),
-                     'cpol_p': float(beta.mean()), 'cpol_t': float(Tsum.mean())}
+            diag = torch.stack([total, L_pol, L_av, L_vd, L_value, av_p, av_t,
+                                qv_pred.sum(1).mean(), meta['qv_t'].sum(1).mean(),
+                                beta.mean(), Tsum.mean()]).to('cpu', copy=False).tolist()
+        parts = dict(zip(('loss', 'pol', 'av', 'vd', 'val', 'cav_p', 'cav_t',
+                          'cqv_p', 'cqv_t', 'cpol_p', 'cpol_t'), diag))
         return total, parts
 
     def build_batch_meta(batch, device):
@@ -1023,7 +1037,7 @@ if _HAS_TORCH:
         torch.autograd.backward([probs, conf, plog, beta],
                                 [pc.grad.to(device), cc.grad.to(device),
                                  lc.grad.to(device), bc.grad.to(device)])
-        return float(loss_cpu.detach()), parts
+        return parts['loss'], parts
 
     def train_step(network, optimizer, batch, device, backend, weights,
                    grad_clip=1.0, model_lock=None):
@@ -1047,7 +1061,7 @@ if _HAS_TORCH:
                     meta = build_batch_meta(batch, device)
                     loss, parts = full_loss(probs, conf, plog, beta, meta, weights)
                     loss.backward()
-                    lv = float(loss.detach())
+                    lv = parts['loss']
                 except Exception as e:
                     if backend != 'directml':
                         raise
@@ -1101,8 +1115,9 @@ if _HAS_TORCH:
         obs16 = np.asarray([s.observation_tensor(s.current_player())
                             for s in states], dtype=np.float16)
         x = batch_to_tensor(obs16, device)
-        with torch.no_grad():
-            probs, conf, plog, beta = network(x)
+        with torch.inference_mode():
+            dl, cr, plog, beta = network(x)
+            probs = _act_p3(dl); conf = _act_conf(cr)      # activate for the tree
         return (probs.cpu().numpy(), conf.cpu().numpy(),
                 plog.cpu().numpy(), beta.cpu().numpy(), obs16)
 
@@ -1500,18 +1515,20 @@ if _HAS_TORCH:
             return net, 'cpu', False
 
         def _forward_gathered(self, net, dev, xin, flat, rowsel):
+            # net returns RAW dist logits + RAW conf; gather the ~1% legal entries
+            # first, then softmax/softplus only those (never the dense 4674).
             x = torch.from_numpy(xin).to(dev)
-            probs, conf, plog, beta = net(x)
+            dl, cr, plog, beta = net(x)
             if self._gather_ok and str(dev) != 'cpu':
                 ft = torch.from_numpy(flat).to(dev)
                 rs = torch.from_numpy(rowsel).to(dev)
-                p = probs.reshape(-1, 3).index_select(0, ft).cpu().numpy()
-                c = conf.reshape(-1).index_select(0, ft).cpu().numpy()
+                p = _act_p3(dl.reshape(-1, 3).index_select(0, ft)).cpu().numpy()
+                c = _act_conf(cr.reshape(-1).index_select(0, ft)).cpu().numpy()
                 pl = plog.reshape(-1).index_select(0, ft).cpu().numpy()
                 bt = beta.index_select(0, rs).cpu().numpy()
             else:
-                p = probs.reshape(-1, 3).cpu().numpy()[flat]
-                c = conf.reshape(-1).cpu().numpy()[flat]
+                p = _act_p3(dl.reshape(-1, 3)).cpu().numpy()[flat]
+                c = _act_conf(cr.reshape(-1)).cpu().numpy()[flat]
                 pl = plog.reshape(-1).cpu().numpy()[flat]
                 bt = beta.cpu().numpy()[rowsel]
             return p, c, pl, bt
