@@ -152,7 +152,7 @@ class _TNode:
         Su : [sw, sd, sl]   = sum_a u_a * E[x^2]_a   (E[x^2]=var_within+mean^2)
     """
     __slots__ = ('player', 'legal', 'alpha', 'pprior', 'pcount', 'term',
-                 'vloss', 'children', 'obs', 'W', 'Mu', 'Su')
+                 'vloss', 'children', 'obs', 'W', 'Mu', 'Su', 'ev', 'sd')
 
     def __init__(self, player, legal, p3, conf, plogits, beta):
         self.player = player
@@ -178,6 +178,14 @@ class _TNode:
         self.W  = float(u.sum())
         self.Mu = (u[:, None] * m).sum(0).tolist()
         self.Su = (u[:, None] * s).sum(0).tolist()
+        # Gaussian selection needs per-edge (E[v], sd[v]); cache only when on.
+        if _GAUSSIAN_SELECT:
+            mw, ml = m[:, _WIN], m[:, _LOSS]
+            self.ev = mw - ml
+            self.sd = np.sqrt((mw * (1 - mw) + ml * (1 - ml) + 2 * mw * ml)
+                              / (a0 + 1.0))
+        else:
+            self.ev = self.sd = None
 
 
 def _edge_ms(a):
@@ -203,6 +211,17 @@ def _acc(node, idx, sign):
     Mu, Su = node.Mu, node.Su
     Mu[0] += u * mw; Mu[1] += u * md; Mu[2] += u * ml
     Su[0] += u * sw; Su[1] += u * sd; Su[2] += u * sl
+
+
+def _set_edge_v(node, idx):
+    """Refresh the cached (E[v], sd[v]) for one edge after its alpha changed —
+    only called in Gaussian-selection mode (pure scalar, backup hot path)."""
+    aw, ad, al = node.alpha[idx].tolist()
+    a0 = aw + ad + al
+    mw, ml = aw / a0, al / a0
+    node.ev[idx] = mw - ml
+    node.sd[idx] = ((mw * (1 - mw) + ml * (1 - ml) + 2 * mw * ml)
+                    / (a0 + 1.0)) ** 0.5
 
 
 def _pi_post(node):
@@ -244,6 +263,8 @@ def _set_term(node, idx, outcome, proven_win_bonus=0.0):
     node.alpha[idx] = _SPIKE[outcome]
     if outcome == _WIN and proven_win_bonus:
         node.pcount[idx] += proven_win_bonus
+    if _GAUSSIAN_SELECT and node.ev is not None:
+        _set_edge_v(node, idx)
     _acc(node, idx, +1.0)                         # add spike contribution
 
 
@@ -256,10 +277,18 @@ def _sample_edge_values(node, rng, temp=1.0):
     method); the only shaved cost is dropping the no-op temp copy and forming
     v directly from two gamma columns + a (k,) sum instead of normalising the
     full (k,3).  With `rng` a numpy Generator (PCG64) the gammas are ~15% faster
-    than legacy RandomState; the draw is identical in distribution either way."""
-    g = rng.standard_gamma(node.alpha if temp == 1.0 else node.alpha * temp)
-    s = g.sum(1)                                    # (k,)  Dir normaliser
-    v = (g[:, _WIN] - g[:, _LOSS]) / s              # p_win - p_loss, exact
+    than legacy RandomState; the draw is identical in distribution either way.
+
+    In 'gaussian' selection mode (set_selection), instead sample v ~ N(E[v],
+    Var[v]) from the cached per-edge moments — ~6-7x cheaper, an approximation
+    (temperature narrows the sd; unbounded draws are fine for an argmax)."""
+    if _GAUSSIAN_SELECT and node.ev is not None:
+        sd = node.sd if temp == 1.0 else node.sd * (temp ** -0.5)
+        v = node.ev + sd * rng.standard_normal(len(node.legal))
+    else:
+        g = rng.standard_gamma(node.alpha if temp == 1.0 else node.alpha * temp)
+        s = g.sum(1)                                # (k,)  Dir normaliser
+        v = (g[:, _WIN] - g[:, _LOSS]) / s          # p_win - p_loss, exact
     if node.vloss.any():
         v = v - 2.0 * node.vloss                    # push in-flight edges down
     return v
@@ -303,6 +332,8 @@ def _backup(path, conf_max=CONF_MAX):
         node.pcount[idx] += 1.0                   # policy observation
         if node.term[idx] < 0 and node.children[idx] is not None:
             node.alpha[idx] = flip_alpha(node_qv(node.children[idx], conf_max))
+            if _GAUSSIAN_SELECT:
+                _set_edge_v(node, idx)
         _acc(node, idx, +1.0)                      # add updated contribution
 
 
@@ -479,6 +510,7 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
         set_game(game)
     except Exception:
         pass
+    set_selection(cfg.get('selection', 'dirichlet'))     # honour it in-process
     rng = np.random.default_rng(cfg['seed'] + worker_id * 7919)
     conf_cap = cfg['conf_cap']; pwb = cfg.get('proven_win_bonus', 0.0)
     max_plies = cfg.get('max_plies', 400)
@@ -663,6 +695,27 @@ def set_head_ch(n):
     count: 8→~12M, 4→~6.5M, 2→~3.5M, 1→~2.0M for chess's 4674 actions."""
     global _HEAD_CH_DEFAULT
     _HEAD_CH_DEFAULT = int(n)
+
+
+# In-tree Thompson selection sampler. 'dirichlet' (default) is the EXACT draw
+# (3 gammas/edge → v=p_win-p_loss).  'gaussian' is a ~6-7x-cheaper APPROXIMATION:
+# sample v ~ N(E[v], Var[v]) from the belief's closed-form moments (cached per
+# edge; only maintained when this is on, so 'dirichlet' pays nothing).  It
+# matches mean+variance exactly and is a good fit (KS~0.01 vs the true v), but
+# drops skewness and is unbounded — harmless for an argmax selection.  Backup,
+# targets, and losses are UNCHANGED either way; this only affects which action a
+# rollout explores.  A/B it against an exact run before trusting it.
+_GAUSSIAN_SELECT = False
+
+
+def set_selection(mode):
+    """mode: 'dirichlet' (exact, default) | 'gaussian' (fast approximation).
+    Set once before building the self-play/eval bots; workers receive it via
+    cfg['selection'] and call this themselves."""
+    global _GAUSSIAN_SELECT
+    if mode not in ('dirichlet', 'gaussian'):
+        raise ValueError(f"selection must be 'dirichlet' or 'gaussian', got {mode!r}")
+    _GAUSSIAN_SELECT = (mode == 'gaussian')
 
 
 def set_game(game):
@@ -871,8 +924,18 @@ if _HAS_TORCH:
         L_pol = (torch.lgamma(Tsum) - lgt - torch.lgamma(Bsum) + lgb + dig).mean()
         wv, wvd, wav, wpol = weights
         total = wpol * L_pol + wav * L_av + wvd * L_vd + wv * L_value
-        parts = {'pol': float(L_pol.detach()), 'av': float(L_av.detach()),
-                 'vd': float(L_vd.detach()), 'val': float(L_value.detach())}
+        # Concentration (α0) diagnostics: predicted vs target total pseudo-counts
+        # for each Dirichlet head — how confident the net is vs the search target.
+        with torch.no_grad():
+            evc = evm.sum().clamp_min(1.0)
+            av_p = (pv.reshape(-1, 3).sum(-1) * evm).sum() / evc      # ≈ conf
+            av_t = (meta['ev_alpha'].reshape(-1, 3).sum(-1) * evm).sum() / evc
+            parts = {'pol': float(L_pol.detach()), 'av': float(L_av.detach()),
+                     'vd': float(L_vd.detach()), 'val': float(L_value.detach()),
+                     'cav_p': float(av_p), 'cav_t': float(av_t),
+                     'cqv_p': float(qv_pred.sum(1).mean()),
+                     'cqv_t': float(meta['qv_t'].sum(1).mean()),
+                     'cpol_p': float(beta.mean()), 'cpol_t': float(Tsum.mean())}
         return total, parts
 
     def build_batch_meta(batch, device):
