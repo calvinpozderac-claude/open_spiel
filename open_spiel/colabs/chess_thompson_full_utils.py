@@ -139,9 +139,20 @@ class _TNode:
         pcount[a]       observed "a is optimal" counts (Thompson-argmax visits)
         term[a]         proven outcome (_WIN/_DRAW/_LOSS) or -1
     Constructed from ALREADY-GATHERED per-legal-action network rows.
+
+    INCREMENTAL MIXTURE ACCUMULATORS (W, Mu, Su): node_qv needs the
+    policy-weighted mixture  sum_a u_a * (mean_a, E[x^2]_a) / W,  u_a=pprior+pcount.
+    Recomputing that sum over all k edges every backup was ~half of self-play
+    CPU.  Instead we keep it UN-normalised so the moving denominator W is trivial,
+    and every edge mutation applies an O(1) delta (see _acc): identical result,
+    O(1) instead of O(k).  Stored as Python scalars/lists — numpy's per-op
+    dispatch overhead on 3-vectors would erase the win.
+        W  : float          = sum_a u_a
+        Mu : [mw, md, ml]   = sum_a u_a * mean_a
+        Su : [sw, sd, sl]   = sum_a u_a * E[x^2]_a   (E[x^2]=var_within+mean^2)
     """
     __slots__ = ('player', 'legal', 'alpha', 'pprior', 'pcount', 'term',
-                 'vloss', 'children', 'obs')
+                 'vloss', 'children', 'obs', 'W', 'Mu', 'Su')
 
     def __init__(self, player, legal, p3, conf, plogits, beta):
         self.player = player
@@ -159,22 +170,68 @@ class _TNode:
         self.vloss  = np.zeros(k, dtype=np.int32)
         self.children = [None] * k
         self.obs = None
+        # Initialise the mixture accumulators from all edges (the one O(k) pass).
+        a0 = self.alpha.sum(1)                                         # (k,)
+        m  = self.alpha / a0[:, None]                                  # (k,3)
+        s  = m * (1.0 - m) / (a0[:, None] + 1.0) + m * m               # E[x^2]
+        u  = self.pprior                                               # pcount=0
+        self.W  = float(u.sum())
+        self.Mu = (u[:, None] * m).sum(0).tolist()
+        self.Su = (u[:, None] * s).sum(0).tolist()
+
+
+def _edge_ms(a):
+    """(mean, E[x^2]) of one edge's Dirichlet, as two 3-tuples of Python floats.
+    Pure-scalar (no numpy dispatch) — this is on the per-node backup hot path."""
+    aw, ad, al = a.tolist()
+    a0 = aw + ad + al
+    inv = 1.0 / (a0 + 1.0)
+    mw, md, ml = aw / a0, ad / a0, al / a0
+    return ((mw, md, ml),
+            (mw * (1.0 - mw) * inv + mw * mw,
+             md * (1.0 - md) * inv + md * md,
+             ml * (1.0 - ml) * inv + ml * ml))
+
+
+def _acc(node, idx, sign):
+    """Add (sign=+1) or remove (sign=-1) edge idx's contribution to the node's
+    mixture accumulators, using the edge's CURRENT alpha/pcount.  Wrap every edge
+    mutation as: _acc(node, idx, -1); <mutate>; _acc(node, idx, +1)."""
+    u = float(node.pprior[idx] + node.pcount[idx]) * sign
+    (mw, md, ml), (sw, sd, sl) = _edge_ms(node.alpha[idx])
+    node.W += u
+    Mu, Su = node.Mu, node.Su
+    Mu[0] += u * mw; Mu[1] += u * md; Mu[2] += u * ml
+    Su[0] += u * sw; Su[1] += u * sd; Su[2] += u * sl
 
 
 def _pi_post(node):
-    """Posterior policy weights pi_a = (pprior + pcount) / total  — the current
-    belief over which move is optimal (NN prior updated by search observations).
-    """
+    """Posterior policy weights pi_a = (pprior + pcount) / total — the belief
+    over which move is optimal (NN prior updated by search observations).  Also
+    the mixture weights inside node_qv (there via the incremental accumulator)."""
     w = node.pprior + node.pcount
     return w / w.sum()
 
 
 def node_qv(node, conf_max=CONF_MAX):
-    """Position value-distribution: qv = moment-match( sum_a pi_a * pv_a ),
-    the policy-weighted mixture of the edge beliefs (mover's perspective)."""
-    if len(node.legal) == 1:
-        return node.alpha[0].copy()
-    return moment_match_mixture(_pi_post(node), node.alpha, conf_max)
+    """Position value-distribution qv = moment-match( sum_a pi_a * pv_a ), the
+    policy-weighted mixture of the edge beliefs (mover's perspective).  Read
+    straight off the incremental accumulators in O(1) — algebraically identical
+    to moment_match_mixture(pi_post, alpha)."""
+    W = node.W
+    Mw, Md, Ml = node.Mu[0] / W, node.Mu[1] / W, node.Mu[2] / W
+    Vw = node.Su[0] / W - Mw * Mw
+    Vd = node.Su[1] / W - Md * Md
+    Vl = node.Su[2] / W - Ml * Ml
+    if Vw < 1e-12: Vw = 1e-12
+    if Vd < 1e-12: Vd = 1e-12
+    if Vl < 1e-12: Vl = 1e-12
+    beta0 = (Mw * (1 - Mw) + Md * (1 - Md) + Ml * (1 - Ml)) / (Vw + Vd + Vl) - 1.0
+    if beta0 < 2.0 * ALPHA_FLOOR: beta0 = 2.0 * ALPHA_FLOOR
+    elif beta0 > conf_max:        beta0 = conf_max
+    return np.array([max(Mw * beta0, ALPHA_FLOOR),
+                     max(Md * beta0, ALPHA_FLOOR),
+                     max(Ml * beta0, ALPHA_FLOOR)])
 
 
 def _set_term(node, idx, outcome, proven_win_bonus=0.0):
@@ -182,10 +239,12 @@ def _set_term(node, idx, outcome, proven_win_bonus=0.0):
     extra policy-prior pseudocounts so pi_a snaps onto the mating move (teaches
     the prior the max at the end of the game fast — the MCTS-Solver accelerates
     the *value*; this accelerates the *policy*)."""
+    _acc(node, idx, -1.0)                        # remove old contribution
     node.term[idx]  = outcome
     node.alpha[idx] = _SPIKE[outcome]
     if outcome == _WIN and proven_win_bonus:
         node.pcount[idx] += proven_win_bonus
+    _acc(node, idx, +1.0)                         # add spike contribution
 
 
 def _sample_edge_values(node, rng, temp=1.0):
@@ -235,9 +294,11 @@ def _backup(path, conf_max=CONF_MAX):
     (now-updated) child, so a fresh leaf estimate propagates to the root."""
     for node, idx in reversed(path):
         node.vloss[idx] -= 1
-        node.pcount[idx] += 1.0
+        _acc(node, idx, -1.0)                     # remove edge's old contribution
+        node.pcount[idx] += 1.0                   # policy observation
         if node.term[idx] < 0 and node.children[idx] is not None:
             node.alpha[idx] = flip_alpha(node_qv(node.children[idx], conf_max))
+        _acc(node, idx, +1.0)                      # add updated contribution
 
 
 def _node_solved_outcome(node):
