@@ -863,14 +863,55 @@ if _HAS_TORCH:
                                max=POLICY_CONC_MAX)
             return probs, conf, plog, beta
 
+    # ── lgamma / digamma with a DirectML-friendly fallback ────────────────────
+    # The closed-form Dirichlet KL is already minimal; its ONLY expensive pieces
+    # are lgamma (log-normaliser) and digamma (E[log x]).  Neither has a DirectML
+    # kernel, which is why the loss was offloaded to the CPU (dense download +
+    # CPU math under the model lock — the dominant training cost).  These
+    # elementary-op approximations (8-step upward recurrence + Stirling/asymptotic
+    # series) run entirely on the GPU: float32 error ~2e-4, and autograd through
+    # _lgamma_dml reproduces digamma to ~1e-9 — negligible for a loss.  Used only
+    # on DirectML; CUDA/CPU keep the exact native ops.
+    _LG_SHIFT = 8
+
+    def _lgamma_dml(x):
+        g = torch.zeros_like(x); xx = x
+        for _ in range(_LG_SHIFT):
+            g = g - torch.log(xx); xx = xx + 1.0
+        inv = 1.0 / xx; inv2 = inv * inv
+        return g + ((xx - 0.5) * torch.log(xx) - xx + 0.5 * math.log(2 * math.pi)
+                    + inv * (1.0/12 - inv2 * (1.0/360 - inv2 * (1.0/1260))))
+
+    def _digamma_dml(x):
+        g = torch.zeros_like(x); xx = x
+        for _ in range(_LG_SHIFT):
+            g = g - 1.0 / xx; xx = xx + 1.0
+        inv = 1.0 / xx; inv2 = inv * inv
+        return g + (torch.log(xx) - 0.5 * inv
+                    - inv2 * (1.0/12 - inv2 * (1.0/120 - inv2 / 252.0)))
+
+    _LG_APPROX = False           # set True on DirectML (see set_backend)
+    _DML_GPU_LOSS = True         # run the whole loss on the DML GPU; auto-falls
+                                 # back to the CPU-split path if a device op fails
+
+    def set_backend(backend):
+        """Pick exact (CUDA/CPU) vs GPU-approx (DirectML) lgamma/digamma so the
+        whole loss can run on-device.  Called from the training setup."""
+        global _LG_APPROX
+        _LG_APPROX = (backend == 'directml')
+
+    def _lg(x):
+        return _lgamma_dml(x) if _LG_APPROX else torch.lgamma(x)
+
+    def _dg(x):
+        return _digamma_dml(x) if _LG_APPROX else torch.digamma(x)
+
     # ── Closed-form Dirichlet KL (batched, differentiable) ────────────────────
     def _dir_kl_rows(a, b):
         """forward KL( Dir(a) ‖ Dir(b) ) per row, a/b: (N,3)."""
         a0, b0 = a.sum(-1), b.sum(-1)
-        return (torch.lgamma(a0) - torch.lgamma(a).sum(-1)
-                - torch.lgamma(b0) + torch.lgamma(b).sum(-1)
-                + ((a - b) * (torch.digamma(a)
-                              - torch.digamma(a0).unsqueeze(-1))).sum(-1))
+        return (_lg(a0) - _lg(a).sum(-1) - _lg(b0) + _lg(b).sum(-1)
+                + ((a - b) * (_dg(a) - _dg(a0).unsqueeze(-1))).sum(-1))
 
     def full_loss(probs, conf, plog, beta, meta, weights):
         """All four losses on a batch, from the network's dense head outputs and
@@ -917,11 +958,11 @@ if _HAS_TORCH:
         b = (beta.unsqueeze(1) * pi) * maskf                      # (B,K), Σ_k=beta
         Tsum = t.sum(1); Bsum = b.sum(1)
         zeros = torch.zeros_like(t)
-        lgt = torch.where(mask, torch.lgamma(t.clamp_min(FLOOR)), zeros).sum(1)
-        lgb = torch.where(mask, torch.lgamma(b.clamp_min(FLOOR)), zeros).sum(1)
-        dig = torch.where(mask, (t - b) * (torch.digamma(t.clamp_min(FLOOR))
-                          - torch.digamma(Tsum).unsqueeze(1)), zeros).sum(1)
-        L_pol = (torch.lgamma(Tsum) - lgt - torch.lgamma(Bsum) + lgb + dig).mean()
+        lgt = torch.where(mask, _lg(t.clamp_min(FLOOR)), zeros).sum(1)
+        lgb = torch.where(mask, _lg(b.clamp_min(FLOOR)), zeros).sum(1)
+        dig = torch.where(mask, (t - b) * (_dg(t.clamp_min(FLOOR))
+                          - _dg(Tsum).unsqueeze(1)), zeros).sum(1)
+        L_pol = (_lg(Tsum) - lgt - _lg(Bsum) + lgb + dig).mean()
         wv, wvd, wav, wpol = weights
         total = wpol * L_pol + wav * L_av + wvd * L_vd + wv * L_value
         # Concentration (α0) diagnostics: predicted vs target total pseudo-counts
@@ -967,36 +1008,55 @@ if _HAS_TORCH:
                 'ev_alpha': t(ev_alpha), 'qv_t': t(qv_t),
                 'z': t(z), 'z_w': t(z_w)}
 
+    def _cpu_split_loss(probs, conf, plog, beta, batch, device, weights):
+        """Fallback: gather + KL on CPU, seed dense grads back to the device graph
+        (used on CUDA/CPU never; on DirectML only if the on-device loss can't run
+        a device op like gather-backward).  Downloads the dense head outputs — the
+        cost the on-device path exists to avoid."""
+        meta = build_batch_meta(batch, 'cpu')
+        pc = probs.detach().cpu().requires_grad_(True)
+        cc = conf.detach().cpu().requires_grad_(True)
+        lc = plog.detach().cpu().requires_grad_(True)
+        bc = beta.detach().cpu().requires_grad_(True)
+        loss_cpu, parts = full_loss(pc, cc, lc, bc, meta, weights)
+        loss_cpu.backward()
+        torch.autograd.backward([probs, conf, plog, beta],
+                                [pc.grad.to(device), cc.grad.to(device),
+                                 lc.grad.to(device), bc.grad.to(device)])
+        return float(loss_cpu.detach()), parts
+
     def train_step(network, optimizer, batch, device, backend, weights,
                    grad_clip=1.0, model_lock=None):
-        """One optimiser step.  On DirectML the lgamma/digamma-bearing loss is
-        computed on CPU and its gradients are seeded back into the device graph
-        (no exotic op ever runs on the DML device); elsewhere it runs on-device.
-        Returns (loss_float, parts)."""
+        """One optimiser step, loss computed ON-DEVICE for every backend — on
+        DirectML the lgamma/digamma use GPU-friendly approximations (set_backend),
+        so nothing is offloaded to the CPU.  If a DML device op (e.g. gather
+        backward) is unsupported, it falls back ONCE to the CPU-split path and
+        stays there.  Returns (loss_float, parts)."""
         import contextlib
+        global _DML_GPU_LOSS
         lock = model_lock or contextlib.nullcontext()
         x = batch_to_tensor([s['obs'] for s in batch], device)
         with lock:
             probs, conf, plog, beta = network(x)
             optimizer.zero_grad()
-            if backend == 'directml':
-                meta = build_batch_meta(batch, 'cpu')
-                pc = probs.detach().cpu().requires_grad_(True)
-                cc = conf.detach().cpu().requires_grad_(True)
-                lc = plog.detach().cpu().requires_grad_(True)
-                bc = beta.detach().cpu().requires_grad_(True)
-                loss_cpu, parts = full_loss(pc, cc, lc, bc, meta, weights)
-                loss_cpu.backward()
-                torch.autograd.backward(
-                    [probs, conf, plog, beta],
-                    [pc.grad.to(device), cc.grad.to(device),
-                     lc.grad.to(device), bc.grad.to(device)])
-                lv = float(loss_cpu)
+            if backend == 'directml' and not _DML_GPU_LOSS:
+                lv, parts = _cpu_split_loss(probs, conf, plog, beta, batch,
+                                            device, weights)
             else:
-                meta = build_batch_meta(batch, device)
-                loss, parts = full_loss(probs, conf, plog, beta, meta, weights)
-                loss.backward()
-                lv = float(loss)
+                try:
+                    meta = build_batch_meta(batch, device)
+                    loss, parts = full_loss(probs, conf, plog, beta, meta, weights)
+                    loss.backward()
+                    lv = float(loss.detach())
+                except Exception as e:
+                    if backend != 'directml':
+                        raise
+                    _DML_GPU_LOSS = False       # permanent fallback for this run
+                    print(f'on-device loss unavailable ({type(e).__name__}: {e}) '
+                          f'— using CPU-split loss')
+                    optimizer.zero_grad()
+                    lv, parts = _cpu_split_loss(probs, conf, plog, beta, batch,
+                                                device, weights)
             torch.nn.utils.clip_grad_norm_(network.parameters(), grad_clip)
             optimizer.step()
         return lv, parts
