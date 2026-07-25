@@ -37,6 +37,8 @@ import copy
 import math
 import os
 import random
+import sys
+import time
 
 import numpy as np
 
@@ -65,6 +67,27 @@ _FLIP_TERM = np.array([_LOSS, _DRAW, _WIN], dtype=np.int8)
 ALPHA_FLOOR = 0.05        # per-component Dirichlet floor (keeps lgamma/KL finite)
 CONF_MIN    = 0.5         # smallest predictable / matched prior strength
 CONF_MAX    = 100.0       # cap on any single concentration (anti-runaway)
+
+# Cap on the POLICY target's TOTAL concentration (sum of pcount).  This must stay
+# strictly inside what the head's scalar beta can express (beta <= CONF_MAX), or
+# L_policyprior is mathematically irreducible: the target Dir(pcount) carries
+# alpha0 ~= n_sims (e.g. 400) while Dir(beta*pi) can only reach beta <= 100, so
+# the KL keeps a large floor that GROWS as search sharpens visits onto fewer
+# moves.  With all four weights at 1.0 that unreachable term was ~99% of the
+# total loss (pol ~19 vs av 0.15 / vd 0.10 / val 0.10), so ~99% of the gradient
+# went to a term that cannot reach zero while the value heads — the ones Thompson
+# selection actually reads — got almost none.  Capping the target TOTAL (mean-
+# preserving, so the visit *distribution* is untouched) makes the term learnable
+# and turns it back into the usual "match the visit distribution" objective.
+POL_TARGET_CAP = 64.0
+
+
+def set_pol_target_cap(x):
+    """Set POL_TARGET_CAP process-wide.  Spawned self-play workers must call this
+    themselves (the parent's module-level assignment does not cross `spawn`), so
+    it is threaded through the worker cfg — see mp_worker."""
+    global POL_TARGET_CAP
+    POL_TARGET_CAP = float(x)
 
 # Near-degenerate Dirichlets used as terminal/proven spikes (a real point mass
 # would make KL infinite; CONF_MAX mass on the proven corner is the proxy).
@@ -420,12 +443,23 @@ def make_target(root, conf_cap=CONF_MAX):
     ev = (root.term >= 0) | np.array([c is not None for c in root.children])
     ev_idx = np.nonzero(ev)[0].astype(np.int32)
     ev_alpha = _cap_conc(root.alpha[ev_idx], conf_cap).astype(np.float32)
-    pcount = np.minimum(root.pcount.copy(), conf_cap).astype(np.float32)
+    # Mean-preserving cap on the TOTAL (not elementwise: an elementwise min lets
+    # alpha0 reach k*cap, far past the beta the policy head can emit).
+    pcount = _cap_total(root.pcount, POL_TARGET_CAP).astype(np.float32)
     qv = _cap_conc(node_qv(root)[None, :], conf_cap)[0].astype(np.float32)
     return {'obs': root.obs, 'legal': root.legal.copy(),
             'pcount': pcount, 'ev_idx': ev_idx, 'ev_alpha': ev_alpha,
             'qv': qv, 'z': np.float32(0.0), 'solved': False,
             'player': int(root.player)}
+
+
+def _cap_total(x, cap):
+    """Scale a non-negative pseudo-count vector so its TOTAL <= cap, preserving
+    direction (hence the target's shape/mean).  Zeros stay zero — unvisited
+    actions must not acquire mass; the loss adds its own ALPHA_FLOOR."""
+    x = np.asarray(x, dtype=np.float64)
+    tot = float(x.sum())
+    return x * (cap / tot) if tot > cap else x.copy()
 
 
 def _cap_conc(alpha, conf_cap):
@@ -504,6 +538,165 @@ def random_backbone(game, rng, depth, max_plies):
     return state, seq[:resume], resume
 
 
+def thompson_backbone_batch(game, rng, n, depth, max_plies, eval_batch,
+                            temp=1.0, key=str):
+    """Grow `n` opening backbones from the initial state IN LOCKSTEP, choosing
+    every move by a Thompson draw from the net's own per-action value Dirichlets
+    (the in-tree selection rule with zero rollouts) — i.e. an ON-POLICY opening.
+
+    Why this shape.  Two earlier openings were both wrong in one way each:
+      * search-free NN moves, one game at a time → one forward PER MOVE PER GAME.
+        On the untrained net's ~300-ply games that unbatched cost dominated
+        everything (it is what pushed 500 eps from ~30 to >45 min).
+      * uniform-random moves → free, but wildly OFF-DISTRIBUTION.  Random play
+        produces lopsided non-chess positions whose outcome is nearly readable
+        off the material count, so the value target goes trivial (MSE collapsed
+        to ~0.01) while the learned function does not transfer to real play from
+        the true start position — training loss fell and Elo fell with it.
+    Sampling all `n` trajectories in lockstep fixes both: moves stay on-policy,
+    and every NN eval is ONE batched call per PLY covering all live trajectories,
+    with identical positions de-duplicated so only unique nodes are expanded
+    (from the shared start position the first plies collapse to a handful).
+
+    `eval_batch(states, legals) -> [(p3 (k,3), conf (k,), plog (k,), beta), ...]`
+    one gathered-to-legal entry per UNIQUE state, in the order given.
+    `temp` multiplies the Dirichlet concentration (>1 sharpens toward the mean).
+    `key(state)` must be a hashable canonical id; the default `str` is the
+    board for real games and object-unique (so: no dedup, still correct) for
+    anything without a __str__.
+
+    Returns a list of `n` (full_action_sequence, resume_ply) pairs, where
+    resume_ply = len(seq) - depth: MCTS self-play replays the prefix and plays
+    the last ~`depth` plies itself with search."""
+    states = [game.new_initial_state() for _ in range(n)]
+    seqs = [[] for _ in range(n)]
+    live = [i for i in range(n) if not states[i].is_terminal()]
+    ply = 0
+    while live and ply < max_plies:
+        # De-duplicate this ply's positions; evaluate each unique one once.
+        seen, uniq_states, uniq_legals = {}, [], []
+        order, legals = [], {}
+        for i in live:
+            st = states[i]
+            legals[i] = st.legal_actions()
+            k = key(st)
+            j = seen.get(k)
+            if j is None:
+                j = len(uniq_states)
+                seen[k] = j
+                uniq_states.append(st)
+                uniq_legals.append(np.asarray(legals[i], dtype=np.int32))
+            order.append((i, j))
+        out = eval_batch(uniq_states, uniq_legals)
+        nxt = []
+        for i, j in order:
+            p3, cf, _pl, _bt = out[j]
+            alpha = np.maximum(np.asarray(cf, dtype=np.float64)[:, None]
+                               * np.asarray(p3, dtype=np.float64), ALPHA_FLOOR)
+            if temp != 1.0:
+                alpha = alpha * temp
+            g = rng.standard_gamma(alpha)            # exact Dir via 3 gammas
+            v = ((g[:, _WIN] - g[:, _LOSS])
+                 / np.maximum(g.sum(1), 1e-12))      # p_win - p_loss
+            a = int(legals[i][int(v.argmax())])
+            states[i].apply_action(a)
+            seqs[i].append(a)
+            if not states[i].is_terminal():
+                nxt.append(i)
+        live = nxt
+        ply += 1
+    d = int(round(max(0.0, float(depth))))
+    return [(seq, max(0, len(seq) - d)) for seq in seqs]
+
+
+def replay_prefix(game, seq, resume):
+    """Rebuild the state `resume` plies into `seq`.  Returns (state, actions,
+    resume); falls back to a fresh game if the prefix is already terminal."""
+    state = game.new_initial_state()
+    acts = []
+    for a in seq[:resume]:
+        if state.is_terminal():
+            break
+        state.apply_action(int(a))
+        acts.append(int(a))
+    if state.is_terminal():
+        return game.new_initial_state(), [], 0
+    return state, acts, len(acts)
+
+
+def _fmt_hms(s):
+    """Compact duration: 42s / 7m12s / 1h03m."""
+    if not (s == s) or s < 0 or s == float('inf'):      # NaN/inf guard
+        return '--'
+    s = int(s)
+    if s < 60:
+        return f'{s}s'
+    if s < 3600:
+        return f'{s // 60}m{s % 60:02d}s'
+    return f'{s // 3600}h{(s % 3600) // 60:02d}m'
+
+
+class Progress:
+    """One-line \\r progress bar that ERASES itself on close(), so what survives
+    in the notebook output is only the quick-eval lines — no scrollback spam.
+    Throttled by wall-clock so a fast inner loop can call update() every episode
+    without flooding the output buffer."""
+
+    def __init__(self, total, width=22, min_interval=0.4, enabled=True,
+                 label=''):
+        self.total = max(int(total), 1)
+        self.width = int(width)
+        self.min_interval = float(min_interval)
+        self.enabled = bool(enabled)
+        self.label = label
+        self.t0 = time.perf_counter()
+        self._last = 0.0
+        self._len = 0
+
+    def reset(self, total=None, label=None):
+        """Start a fresh window (call right after close() at each quick eval)."""
+        if total is not None:
+            self.total = max(int(total), 1)
+        if label is not None:
+            self.label = label
+        self.t0 = time.perf_counter()
+        self._last = 0.0
+        return self
+
+    def update(self, done, extra=''):
+        if not self.enabled:
+            return
+        now = time.perf_counter()
+        if done < self.total and now - self._last < self.min_interval:
+            return
+        self._last = now
+        frac = min(max(done / self.total, 0.0), 1.0)
+        el = now - self.t0
+        eta = el * (1.0 - frac) / frac if frac > 1e-9 else float('nan')
+        fill = int(round(frac * self.width))
+        bar = '█' * fill + '·' * (self.width - fill)
+        msg = (f'\r  {self.label}[{bar}] {done}/{self.total}  '
+               f'{_fmt_hms(el)} elapsed  ETA {_fmt_hms(eta)}'
+               f'{("  " + extra) if extra else ""}')
+        self._len = max(self._len, len(msg))
+        try:
+            sys.stdout.write(msg)
+            sys.stdout.flush()
+        except Exception:                    # never let display kill training
+            self.enabled = False
+
+    def close(self):
+        """Wipe the line so the bar leaves no trace."""
+        if not self.enabled or not self._len:
+            return
+        try:
+            sys.stdout.write('\r' + ' ' * self._len + '\r')
+            sys.stdout.flush()
+        except Exception:
+            pass
+        self._len = 0
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Multiprocess self-play worker (top-level so `spawn` can import it)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -536,6 +729,7 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
     except Exception:
         pass
     set_selection(cfg.get('selection', 'dirichlet'))     # honour it in-process
+    set_pol_target_cap(cfg.get('pol_target_cap', POL_TARGET_CAP))   # ditto
     rng = np.random.default_rng(cfg['seed'] + worker_id * 7919)
     conf_cap = cfg['conf_cap']; pwb = cfg.get('proven_win_bonus', 0.0)
     max_plies = cfg.get('max_plies', 400)
@@ -551,9 +745,26 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
     curr_shared = cfg.get('curr_depth_shared')     # mp.Value updated by the parent
     curr_depth0 = cfg.get('curr_depth0', 8.0)
     curr_mcts_tail = cfg.get('curr_mcts_tail', 24)  # cap MCTS plies past `resume`
+    curr_backbone = cfg.get('curr_backbone', 'thompson')   # 'thompson' | 'random'
+    curr_temp = cfg.get('curr_temp', 1.0)
+    backbones = []                  # FIFO of (seq, resume) from the batched walk
 
     def _curr_depth():
         return curr_shared.value if curr_shared is not None else curr_depth0
+
+    def _bb_eval(uniq_states, uniq_legals):
+        """One batched NN call for a whole ply of the backbone walk.  Routed with
+        net_id 'bb': the live net, but answered on pool_resp_q so it can never be
+        confused with the pipelined 'live' wave responses on resp_q."""
+        obs = np.asarray([s.observation_tensor(s.current_player())
+                          for s in uniq_states], dtype=np.float16)
+        req_q.put((worker_id, 'bb', obs, uniq_legals))
+        return pool_resp_q.get()
+
+    def _refill_backbones():
+        backbones.extend(thompson_backbone_batch(
+            game, rng, cfg['games_per_worker'], _curr_depth(), max_plies,
+            _bb_eval, temp=curr_temp))
 
     def _temp(move):
         return 1.0 if move < temp_thr else late_temp
@@ -567,7 +778,12 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
     def new_game():
         sims = cfg['fast_sims'] if rng.random() < cfg['fast_prob'] else cfg['full_sims']
         state, actions, resume = game.new_initial_state(), [], 0
-        if curriculum:
+        if curriculum and curr_backbone == 'thompson':
+            if not backbones:
+                _refill_backbones()     # one batched walk serves every slot
+            seq, res = backbones.pop(0)
+            state, actions, resume = replay_prefix(game, seq, res)
+        elif curriculum:
             state, actions, resume = random_backbone(
                 game, rng, _curr_depth(), max_plies)
         elif restart_pool and rng.random() < restart_prob:
@@ -1295,11 +1511,14 @@ if _HAS_TORCH:
                      num_blocks=None, restart_prob=0.0, restart_k_min=2,
                      restart_k_max=30, restart_pool_cap=128, random_pool_frac=0.5,
                      curriculum=False, curr_depth0=8.0, curr_mcts_tail=24,
-                     seed=None):
+                     curr_backbone='thompson', curr_temp=1.0, seed=None):
             self.game, self.network, self.device = game, network, device
             self.curriculum = curriculum
             self.curr_depth = float(curr_depth0)   # plies-from-end MCTS covers
             self.curr_mcts_tail = int(curr_mcts_tail)  # cap MCTS plies past resume
+            self.curr_backbone = curr_backbone     # 'thompson' (on-policy) | 'random'
+            self.curr_temp = float(curr_temp)
+            self._backbones = []                   # FIFO from the batched walk
             self.n_parallel, self.wave = n_parallel, wave_per_game
             self.fast_sims, self.full_sims = fast_sims, full_sims
             self.fast_prob = fast_prob
@@ -1343,12 +1562,29 @@ if _HAS_TORCH:
         def set_curr_depth(self, d):
             self.curr_depth = float(d)
 
+        def _refill_backbones(self):
+            """Walk n_parallel on-policy backbones in lockstep, one batched
+            forward per ply (see thompson_backbone_batch)."""
+            def _ev(uniq_states, uniq_legals):
+                probs, conf, plog, beta, _o = nn_eval_states(
+                    self.network, self.device, uniq_states)
+                return [(probs[r][lg], conf[r][lg], plog[r][lg], float(beta[r]))
+                        for r, lg in enumerate(uniq_legals)]
+            self._backbones.extend(thompson_backbone_batch(
+                self.game, self._rng, self.n_parallel, self.curr_depth,
+                self.max_plies, _ev, temp=self.curr_temp))
+
         def _new_game(self):
             rng = self._rng
             sims = (self.fast_sims if rng.random() < self.fast_prob
                     else self.full_sims)
             state, actions, resume = self.game.new_initial_state(), [], 0
-            if self.curriculum:
+            if self.curriculum and self.curr_backbone == 'thompson':
+                if not self._backbones:
+                    self._refill_backbones()   # one batched walk serves every slot
+                seq, res = self._backbones.pop(0)
+                state, actions, resume = replay_prefix(self.game, seq, res)
+            elif self.curriculum:
                 state, actions, resume = random_backbone(
                     self.game, rng, self.curr_depth, self.max_plies)
             elif self._restart_pool and rng.random() < self.restart_prob:
@@ -1568,7 +1804,10 @@ if _HAS_TORCH:
             return self._curr.value
 
         def _get_net(self, net_id):
-            if net_id == 'live':
+            # 'bb' = the live net serving a backbone-walk ply; same weights and
+            # lock as 'live', but replies go to pool_resp_qs (see _serve) so the
+            # synchronous walk never steals a pipelined wave response.
+            if net_id in ('live', 'bb'):
                 return self.network, self.device, True
             net = self._pool_nets.get(net_id)
             if net is None:
@@ -1620,7 +1859,7 @@ if _HAS_TORCH:
                     net, dev, needs_lock = self._get_net(net_id)
                     obs = np.concatenate([o for _, o, _ in group], axis=0)
                     xin = obs.reshape(-1, *_OBS_SHAPE).astype(np.float32)
-                    if net_id == 'live':
+                    if net_id in ('live', 'bb'):
                         self.fwd_calls += 1; self.fwd_rows += xin.shape[0]
                     row_legals = [l for _, _, ls in group for l in ls]
                     flat = np.concatenate([l.astype(np.int64) + r * A
