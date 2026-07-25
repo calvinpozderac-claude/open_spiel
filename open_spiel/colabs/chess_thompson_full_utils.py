@@ -64,35 +64,32 @@ _WIN, _DRAW, _LOSS = 0, 1, 2
 _FLIP = np.array([_LOSS, _DRAW, _WIN])              # win<->loss swap, draw fixed
 _FLIP_TERM = np.array([_LOSS, _DRAW, _WIN], dtype=np.int8)
 
-ALPHA_FLOOR = 0.05        # per-component Dirichlet floor (keeps lgamma/KL finite)
-CONF_MIN    = 0.5         # smallest predictable / matched prior strength
-CONF_MAX    = 100.0       # cap on any single concentration (anti-runaway)
+# NO caps on concentration, anywhere: not on what the heads emit, not on the
+# search's backed-up beliefs, not on the training targets.  The net learns how
+# certain to be, and a target says whatever search actually found.
+#
+# ALPHA_FLOOR is the one epsilon left, and it is NOT a learning bound: a Dirichlet
+# is defined only for alpha > 0, and an fp32 softmax/softplus underflows to
+# exactly 0 (which makes lgamma/digamma infinite and the loss NaN).  At 1e-9 it
+# sits ~9 orders of magnitude below the old lower bound, so it never shapes what
+# the net learns — it only keeps the math defined.
+ALPHA_FLOOR = 1e-9
 
-# Cap on the POLICY target's TOTAL concentration (sum of pcount).  This must stay
-# strictly inside what the head's scalar beta can express (beta <= CONF_MAX), or
-# L_policyprior is mathematically irreducible: the target Dir(pcount) carries
-# alpha0 ~= n_sims (e.g. 400) while Dir(beta*pi) can only reach beta <= 100, so
-# the KL keeps a large floor that GROWS as search sharpens visits onto fewer
-# moves.  With all four weights at 1.0 that unreachable term was ~99% of the
-# total loss (pol ~19 vs av 0.15 / vd 0.10 / val 0.10), so ~99% of the gradient
-# went to a term that cannot reach zero while the value heads — the ones Thompson
-# selection actually reads — got almost none.  Capping the target TOTAL (mean-
-# preserving, so the visit *distribution* is untouched) makes the term learnable
-# and turns it back into the usual "match the visit distribution" objective.
-POL_TARGET_CAP = 64.0
+# A PROVEN terminal is a point mass, and no Dirichlet represents one (its KL would
+# be infinite), so a proof is asserted as a finite spike instead.  These two are
+# MODELLING choices — how hard a proof is asserted — not caps on anything the
+# network can output, and both are free to be raised.
+#   TERMINAL_EPS must stay well clear of the variance guards in the moment
+#   matcher: it is what keeps a proven outcome's matched concentration SHARP.
+#   Shrinking it to ALPHA_FLOOR would make the mixture variance underflow and
+#   collapse a proven win to near-ZERO concentration — maximal uncertainty, the
+#   exact opposite of a proof.  It is kept at the old floor so terminal handling
+#   is byte-identical to before the caps came out.
+TERMINAL_CONC = 100.0     # pseudo-mass on the proven corner
+TERMINAL_EPS  = 0.05      # mass on the two impossible corners
 
-
-def set_pol_target_cap(x):
-    """Set POL_TARGET_CAP process-wide.  Spawned self-play workers must call this
-    themselves (the parent's module-level assignment does not cross `spawn`), so
-    it is threaded through the worker cfg — see mp_worker."""
-    global POL_TARGET_CAP
-    POL_TARGET_CAP = float(x)
-
-# Near-degenerate Dirichlets used as terminal/proven spikes (a real point mass
-# would make KL infinite; CONF_MAX mass on the proven corner is the proxy).
-_SPIKE = np.full((3, 3), ALPHA_FLOOR)
-_SPIKE[_WIN, _WIN] = _SPIKE[_DRAW, _DRAW] = _SPIKE[_LOSS, _LOSS] = CONF_MAX
+_SPIKE = np.full((3, 3), TERMINAL_EPS)
+_SPIKE[_WIN, _WIN] = _SPIKE[_DRAW, _DRAW] = _SPIKE[_LOSS, _LOSS] = TERMINAL_CONC
 
 
 def flip_alpha(alpha):
@@ -124,7 +121,7 @@ def dir_value_mean_var(alpha):
     return ev, var
 
 
-def moment_match_mixture(weights, alphas, conf_max=CONF_MAX):
+def moment_match_mixture(weights, alphas):
     """Collapse a mixture  sum_k weights[k] * Dir(alphas[k])  to a single
     Dirichlet by matching mean + total variance (exact, closed form).
 
@@ -134,8 +131,11 @@ def moment_match_mixture(weights, alphas, conf_max=CONF_MAX):
     Mean is matched EXACTLY; concentration comes from the aggregated
     precision  beta0 = sum_i M_i(1-M_i) / sum_i Var_mix(x_i) - 1  (Minka).  A
     single component round-trips to its own a0 exactly; validated against
-    Monte-Carlo (mean <4e-4, total var <1e-4).  Clamped to [2*floor, conf_max].
-    """
+    Monte-Carlo (mean <4e-4, total var <1e-4).  UNBOUNDED above.
+
+    The only guard is positivity: a mixture can be more dispersed than ANY single
+    Dirichlet, which makes the matched beta0 come out negative — that is an
+    invalid distribution, not a cap, so it is floored to a positive epsilon."""
     w = np.asarray(weights, dtype=np.float64)
     s = w.sum()
     w = w / s if s > 0 else np.full(len(w), 1.0 / len(w))
@@ -145,9 +145,10 @@ def moment_match_mixture(weights, alphas, conf_max=CONF_MAX):
     M = w @ m                                       # (3,)  mixture mean
     var_c = m * (1.0 - m) / (a0[:, None] + 1.0)     # within-component variance
     ex2 = w @ (var_c + m * m)                       # E[x^2] of the mixture
-    var_mix = np.maximum(ex2 - M * M, 1e-12)        # (3,)
+    var_mix = np.maximum(ex2 - M * M, 1e-300)       # (3,) division guard only
     beta0 = (M * (1.0 - M)).sum() / var_mix.sum() - 1.0
-    beta0 = float(np.clip(beta0, 2.0 * ALPHA_FLOOR, conf_max))
+    if not (beta0 > ALPHA_FLOOR):                   # negative/NaN -> invalid
+        beta0 = ALPHA_FLOOR
     return np.maximum(M * beta0, ALPHA_FLOOR)
 
 
@@ -187,7 +188,8 @@ class _TNode:
         lg = np.asarray(plogits, dtype=np.float64)
         lg = lg - lg.max()
         pi = np.exp(lg); pi /= pi.sum()
-        self.pprior = np.maximum(float(beta) * pi, 1e-6)               # (k,)
+        # positivity only (pi_post divides by pprior+pcount, which must be > 0)
+        self.pprior = np.maximum(float(beta) * pi, ALPHA_FLOOR)         # (k,)
         self.pcount = np.zeros(k)
         self.term   = np.full(k, -1, dtype=np.int8)
         self.vloss  = np.zeros(k, dtype=np.int32)
@@ -255,22 +257,22 @@ def _pi_post(node):
     return w / w.sum()
 
 
-def node_qv(node, conf_max=CONF_MAX):
+def node_qv(node):
     """Position value-distribution qv = moment-match( sum_a pi_a * pv_a ), the
     policy-weighted mixture of the edge beliefs (mover's perspective).  Read
     straight off the incremental accumulators in O(1) — algebraically identical
-    to moment_match_mixture(pi_post, alpha)."""
+    to moment_match_mixture(pi_post, alpha).  UNBOUNDED above; the only guards
+    are the variance division and beta0 positivity (see moment_match_mixture)."""
     W = node.W
     Mw, Md, Ml = node.Mu[0] / W, node.Mu[1] / W, node.Mu[2] / W
     Vw = node.Su[0] / W - Mw * Mw
     Vd = node.Su[1] / W - Md * Md
     Vl = node.Su[2] / W - Ml * Ml
-    if Vw < 1e-12: Vw = 1e-12
-    if Vd < 1e-12: Vd = 1e-12
-    if Vl < 1e-12: Vl = 1e-12
+    if Vw < 1e-300: Vw = 1e-300
+    if Vd < 1e-300: Vd = 1e-300
+    if Vl < 1e-300: Vl = 1e-300
     beta0 = (Mw * (1 - Mw) + Md * (1 - Md) + Ml * (1 - Ml)) / (Vw + Vd + Vl) - 1.0
-    if beta0 < 2.0 * ALPHA_FLOOR: beta0 = 2.0 * ALPHA_FLOOR
-    elif beta0 > conf_max:        beta0 = conf_max
+    if not (beta0 > ALPHA_FLOOR): beta0 = ALPHA_FLOOR
     return np.array([max(Mw * beta0, ALPHA_FLOOR),
                      max(Md * beta0, ALPHA_FLOOR),
                      max(Ml * beta0, ALPHA_FLOOR)])
@@ -291,6 +293,32 @@ def _set_term(node, idx, outcome, proven_win_bonus=0.0):
     _acc(node, idx, +1.0)                         # add spike contribution
 
 
+def _dir_v_from_gammas(g, alpha, rng):
+    """v = p_win - p_loss from per-row gamma draws `g` of Dir(alpha), handling the
+    degenerate rows exactly.
+
+    With concentration unbounded BELOW, the net can learn alpha0 -> 0, and there
+    every gamma draw underflows to exactly 0 (empirically: >80% of rows once
+    alpha0 < 1e-4), so the normaliser is 0 and v would be 0/0 = NaN.  The exact
+    limit of Dir(alpha) as alpha0 -> 0 is a point mass on corner i with
+    probability alpha_i/alpha0, so those rows draw a corner directly — no clamp,
+    no bias, just the right distribution in the limit."""
+    s = g.sum(1)
+    bad = ~(s > 0.0)
+    if bad.any():
+        rows = np.nonzero(bad)[0]
+        a = np.asarray(alpha, dtype=np.float64)[rows]
+        a0 = a.sum(1, keepdims=True)
+        p = np.where(a0 > 0.0, a / np.maximum(a0, 1e-300), 1.0 / a.shape[1])
+        u = rng.random((len(rows), 1))
+        corner = (p.cumsum(1) < u).sum(1).clip(0, a.shape[1] - 1)
+        g = g.copy()
+        g[rows] = 0.0
+        g[rows, corner] = 1.0
+        s = g.sum(1)
+    return (g[:, _WIN] - g[:, _LOSS]) / s
+
+
 def _sample_edge_values(node, rng, temp=1.0):
     """One Thompson draw of each edge's value v=p_win-p_loss from Dir(temp*alpha)
     (temp>1 sharpens toward the mean → argmax≈max; temp=1 samples as-is), minus
@@ -309,9 +337,9 @@ def _sample_edge_values(node, rng, temp=1.0):
         sd = node.sd if temp == 1.0 else node.sd * (temp ** -0.5)
         v = node.ev + sd * rng.standard_normal(len(node.legal))
     else:
-        g = rng.standard_gamma(node.alpha if temp == 1.0 else node.alpha * temp)
-        s = g.sum(1)                                # (k,)  Dir normaliser
-        v = (g[:, _WIN] - g[:, _LOSS]) / s          # p_win - p_loss, exact
+        a = node.alpha if temp == 1.0 else node.alpha * temp
+        g = rng.standard_gamma(a)
+        v = _dir_v_from_gammas(g, a, rng)           # p_win - p_loss, exact
     if node.vloss.any():
         v = v - 2.0 * node.vloss                    # push in-flight edges down
     return v
@@ -342,7 +370,7 @@ def _select_leaf(root, root_state, rng, temp=1.0, proven_win_bonus=0.0):
         node = child
 
 
-def _backup(path, conf_max=CONF_MAX):
+def _backup(path):
     """Bottom-up backup.  For each (node, idx) leaf->root:
       - remove virtual loss;
       - credit the selected edge with a policy-prior observation (pcount += 1);
@@ -354,7 +382,7 @@ def _backup(path, conf_max=CONF_MAX):
         _acc(node, idx, -1.0)                     # remove edge's old contribution
         node.pcount[idx] += 1.0                   # policy observation
         if node.term[idx] < 0 and node.children[idx] is not None:
-            node.alpha[idx] = flip_alpha(node_qv(node.children[idx], conf_max))
+            node.alpha[idx] = flip_alpha(node_qv(node.children[idx]))
             if _GAUSSIAN_SELECT:
                 _set_edge_v(node, idx)
         _acc(node, idx, +1.0)                      # add updated contribution
@@ -372,7 +400,7 @@ def _node_solved_outcome(node):
     return None
 
 
-def _propagate_solved(path, aux=None, conf_cap=CONF_MAX, proven_win_bonus=0.0):
+def _propagate_solved(path, aux=None, proven_win_bonus=0.0):
     """Walk leaf->root; when a node becomes fully solved, prove the parent edge
     entering it (flipped).  Emits exact solver-labelled training samples into
     `aux` (once per node — a solved node is never re-descended)."""
@@ -386,7 +414,7 @@ def _propagate_solved(path, aux=None, conf_cap=CONF_MAX, proven_win_bonus=0.0):
             break
         _set_term(parent, pidx, int(_FLIP_TERM[out]), proven_win_bonus)
         if aux is not None and node.obs is not None:
-            t = make_target(node, conf_cap)
+            t = make_target(node)
             # Exact solver label: its value belief IS ground truth, so skip the
             # game-outcome value-MSE (the played-out z can differ from the proven
             # value) and mark it as an exact sample.
@@ -395,10 +423,9 @@ def _propagate_solved(path, aux=None, conf_cap=CONF_MAX, proven_win_bonus=0.0):
             aux.append(t)
 
 
-def _backup_terminal(path, aux=None, conf_cap=CONF_MAX, conf_max=CONF_MAX,
-                     proven_win_bonus=0.0):
-    _backup(path, conf_max)
-    _propagate_solved(path, aux, conf_cap, proven_win_bonus)
+def _backup_terminal(path, aux=None, proven_win_bonus=0.0):
+    _backup(path)
+    _propagate_solved(path, aux, proven_win_bonus)
 
 
 def _descend(root, action):
@@ -433,42 +460,25 @@ def root_pick(root, rng, thompson, temp=1.0):
 #   z        fp32                game outcome for root.player          (L_value)
 #   solved   bool               solver-labelled (exact) sample?
 
-def make_target(root, conf_cap=CONF_MAX):
+def make_target(root):
     """Root search state -> training-target dict (z filled later, at game end).
     Evidence edges are those actually searched (expanded child or proven); the
-    per-action value target is scored only there so the loss never grades the
-    net against its own untouched prior.  Concentrations are capped at conf_cap
-    (mean-preserving) so no single generation teaches unbounded certainty."""
-    k = len(root.legal)
+    per-action value target is scored only there so the loss never grades the net
+    against its own untouched prior.
+
+    Concentrations are NOT capped: a target says exactly what search found, and
+    the visit counts are passed through as-is, so the policy target keeps both its
+    true shape and its true strength.  (An earlier elementwise cap truncated the
+    peak of the visit distribution and so taught a FLATTENED policy.)"""
     ev = (root.term >= 0) | np.array([c is not None for c in root.children])
     ev_idx = np.nonzero(ev)[0].astype(np.int32)
-    ev_alpha = _cap_conc(root.alpha[ev_idx], conf_cap).astype(np.float32)
-    # Mean-preserving cap on the TOTAL (not elementwise: an elementwise min lets
-    # alpha0 reach k*cap, far past the beta the policy head can emit).
-    pcount = _cap_total(root.pcount, POL_TARGET_CAP).astype(np.float32)
-    qv = _cap_conc(node_qv(root)[None, :], conf_cap)[0].astype(np.float32)
+    ev_alpha = np.maximum(root.alpha[ev_idx], ALPHA_FLOOR).astype(np.float32)
+    pcount = root.pcount.astype(np.float32)
+    qv = node_qv(root).astype(np.float32)
     return {'obs': root.obs, 'legal': root.legal.copy(),
             'pcount': pcount, 'ev_idx': ev_idx, 'ev_alpha': ev_alpha,
             'qv': qv, 'z': np.float32(0.0), 'solved': False,
             'player': int(root.player)}
-
-
-def _cap_total(x, cap):
-    """Scale a non-negative pseudo-count vector so its TOTAL <= cap, preserving
-    direction (hence the target's shape/mean).  Zeros stay zero — unvisited
-    actions must not acquire mass; the loss adds its own ALPHA_FLOOR."""
-    x = np.asarray(x, dtype=np.float64)
-    tot = float(x.sum())
-    return x * (cap / tot) if tot > cap else x.copy()
-
-
-def _cap_conc(alpha, conf_cap):
-    """Rescale any (…,3) Dirichlet whose total exceeds conf_cap down to conf_cap,
-    preserving the mean (direction).  Floors kept."""
-    a = np.asarray(alpha, dtype=np.float64)
-    tot = a.sum(-1, keepdims=True)
-    scale = np.minimum(1.0, conf_cap / np.maximum(tot, 1e-9))
-    return np.maximum(a * scale, ALPHA_FLOOR)
 
 
 def z_mix_episode(samples, returns, z_mix, z_gamma=1.0):
@@ -596,8 +606,7 @@ def thompson_backbone_batch(game, rng, n, depth, max_plies, eval_batch,
             if temp != 1.0:
                 alpha = alpha * temp
             g = rng.standard_gamma(alpha)            # exact Dir via 3 gammas
-            v = ((g[:, _WIN] - g[:, _LOSS])
-                 / np.maximum(g.sum(1), 1e-12))      # p_win - p_loss
+            v = _dir_v_from_gammas(g, alpha, rng)    # p_win - p_loss
             a = int(legals[i][int(v.argmax())])
             states[i].apply_action(a)
             seqs[i].append(a)
@@ -729,9 +738,8 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
     except Exception:
         pass
     set_selection(cfg.get('selection', 'dirichlet'))     # honour it in-process
-    set_pol_target_cap(cfg.get('pol_target_cap', POL_TARGET_CAP))   # ditto
     rng = np.random.default_rng(cfg['seed'] + worker_id * 7919)
-    conf_cap = cfg['conf_cap']; pwb = cfg.get('proven_win_bonus', 0.0)
+    pwb = cfg.get('proven_win_bonus', 0.0)
     max_plies = cfg.get('max_plies', 400)
     z_mix = cfg.get('z_mix', 0.5); z_gamma = cfg.get('z_gamma', 0.97)
     temp_thr = cfg.get('temp_threshold', 20); late_temp = cfg.get('late_temp', 8.0)
@@ -850,7 +858,7 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                 path, st, edge = _select_leaf(s['root'], st0, rng,
                                               _temp(s['move'] - s['resume']), pwb)
                 if st is None:
-                    _backup_terminal(path, s['aux'], conf_cap, CONF_MAX, pwb)
+                    _backup_terminal(path, s['aux'], pwb)
                     s['n'] += 1; continue
                 node, idx = edge
                 paths.append((i, path, node, idx))
@@ -883,7 +891,7 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
             if s['n'] < s['sims'] and _node_solved_outcome(s['root']) is None:
                 continue
             root = s['root']
-            s['hist'].append(make_target(root, conf_cap))
+            s['hist'].append(make_target(root))
             mm = s['move'] - s['resume']         # plies since MCTS took over
             a = root_pick(root, rng, thompson=(mm < temp_thr), temp=_temp(mm))
             pidx = int(np.nonzero(root.legal == a)[0][0])
@@ -1067,12 +1075,11 @@ if _HAS_TORCH:
             return self.act(self.se(self.net(x)) + x)
 
     # ── The network: trunk + policy-prior head + per-action value head ────────
-    POLICY_CONC_MAX = CONF_MAX          # cap on the policy Dirichlet's beta
 
     class ThompsonFullNet(nn.Module):
         """Trunk → two learned heads.
-        forward(x) → (probs (B,A,3) softmax, conf (B,A) in [CONF_MIN,CONF_MAX],
-                      plogits (B,A), beta (B,) in [CONF_MIN,POLICY_CONC_MAX]).
+        forward(x) → (probs (B,A,3) softmax, conf (B,A) > 0 unbounded,
+                      plogits (B,A), beta (B,) > 0 unbounded).
         The per-action value belief is Dir(conf[a]*probs[a]); the policy-prior is
         Dir(beta*softmax(plogits)); v and qv are DERIVED (see full_loss / the
         tree), never separate parameters.
@@ -1115,8 +1122,7 @@ if _HAS_TORCH:
             dist_logits = self.dist_out(h).view(-1, _NUM_ACTIONS, 3)
             conf_raw = self.conf_out(h)
             plog = self.plog_out(h)
-            beta = torch.clamp(CONF_MIN + _softplus(self.beta_out(h)).squeeze(-1),
-                               max=POLICY_CONC_MAX)
+            beta = _softplus(self.beta_out(h)).squeeze(-1).clamp_min(ALPHA_FLOOR)
             return dist_logits, conf_raw, plog, beta
 
     def _act_p3(logits):
@@ -1124,8 +1130,9 @@ if _HAS_TORCH:
         return F.softmax(logits, dim=-1)
 
     def _act_conf(raw):
-        """RAW conf output → concentration α0 ∈ [CONF_MIN, CONF_MAX]."""
-        return torch.clamp(CONF_MIN + _softplus(raw), max=CONF_MAX)
+        """RAW conf output → concentration α0 > 0.  UNBOUNDED: softplus only, with
+        a positivity floor so an fp32 underflow to exactly 0 can't NaN the KL."""
+        return _softplus(raw).clamp_min(ALPHA_FLOOR)
 
     # ── lgamma / digamma with a DirectML-friendly fallback ────────────────────
     # The closed-form Dirichlet KL is already minimal; its ONLY expensive pieces
@@ -1209,9 +1216,9 @@ if _HAS_TORCH:
         Mmean = (piw * meanc).sum(1)                               # (B,3)
         varc = meanc * (1 - meanc) / (a0.unsqueeze(-1) + 1.0)
         ex2 = (piw * (varc + meanc ** 2)).sum(1)                   # (B,3)
-        varmix = (ex2 - Mmean ** 2).clamp_min(1e-9)
+        varmix = (ex2 - Mmean ** 2).clamp_min(1e-20)   # division guard only
         beta0 = ((Mmean * (1 - Mmean)).sum(1)
-                 / varmix.sum(1)).sub(1.0).clamp(2 * FLOOR, CONF_MAX)
+                 / varmix.sum(1)).sub(1.0).clamp_min(FLOOR)   # positivity only
         qv_pred = (Mmean * beta0.unsqueeze(-1)).clamp_min(FLOOR)   # (B,3)
         L_vd = _dir_kl_rows(meta['qv_t'], qv_pred).mean()
         # (3) per-action value KL over EVIDENCE edges only
@@ -1382,13 +1389,12 @@ if _HAS_TORCH:
 
         def __init__(self, game, network, device, max_simulations,
                      batch_size=16, temp=1.0, proven_win_bonus=4.0,
-                     conf_cap=CONF_MAX, random_state=None):
+                     random_state=None):
             self.game, self.network, self.device = game, network, device
             self.max_simulations = max_simulations
             self.batch_size = batch_size
             self.temp = temp
             self.pwb = proven_win_bonus
-            self.conf_cap = conf_cap
             self._rng = random_state or np.random.default_rng()
 
         def _expand(self, state):
@@ -1412,8 +1418,7 @@ if _HAS_TORCH:
                     path, st, edge = _select_leaf(root, state, self._rng,
                                                   self.temp, self.pwb)
                     if st is None:
-                        _backup_terminal(path, None, self.conf_cap, CONF_MAX,
-                                         self.pwb)
+                        _backup_terminal(path, None, self.pwb)
                         sims += 1
                     else:
                         pending.append((path, st, edge))
@@ -1459,8 +1464,7 @@ if _HAS_TORCH:
         leg = state.legal_actions()
         a = np.maximum(cf[0][leg, None] * pr[0][leg], ALPHA_FLOOR) * temp
         g = rng.standard_gamma(a)
-        x = g / g.sum(1, keepdims=True)
-        v = x[:, _WIN] - x[:, _LOSS]
+        v = _dir_v_from_gammas(g, a, rng)
         return int(leg[int(v.argmax())])
 
     def quick_match(net_a, net_b, game, n_games, device, rng=None,
@@ -1505,7 +1509,7 @@ if _HAS_TORCH:
 
         def __init__(self, game, network, device, n_parallel=8, wave_per_game=8,
                      fast_sims=250, full_sims=1000, fast_prob=0.75,
-                     temp_threshold=20, late_temp=8.0, conf_cap=CONF_MAX,
+                     temp_threshold=20, late_temp=8.0,
                      proven_win_bonus=4.0, max_plies=400, z_mix=0.5, z_gamma=0.97,
                      pool_prob=0.0, checkpoint_dir=None, channels=None,
                      num_blocks=None, restart_prob=0.0, restart_k_min=2,
@@ -1523,7 +1527,7 @@ if _HAS_TORCH:
             self.fast_sims, self.full_sims = fast_sims, full_sims
             self.fast_prob = fast_prob
             self.temp_threshold, self.late_temp = temp_threshold, late_temp
-            self.conf_cap, self.pwb = conf_cap, proven_win_bonus
+            self.pwb = proven_win_bonus
             self.max_plies = max_plies
             self.z_mix, self.z_gamma = z_mix, z_gamma
             self.pool_prob = pool_prob
@@ -1661,7 +1665,7 @@ if _HAS_TORCH:
 
         def _play_move(self, i):
             s = self.slots[i]; root = s['root']; mm = s['move'] - s['resume']
-            s['hist'].append(make_target(root, self.conf_cap))
+            s['hist'].append(make_target(root))
             a = root_pick(root, self._rng, thompson=(mm < self.temp_threshold),
                           temp=self._temp(mm))
             pidx = int(np.nonzero(root.legal == a)[0][0])
@@ -1688,8 +1692,7 @@ if _HAS_TORCH:
                                                   self._temp(s['move'] - s['resume']),
                                                   self.pwb)
                     if st is None:
-                        _backup_terminal(path, s['aux'], self.conf_cap, CONF_MAX,
-                                         self.pwb)
+                        _backup_terminal(path, s['aux'], self.pwb)
                         s['n'] += 1
                     else:
                         node, idx = edge
