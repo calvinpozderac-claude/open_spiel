@@ -484,13 +484,33 @@ def make_target(root):
     peak of the visit distribution and so taught a FLATTENED policy.)"""
     ev = (root.term >= 0) | np.array([c is not None for c in root.children])
     ev_idx = np.nonzero(ev)[0].astype(np.int32)
-    ev_alpha = np.maximum(root.alpha[ev_idx], TARGET_EPS).astype(np.float32)
+    ev_alpha = _floor_conc(root.alpha[ev_idx], 3.0 * TARGET_EPS).astype(np.float32)
     pcount = root.pcount.astype(np.float32)   # raw visits; smoothed in the loss
-    qv = np.maximum(node_qv(root), TARGET_EPS).astype(np.float32)
+    qv = _floor_conc(node_qv(root), 3.0 * TARGET_EPS).astype(np.float32)
     return {'obs': root.obs, 'legal': root.legal.copy(),
             'pcount': pcount, 'ev_idx': ev_idx, 'ev_alpha': ev_alpha,
             'qv': qv, 'z': np.float32(0.0), 'solved': False,
             'player': int(root.player)}
+
+
+def _floor_conc(alpha, min_total):
+    """Raise each (…,3) Dirichlet's TOTAL to at least `min_total` by SCALING it,
+    which preserves its mean (the direction is the information).
+
+    An elementwise np.maximum(alpha, eps) looks equivalent but is not: it drags a
+    low-concentration belief toward UNIFORM and so deletes exactly what the target
+    encodes.  Measured before this fix: node_qv's moment matching legitimately
+    returns a near-zero concentration whenever a proven-terminal SPIKE is mixed
+    with uncertain siblings (the mixture is more dispersed than any single
+    Dirichlet, so the matched beta0 goes negative and floors), and the elementwise
+    floor then turned 100% of proven-win qv targets into an exactly uniform
+    [eps,eps,eps] — a coin flip — destroying a mean of 0.659 win.  A genuinely
+    all-zero row has no direction, so uniform is the right answer only there."""
+    a = np.asarray(alpha, dtype=np.float64)
+    n = a.shape[-1]
+    tot = a.sum(-1, keepdims=True)
+    scaled = a * np.maximum(1.0, min_total / np.maximum(tot, 1e-300))
+    return np.where(tot > 0.0, scaled, min_total / n)
 
 
 def z_mix_episode(samples, returns, z_mix, z_gamma=1.0):
@@ -515,7 +535,7 @@ def z_mix_episode(samples, returns, z_mix, z_gamma=1.0):
         obs_alpha = np.full(3, ALPHA_FLOOR)
         obs_alpha[corner] = 1.0
         m = (1 - w) * dir_mean(s['qv']) + w * dir_mean(obs_alpha)
-        s['qv'] = np.maximum(m * s['qv'].sum(), TARGET_EPS).astype(np.float32)
+        s['qv'] = _floor_conc(m * s['qv'].sum(), 3.0 * TARGET_EPS).astype(np.float32)
     return samples
 
 
