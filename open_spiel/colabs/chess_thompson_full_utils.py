@@ -1544,6 +1544,7 @@ if _HAS_TORCH:
             self.stats = {'games': 0, 'draw': 0, 'cutoff': 0, 'plies': 0}
             self.fwd_calls = 0     # NN forward passes + rows served — the loop
             self.fwd_rows = 0      # diffs these to report avg GPU batch size
+            self.bb_calls = self.bb_rows = 0    # opening-backbone share (see MP pool)
             self.slots = [self._new_game() for _ in range(n_parallel)]
 
         def _push_seed(self, seq):
@@ -1574,9 +1575,12 @@ if _HAS_TORCH:
                     self.network, self.device, uniq_states)
                 return [(probs[r][lg], conf[r][lg], plog[r][lg], float(beta[r]))
                         for r, lg in enumerate(uniq_legals)]
+            def _ev_counted(us, ul):
+                self.bb_calls += 1; self.bb_rows += len(us)
+                return _ev(us, ul)
             self._backbones.extend(thompson_backbone_batch(
                 self.game, self._rng, self.n_parallel, self.curr_depth,
-                self.max_plies, _ev, temp=self.curr_temp))
+                self.max_plies, _ev_counted, temp=self.curr_temp))
 
         def _new_game(self):
             rng = self._rng
@@ -1774,6 +1778,10 @@ if _HAS_TORCH:
             self.stats = {'games': 0, 'draw': 0, 'cutoff': 0, 'plies': 0}
             self.fwd_calls = 0     # NN forward passes + rows served — the loop
             self.fwd_rows = 0      # diffs these to report avg GPU batch size
+            self.bb_calls = 0      # …of which serve the opening-backbone walk.
+            self.bb_rows = 0       # A refill is SERIAL (one round-trip per ply,
+                                   # blocking that worker's other games), so this
+                                   # is the number to watch if throughput sags.
             ctx = _mp.get_context('spawn')
             self.req_q = ctx.Queue()
             self.episode_q = ctx.Queue(maxsize=64)
@@ -1864,6 +1872,8 @@ if _HAS_TORCH:
                     xin = obs.reshape(-1, *_OBS_SHAPE).astype(np.float32)
                     if net_id in ('live', 'bb'):
                         self.fwd_calls += 1; self.fwd_rows += xin.shape[0]
+                        if net_id == 'bb':
+                            self.bb_calls += 1; self.bb_rows += xin.shape[0]
                     row_legals = [l for _, _, ls in group for l in ls]
                     flat = np.concatenate([l.astype(np.int64) + r * A
                                            for r, l in enumerate(row_legals)])
