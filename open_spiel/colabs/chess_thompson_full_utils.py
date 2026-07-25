@@ -75,6 +75,18 @@ _FLIP_TERM = np.array([_LOSS, _DRAW, _WIN], dtype=np.int8)
 # the net learns — it only keeps the math defined.
 ALPHA_FLOOR = 1e-9
 
+# TARGET Dirichlets need a real smoothing pseudo-count, NOT the numerical floor,
+# because the two sides of KL(target ‖ prediction) are wildly asymmetric in how
+# they respond to a near-zero component:
+#     target side     -> digamma(a)  ->  psi(0.05) = -20.5   but  psi(1e-9) = -1e9
+#     prediction side -> lgamma(b)   ->  lgamma(1e-9) = +20.7  (logarithmic, mild)
+# So an unvisited action carrying only ALPHA_FLOOR multiplies its whole KL term by
+# ~5e7 versus the same action at 0.05 — which is exactly what sent L_policyprior
+# to ~1e4-2e4 and made it 100% of the loss.  This is Dirichlet/Laplace smoothing
+# of an unobserved count (a modelling choice, like TERMINAL_EPS), not a cap: it
+# bounds nothing the network can output and nothing above.
+TARGET_EPS = 0.05
+
 # A PROVEN terminal is a point mass, and no Dirichlet represents one (its KL would
 # be infinite), so a proof is asserted as a finite spike instead.  These two are
 # MODELLING choices — how hard a proof is asserted — not caps on anything the
@@ -472,9 +484,9 @@ def make_target(root):
     peak of the visit distribution and so taught a FLATTENED policy.)"""
     ev = (root.term >= 0) | np.array([c is not None for c in root.children])
     ev_idx = np.nonzero(ev)[0].astype(np.int32)
-    ev_alpha = np.maximum(root.alpha[ev_idx], ALPHA_FLOOR).astype(np.float32)
-    pcount = root.pcount.astype(np.float32)
-    qv = node_qv(root).astype(np.float32)
+    ev_alpha = np.maximum(root.alpha[ev_idx], TARGET_EPS).astype(np.float32)
+    pcount = root.pcount.astype(np.float32)   # raw visits; smoothed in the loss
+    qv = np.maximum(node_qv(root), TARGET_EPS).astype(np.float32)
     return {'obs': root.obs, 'legal': root.legal.copy(),
             'pcount': pcount, 'ev_idx': ev_idx, 'ev_alpha': ev_alpha,
             'qv': qv, 'z': np.float32(0.0), 'solved': False,
@@ -503,7 +515,7 @@ def z_mix_episode(samples, returns, z_mix, z_gamma=1.0):
         obs_alpha = np.full(3, ALPHA_FLOOR)
         obs_alpha[corner] = 1.0
         m = (1 - w) * dir_mean(s['qv']) + w * dir_mean(obs_alpha)
-        s['qv'] = np.maximum(m * s['qv'].sum(), ALPHA_FLOOR).astype(np.float32)
+        s['qv'] = np.maximum(m * s['qv'].sum(), TARGET_EPS).astype(np.float32)
     return samples
 
 
@@ -1225,16 +1237,28 @@ if _HAS_TORCH:
         klav = _dir_kl_rows(meta['ev_alpha'].reshape(-1, 3), pv.reshape(-1, 3))
         evm = meta['ev_mask'].reshape(-1).float()
         L_av = (klav * evm).sum() / evm.sum().clamp_min(1.0)
-        # (4) policy-prior KL:  KL( Dir(pcount+floor) ‖ Dir(beta·π) )  per sample
-        t = (meta['pcount'] + FLOOR) * maskf                      # (B,K)
+        # (4) policy-prior KL:  KL( Dir(pcount+TARGET_EPS) ‖ Dir(beta·π) ).
+        # Two things matter here.  (a) The target is smoothed with TARGET_EPS, not
+        # ALPHA_FLOOR: digamma(target) is in the KL and psi(1e-9) = -1e9, so an
+        # unvisited action would otherwise dominate the whole loss.  (b) It is
+        # divided by the target's own total concentration, making it a
+        # PER-OBSERVATION KL.  An unnormalised Dirichlet KL scales ~linearly with
+        # alpha0, i.e. with the sim count, so playout-cap randomisation
+        # (FAST=100/FULL=400) alone swings the raw term 4x and no fixed weight can
+        # balance it.  Normalising is the same choice AlphaZero makes by taking
+        # cross-entropy against NORMALISED visit counts; it rescales only — the
+        # optimum is still beta*pi == target, reachable exactly since beta is
+        # unbounded.
+        t = (meta['pcount'] + TARGET_EPS) * maskf                 # (B,K)
         b = (beta.unsqueeze(1) * pi) * maskf                      # (B,K), Σ_k=beta
         Tsum = t.sum(1); Bsum = b.sum(1)
         zeros = torch.zeros_like(t)
-        lgt = torch.where(mask, _lg(t.clamp_min(FLOOR)), zeros).sum(1)
+        lgt = torch.where(mask, _lg(t.clamp_min(TARGET_EPS)), zeros).sum(1)
         lgb = torch.where(mask, _lg(b.clamp_min(FLOOR)), zeros).sum(1)
-        dig = torch.where(mask, (t - b) * (_dg(t.clamp_min(FLOOR))
+        dig = torch.where(mask, (t - b) * (_dg(t.clamp_min(TARGET_EPS))
                           - _dg(Tsum).unsqueeze(1)), zeros).sum(1)
-        L_pol = (_lg(Tsum) - lgt - _lg(Bsum) + lgb + dig).mean()
+        kl_pol = _lg(Tsum) - lgt - _lg(Bsum) + lgb + dig
+        L_pol = (kl_pol / Tsum.clamp_min(1.0)).mean()
         wv, wvd, wav, wpol = weights
         total = wpol * L_pol + wav * L_av + wvd * L_vd + wv * L_value
         # Loss values + concentration (α0) diagnostics (predicted vs target total
@@ -1263,7 +1287,7 @@ if _HAS_TORCH:
         pad_mask = np.zeros((B, K), bool)
         pcount = np.zeros((B, K), np.float32)
         ev_mask = np.zeros((B, K), bool)
-        ev_alpha = np.full((B, K, 3), ALPHA_FLOOR, np.float32)
+        ev_alpha = np.full((B, K, 3), TARGET_EPS, np.float32)   # padding: masked
         qv_t = np.empty((B, 3), np.float32)
         z = np.zeros(B, np.float32)
         z_w = np.zeros(B, np.float32)
