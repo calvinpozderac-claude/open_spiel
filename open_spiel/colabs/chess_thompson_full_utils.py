@@ -412,6 +412,26 @@ def _node_solved_outcome(node):
     return None
 
 
+def _boost_solved_best(node, outcome, bonus):
+    """Once a node is SOLVED, concentrate its policy posterior on the moves that
+    actually achieve the proven outcome, so the pi-weighted qv mixture collapses
+    onto the proven belief instead of being diluted by inferior siblings.
+
+    A proven WIN is boosted at proof time inside _set_term (one winning edge is
+    enough to solve the node).  A proven DRAW cannot be: it is only known once
+    EVERY edge is proven, which is here.  Without this a proven draw was taught as
+    ~81% LOSS, because pi stayed spread over the losing siblings.  A proven LOSS
+    needs nothing — every edge carries the same LOSS spike, so any weighting
+    already reproduces it exactly."""
+    if not bonus or outcome != _DRAW:
+        return
+    for i in np.nonzero(node.term == _DRAW)[0]:
+        i = int(i)
+        _acc(node, i, -1.0)                       # documented mutation protocol
+        node.pcount[i] += bonus
+        _acc(node, i, +1.0)
+
+
 def _propagate_solved(path, aux=None, proven_win_bonus=0.0):
     """Walk leaf->root; when a node becomes fully solved, prove the parent edge
     entering it (flipped).  Emits exact solver-labelled training samples into
@@ -424,14 +444,17 @@ def _propagate_solved(path, aux=None, proven_win_bonus=0.0):
         parent, pidx = path[k - 1]
         if parent.term[pidx] >= 0:
             break
+        _boost_solved_best(node, out, proven_win_bonus)
         _set_term(parent, pidx, int(_FLIP_TERM[out]), proven_win_bonus)
         if aux is not None and node.obs is not None:
             t = make_target(node)
-            # Exact solver label: its value belief IS ground truth, so skip the
-            # game-outcome value-MSE (the played-out z can differ from the proven
-            # value) and mark it as an exact sample.
+            # Exact solver label.  z is the PROVEN outcome for this node's mover,
+            # not the played-out result — the proof is ground truth and strictly
+            # better than whatever the game happened to finish as, so the sample
+            # DOES train the value MSE (it used to be excluded via 'no_z').
             t['solved'] = True
-            t['no_z'] = True
+            t['z'] = np.float32(1.0 if out == _WIN else
+                                (-1.0 if out == _LOSS else 0.0))
             aux.append(t)
 
 
