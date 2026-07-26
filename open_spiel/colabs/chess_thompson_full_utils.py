@@ -186,15 +186,21 @@ class _TNode:
     Constructed from ALREADY-GATHERED per-legal-action network rows.
 
     INCREMENTAL MIXTURE ACCUMULATORS (W, Mu, Su): node_qv needs the
-    policy-weighted mixture  sum_a u_a * (mean_a, E[x^2]_a) / W,  u_a=pprior+pcount.
-    Recomputing that sum over all k edges every backup was ~half of self-play
-    CPU.  Instead we keep it UN-normalised so the moving denominator W is trivial,
-    and every edge mutation applies an O(1) delta (see _acc): identical result,
-    O(1) instead of O(k).  Stored as Python scalars/lists — numpy's per-op
-    dispatch overhead on 3-vectors would erase the win.
-        W  : float          = sum_a u_a
-        Mu : [mw, md, ml]   = sum_a u_a * mean_a
-        Su : [sw, sd, sl]   = sum_a u_a * E[x^2]_a   (E[x^2]=var_within+mean^2)
+    VISIT-weighted mixture  sum_a pcount_a * (mean_a, E[x^2]_a) / W  — only
+    edges that have actually been searched contribute; an untouched sibling
+    (pcount=0) carries no weight, so a wide, mostly-unexplored branching
+    factor can't manufacture spurious dispersion the way mixing in the
+    (mostly still-uniform) policy prior did.  Recomputing that sum over all k
+    edges every backup was ~half of self-play CPU.  Instead we keep it
+    UN-normalised so the moving denominator W is trivial, and every edge
+    mutation applies an O(1) delta (see _acc): identical result, O(1) instead
+    of O(k).  Stored as Python scalars/lists — numpy's per-op dispatch
+    overhead on 3-vectors would erase the win.
+        W  : float          = sum_a pcount_a
+        Mu : [mw, md, ml]   = sum_a pcount_a * mean_a
+        Su : [sw, sd, sl]   = sum_a pcount_a * E[x^2]_a  (E[x^2]=var_within+mean^2)
+    A brand-new node has W=0 (nothing searched below it yet); node_qv falls
+    back to the prior-weighted mixture for that one case (see node_qv).
     """
     __slots__ = ('player', 'legal', 'alpha', 'pprior', 'pcount', 'term',
                  'vloss', 'children', 'obs', 'W', 'Mu', 'Su', 'ev', 'sd')
@@ -209,23 +215,23 @@ class _TNode:
         lg = np.asarray(plogits, dtype=np.float64)
         lg = lg - lg.max()
         pi = np.exp(lg); pi /= pi.sum()
-        # positivity only (pi_post divides by pprior+pcount, which must be > 0)
+        # positivity only (used as node_qv's not-yet-searched fallback weight)
         self.pprior = np.maximum(float(beta) * pi, ALPHA_FLOOR)         # (k,)
         self.pcount = np.zeros(k)
         self.term   = np.full(k, -1, dtype=np.int8)
         self.vloss  = np.zeros(k, dtype=np.int32)
         self.children = [None] * k
         self.obs = None
-        # Initialise the mixture accumulators from all edges (the one O(k) pass).
-        a0 = self.alpha.sum(1)                                         # (k,)
-        m  = self.alpha / a0[:, None]                                  # (k,3)
-        s  = m * (1.0 - m) / (a0[:, None] + 1.0) + m * m               # E[x^2]
-        u  = self.pprior                                               # pcount=0
-        self.W  = float(u.sum())
-        self.Mu = (u[:, None] * m).sum(0).tolist()
-        self.Su = (u[:, None] * s).sum(0).tolist()
+        # Visit-weighted mixture accumulators start EMPTY: pcount is all-zero
+        # at construction, so there is nothing to sum yet (see node_qv for the
+        # not-yet-searched fallback).  No O(k) pass needed here any more.
+        self.W  = 0.0
+        self.Mu = [0.0, 0.0, 0.0]
+        self.Su = [0.0, 0.0, 0.0]
         # Gaussian selection needs per-edge (E[v], sd[v]); cache only when on.
         if _GAUSSIAN_SELECT:
+            a0 = self.alpha.sum(1)                                     # (k,)
+            m  = self.alpha / a0[:, None]                              # (k,3)
             mw, ml = m[:, _WIN], m[:, _LOSS]
             self.ev = mw - ml
             self.sd = np.sqrt((mw * (1 - mw) + ml * (1 - ml) + 2 * mw * ml)
@@ -251,7 +257,7 @@ def _acc(node, idx, sign):
     """Add (sign=+1) or remove (sign=-1) edge idx's contribution to the node's
     mixture accumulators, using the edge's CURRENT alpha/pcount.  Wrap every edge
     mutation as: _acc(node, idx, -1); <mutate>; _acc(node, idx, +1)."""
-    u = float(node.pprior[idx] + node.pcount[idx]) * sign
+    u = float(node.pcount[idx]) * sign
     (mw, md, ml), (sw, sd, sl) = _edge_ms(node.alpha[idx])
     node.W += u
     Mu, Su = node.Mu, node.Su
@@ -270,20 +276,23 @@ def _set_edge_v(node, idx):
                     / (a0 + 1.0)) ** 0.5
 
 
-def _pi_post(node):
-    """Posterior policy weights pi_a = (pprior + pcount) / total — the belief
-    over which move is optimal (NN prior updated by search observations).  Also
-    the mixture weights inside node_qv (there via the incremental accumulator)."""
-    w = node.pprior + node.pcount
-    return w / w.sum()
-
-
 def node_qv(node):
-    """Position value-distribution qv = moment-match( sum_a pi_a * pv_a ), the
-    policy-weighted mixture of the edge beliefs (mover's perspective).  Read
-    straight off the incremental accumulators in O(1) — algebraically identical
-    to moment_match_mixture(pi_post, alpha).  UNBOUNDED above; the only guards
-    are the variance division and beta0 positivity (see moment_match_mixture)."""
+    """Position value-distribution: moment-matched mixture of the per-action
+    value beliefs pv_a, weighted by VISIT COUNT ONLY (pcount) — an unvisited
+    sibling contributes nothing, so it can no longer dilute/disperse the
+    estimate with an untested belief.  Read straight off the incremental
+    accumulators in O(1) (see _acc); by construction they only ever include
+    edges that have actually been searched.
+
+    A just-expanded node has searched none of its OWN edges yet (W=0): that
+    is the one case with no visit evidence to weight by, so it falls back to
+    moment_match_mixture(pprior, alpha) — the network's raw leaf estimate —
+    exactly once, until the first of its edges is visited.
+
+    UNBOUNDED above; the only guards are the variance division and beta0
+    positivity (see moment_match_mixture)."""
+    if node.W <= 0.0:
+        return moment_match_mixture(node.pprior, node.alpha)
     W = node.W
     Mw, Md, Ml = node.Mu[0] / W, node.Mu[1] / W, node.Mu[2] / W
     Vw = node.Su[0] / W - Mw * Mw
