@@ -37,6 +37,8 @@ import copy
 import math
 import os
 import random
+import shutil
+import subprocess
 import sys
 import time
 
@@ -50,6 +52,13 @@ try:
 except Exception:                                   # numpy-only (tree unit tests)
     torch = None
     _HAS_TORCH = False
+
+try:
+    import pyspiel                                    # only for the UCI<->action
+    _HAS_PYSPIEL = True                               # bridge (chess-specific)
+except Exception:
+    pyspiel = None
+    _HAS_PYSPIEL = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1042,6 +1051,369 @@ def set_game(game):
     _OBS_SHAPE = tuple(game.observation_tensor_shape())      # (20, 8, 8)
     _NUM_ACTIONS = game.num_distinct_actions()               # 4674
     return _OBS_SHAPE, _NUM_ACTIONS
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Supervised bootstrap: Stockfish -> the SAME target schema as self-play
+# ══════════════════════════════════════════════════════════════════════════════
+# Purpose: give the value/policy heads a reasonable starting point before RL
+# self-play (which starts from an untrained net and pays for its own ignorance
+# for the first several thousand episodes; see the earlier curriculum/loss-
+# balance history in this notebook's git log).  Rather than an external human-
+# game database (a) PGN archives only carry the move played + final result, with
+# NO per-action value information -- exactly the one thing the action-value head
+# needs -- and (b) this session's egress policy denies lichess/huggingface
+# outright.  Stockfish, run locally with MultiPV, gives a calibrated WDL triple
+# for EVERY candidate move it analyzes -- a direct match for pv_a = Dir(c_a *
+# (p_win,p_draw,p_loss)_a), and strictly richer supervision than any PGN corpus.
+#
+# Design choice: build these targets through the EXACT SAME functions self-play
+# uses (_TNode, _acc, node_qv, make_target, z_mix_episode) rather than deriving
+# qv/pcount by hand a second time.  Two benefits: (1) every fix made earlier this
+# session (target smoothing, the direction-preserving concentration floor, the
+# per-observation policy KL) automatically applies to bootstrap targets too, with
+# no separate code path to keep in sync; (2) the bootstrap and self-play target
+# DISTRIBUTIONS are statistically the same shape, so training doesn't see a
+# regime shift at the handoff.  The only new code is turning a Stockfish
+# analysis into "evidence edges" on a _TNode via the documented mutation
+# protocol (_acc(-1); mutate; _acc(+1)) -- everything downstream is reused.
+
+
+def find_stockfish(path=None):
+    """Locate a UCI engine binary.  Checks `path`, then $STOCKFISH_PATH, then
+    common install locations (apt puts it at /usr/games on Debian/Ubuntu, not on
+    PATH by default), then plain `shutil.which`.  Raises with actionable install
+    hints if nothing is found -- this is meant to fail loudly, not silently fall
+    back to no supervision."""
+    candidates = [path, os.environ.get('STOCKFISH_PATH'),
+                  '/usr/games/stockfish', '/usr/local/bin/stockfish',
+                  '/opt/homebrew/bin/stockfish', shutil.which('stockfish'),
+                  shutil.which('stockfish.exe')]
+    for c in candidates:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    raise FileNotFoundError(
+        "No Stockfish binary found. Install one:\n"
+        "  Debian/Ubuntu : sudo apt-get install stockfish  (lands at "
+        "/usr/games/stockfish)\n"
+        "  macOS         : brew install stockfish\n"
+        "  Windows       : download a release from https://stockfishchess.org/"
+        " and pass its .exe path explicitly\n"
+        "then pass STOCKFISH_PATH=... or find_stockfish(path='...').")
+
+
+class StockfishEngine:
+    """A persistent UCI engine subprocess (Stockfish or compatible).  One process
+    serves MANY positions -- engine start-up (~0.2s, NNUE load) is amortised
+    instead of paid per position, which matters at bootstrap scale (tens of
+    thousands of positions)."""
+
+    def __init__(self, path=None, threads=1, hash_mb=16, multipv_cap=48):
+        self.path = find_stockfish(path)
+        self.multipv_cap = int(multipv_cap)
+        self._multipv_set = 1
+        self.proc = subprocess.Popen(
+            [self.path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            text=True, bufsize=1)
+        self._send('uci')
+        self._until('uciok')
+        self._send(f'setoption name Threads value {int(threads)}')
+        self._send(f'setoption name Hash value {int(hash_mb)}')
+        self._send('setoption name UCI_ShowWDL value true')
+        self._ready()
+
+    def _send(self, cmd):
+        self.proc.stdin.write(cmd + '\n')
+        self.proc.stdin.flush()
+
+    def _readline(self):
+        line = self.proc.stdout.readline()
+        if line == '':                                # engine died
+            raise RuntimeError(f'Stockfish process at {self.path} exited '
+                               f'unexpectedly (return code {self.proc.poll()})')
+        return line
+
+    def _until(self, token):
+        while token not in self._readline():
+            pass
+
+    def _ready(self):
+        self._send('isready')
+        self._until('readyok')
+
+    def analyze(self, fen, depth, multipv):
+        """Analyze one FEN at `depth`, top `multipv` moves.  Returns
+        {uci_move: (w, d, l)} with w+d+l ~= 1000 (Stockfish's own WDL model,
+        already calibrated against real game outcomes -- not something we
+        derive from centipawns ourselves)."""
+        multipv = max(1, min(int(multipv), self.multipv_cap))
+        if multipv != self._multipv_set:
+            self._send(f'setoption name MultiPV value {multipv}')
+            self._multipv_set = multipv
+            self._ready()
+        self._send(f'position fen {fen}')
+        self._send(f'go depth {int(depth)}')
+        best = {}                        # rank -> (uci, w, d, l), last depth wins
+        while True:
+            line = self._readline()
+            if line.startswith('bestmove'):
+                break
+            if ' multipv ' not in line or ' pv ' not in line:
+                continue
+            toks = line.split()
+            rank = int(toks[toks.index('multipv') + 1])
+            mv = toks[toks.index('pv') + 1]
+            if 'wdl' in toks:
+                i = toks.index('wdl')
+                w, d, l = (int(toks[i + 1]), int(toks[i + 2]), int(toks[i + 3]))
+            elif 'cp' in toks or 'mate' in toks:
+                # Fallback for a UCI engine without a WDL model: the standard
+                # logistic cp->win-probability fit (used by lichess et al.), a
+                # draw estimate from the residual.  Only exercised by non-
+                # Stockfish engines; Stockfish 12+ always reports wdl above.
+                if 'mate' in toks:
+                    mate = int(toks[toks.index('mate') + 1])
+                    cp = 10000.0 if mate > 0 else -10000.0
+                else:
+                    cp = float(toks[toks.index('cp') + 1])
+                win = 1.0 / (1.0 + math.exp(-0.004 * cp))
+                draw = max(0.0, 1.0 - abs(2 * win - 1)) * 0.5
+                w, d, l = (win * 1000, draw * 1000, (1 - win) * 1000 - draw * 500)
+            else:
+                continue
+            best[rank] = (mv, w, d, l)
+        return {mv: (w, d, l) for mv, w, d, l in best.values()}
+
+    def close(self):
+        try:
+            self._send('quit')
+            self.proc.wait(timeout=3)
+        except Exception:
+            self.proc.kill()
+
+
+def _legal_action_uci(state):
+    """{action: uci_move} for every legal action in `state`, via pyspiel's own
+    action<->Move bridge (pyspiel.chess.action_to_move(...).to_lan()) -- exact,
+    no hand-rolled square/FEN diffing."""
+    board = state.board()
+    chess_mod = pyspiel.chess
+    return {a: chess_mod.action_to_move(a, board).to_lan()
+            for a in state.legal_actions()}
+
+
+def stockfish_target(state, engine, depth, conc, pseudo_sims, policy_temp):
+    """One position -> a target dict in EXACTLY make_target's schema (z is left
+    at 0.0; the caller fills it via z_mix_episode once the game concludes, same
+    as self-play).  Analyzes EVERY legal move (MultiPV = full legal count,
+    capped by engine.multipv_cap) rather than a fixed top-K subset: with only a
+    partial subset analyzed, the untouched legal moves would need SOME prior to
+    enter node_qv's mixture (it sums over every legal edge, not just evidence
+    edges), and any such prior would be an arbitrary invention with no
+    Stockfish signal behind it. Full coverage costs roughly 1.5-2x a top-16
+    analysis (measured) but needs no invented prior anywhere -- every legal
+    move's contribution to qv is real engine signal."""
+    legal = state.legal_actions()
+    uci = _legal_action_uci(state)                      # {action: uci}
+    fen = str(state)
+    wdl = engine.analyze(fen, depth, multipv=len(legal))  # {uci: (w,d,l)}
+
+    node = _TNode(state.current_player(), legal,
+                  p3=np.full((len(legal), 3), 1.0 / 3),   # overwritten below for
+                  conf=np.full(len(legal), ALPHA_FLOOR),  # every analyzed edge;
+                  plogits=np.zeros(len(legal)),           # this is only the floor
+                  beta=ALPHA_FLOOR)                       # for anything MISSED
+    node.obs = np.asarray(state.observation_tensor(state.current_player()),
+                         dtype=np.float16)
+
+    vals = np.array([(wdl[uci[a]][0] - wdl[uci[a]][2]) / 1000.0
+                     if uci[a] in wdl else -1e9 for a in legal])
+    seen = vals > -1e8
+    if seen.any():
+        pi = np.zeros(len(legal))
+        x = vals[seen] / max(policy_temp, 1e-6)
+        e = np.exp(x - x.max())
+        pi[seen] = e / e.sum()
+    for i, a in enumerate(legal):
+        if a not in uci or uci[a] not in wdl:
+            continue                                    # engine missed this move
+        w, d, l = wdl[uci[a]]
+        mean = np.array([w, d, l], dtype=np.float64) / max(w + d + l, 1e-9)
+        _acc(node, i, -1.0)
+        # TERMINAL_EPS, not ALPHA_FLOOR: Stockfish reports EXACT-integer w/d/l, so
+        # a lopsided position (e.g. w=1000,d=0,l=0) gives a mean with a literal
+        # zero component. Flooring that at ALPHA_FLOOR=1e-9 is the exact digamma
+        # blowup the target-smoothing comment above TARGET_EPS warns about
+        # (psi(1e-9) = -1e9): with av's KL summed over every legal move (full
+        # MultiPV coverage) this measured 5+ orders of magnitude larger than a
+        # normal batch's loss. TERMINAL_EPS=0.05 is what proven-terminal spikes
+        # already use for exactly this "impossible corner" case -- same fix here.
+        node.alpha[i] = np.maximum(mean * conc, TERMINAL_EPS)
+        node.pcount[i] = pseudo_sims * pi[i]
+        node.children[i] = True             # evidence-edge sentinel (see make_target)
+        _acc(node, i, +1.0)
+    return make_target(node)
+
+
+def sample_ply_indices(n_plies, n_samples, endgame_power, rng):
+    """Choose which plies of a finished game to deep-analyze, weighted toward
+    the END of the game: weight(i) ~ (i+1)**endgame_power, i in [0, n_plies).
+    Matches the adaptive curriculum's endgame-first bias (CURR_DEPTH0 grows from
+    the end outward), so the bootstrap primes exactly the phase self-play trains
+    on first.  endgame_power=0 -> uniform; larger -> stronger end-bias."""
+    n_samples = min(int(n_samples), n_plies)
+    if n_samples <= 0:
+        return []
+    w = (np.arange(n_plies, dtype=np.float64) + 1.0) ** endgame_power
+    w /= w.sum()
+    idx = rng.choice(n_plies, size=n_samples, replace=False, p=w)
+    return sorted(int(i) for i in idx)
+
+
+def stockfish_selfplay_game(game, engine, rng, gen_depth=6, random_move_prob=0.05,
+                            opening_plies_max=16, max_plies=300):
+    """Play one game to completion for bootstrap data: a uniform-RANDOM opening
+    (0..opening_plies_max plies, free -- same diversity trick as the self-play
+    curriculum's random_backbone) then cheap engine play (shallow `gen_depth`,
+    MultiPV=1) for the rest, with a small independent chance per ply of a random
+    legal move instead -- keeps games from collapsing onto a handful of
+    deterministic lines, the way pure best-move self-play tends to.  Returns
+    (action_sequence, returns) with returns as state.returns() at the end (or a
+    draw-scored [0,0] if max_plies is hit -- rare at gen_depth's shallow search,
+    since real games mostly resolve well under 300 plies)."""
+    state = game.new_initial_state()
+    actions = []
+    opening = int(rng.integers(0, opening_plies_max + 1))
+    for _ in range(opening):
+        if state.is_terminal():
+            break
+        legal = state.legal_actions()
+        a = int(legal[rng.integers(len(legal))])
+        state.apply_action(a); actions.append(a)
+    while not state.is_terminal() and len(actions) < max_plies:
+        legal = state.legal_actions()
+        if rng.random() < random_move_prob:
+            a = int(legal[rng.integers(len(legal))])
+        else:
+            uci = _legal_action_uci(state)
+            wdl = engine.analyze(str(state), gen_depth, multipv=1)
+            (mv, _wdl), = wdl.items()
+            a = next(act for act, u in uci.items() if u == mv)
+        state.apply_action(a); actions.append(a)
+    returns = state.returns() if state.is_terminal() else [0.0, 0.0]
+    return actions, returns
+
+
+class StockfishBootstrap:
+    """Single-process bootstrap data generator.  `.games()` yields one list of
+    target-dicts per finished game -- the SAME shape as an episode from
+    ThompsonParallelSelfPlay, so the notebook driver's
+    `replay_buffer.extend(next(episode_stream))` loop needs no changes to
+    consume either source."""
+
+    def __init__(self, game, stockfish_path=None, depth=12, gen_depth=6,
+                 conc=50.0, pseudo_sims=100.0, policy_temp=0.05,
+                 positions_per_game=8, endgame_power=2.0,
+                 random_move_prob=0.05, opening_plies_max=16, max_plies=300,
+                 z_mix=0.5, z_gamma=0.95, threads=1, seed=None):
+        if not _HAS_PYSPIEL:
+            raise RuntimeError("StockfishBootstrap needs `pyspiel` (for the "
+                               "action<->UCI bridge); it is not importable here.")
+        self.game = game
+        self.engine = StockfishEngine(stockfish_path, threads=threads)
+        self.depth, self.gen_depth = depth, gen_depth
+        self.conc, self.pseudo_sims, self.policy_temp = conc, pseudo_sims, policy_temp
+        self.positions_per_game = positions_per_game
+        self.endgame_power = endgame_power
+        self.random_move_prob = random_move_prob
+        self.opening_plies_max = opening_plies_max
+        self.max_plies = max_plies
+        self.z_mix, self.z_gamma = z_mix, z_gamma
+        self.rng = np.random.default_rng(seed)
+        self.games_played = 0
+        self.positions_made = 0
+
+    def games(self):
+        while True:
+            actions, returns = stockfish_selfplay_game(
+                self.game, self.engine, self.rng, self.gen_depth,
+                self.random_move_prob, self.opening_plies_max, self.max_plies)
+            self.games_played += 1
+            if len(actions) == 0:
+                continue
+            idxs = sample_ply_indices(len(actions), self.positions_per_game,
+                                      self.endgame_power, self.rng)
+            samples, state, ai = [], self.game.new_initial_state(), 0
+            for i in idxs:
+                while ai < i:
+                    state.apply_action(actions[ai]); ai += 1
+                if state.is_terminal():
+                    break
+                samples.append(stockfish_target(
+                    state, self.engine, self.depth, self.conc,
+                    self.pseudo_sims, self.policy_temp))
+            if samples:
+                z_mix_episode(samples, returns, self.z_mix, self.z_gamma)
+                self.positions_made += len(samples)
+            yield samples
+
+    def close(self):
+        self.engine.close()
+
+
+def _bootstrap_worker(worker_id, out_q, cfg, n_games):
+    """Top-level (spawn-safe) worker: runs its own StockfishBootstrap and pushes
+    finished-game sample lists to `out_q`.  n_games=None runs forever (caller
+    stops the pool)."""
+    try:
+        game = pyspiel.load_game('chess')
+        boot = StockfishBootstrap(game, seed=cfg.get('seed', 0) + worker_id * 7919,
+                                  **{k: v for k, v in cfg.items() if k != 'seed'})
+        gen = boot.games()
+        played = 0
+        while n_games is None or played < n_games:
+            out_q.put(next(gen))
+            played += 1
+        boot.close()
+    except Exception as e:
+        out_q.put(('__error__', worker_id, repr(e)))
+
+
+class StockfishBootstrapPool:
+    """N worker PROCESSES, each running an independent StockfishBootstrap (its
+    own engine subprocess) -- Stockfish is CPU-only and each worker is fully
+    self-contained, so unlike self-play's MPSelfPlayPool there is no shared GPU
+    inference server to coordinate: this is just N parallel producers draining
+    into one queue."""
+
+    def __init__(self, n_workers, cfg, seed=0):
+        import multiprocessing as mp
+        ctx = mp.get_context('spawn')
+        self.out_q = ctx.Queue(maxsize=4 * n_workers)
+        cfg = dict(cfg); cfg['seed'] = seed
+        self.procs = [ctx.Process(target=_bootstrap_worker,
+                                  args=(i, self.out_q, cfg, None), daemon=True)
+                     for i in range(n_workers)]
+        for p in self.procs:
+            p.start()
+        self.games_played = 0
+        self.positions_made = 0
+
+    def games(self):
+        while True:
+            item = self.out_q.get()
+            if isinstance(item, tuple) and item and item[0] == '__error__':
+                _, wid, err = item
+                raise RuntimeError(f'bootstrap worker {wid} failed: {err}')
+            self.games_played += 1
+            self.positions_made += len(item)
+            yield item
+
+    def shutdown(self):
+        for p in self.procs:
+            p.terminate()
+        for p in self.procs:
+            p.join(timeout=2)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
