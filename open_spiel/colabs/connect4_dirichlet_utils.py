@@ -1447,12 +1447,28 @@ if _HAS_TORCH:
             evc = evm.sum().clamp_min(1.0)
             qa_p = (q_alpha.reshape(-1, 3).sum(-1) * evm).sum() / evc
             qa_t = (meta['ev_alpha'].reshape(-1, 3).sum(-1) * evm).sum() / evc
+            # The plain batch means are dominated by solver-labelled samples,
+            # whose targets are a TERMINAL_CONC spike by construction: measured
+            # at 63% of a buffer they contributed 95% of the predicted-alpha0
+            # mass, so `cv_p` reads ~23 while ordinary positions sit at ~0.2 and
+            # match their targets closely.  Report the ORDINARY-sample figures
+            # too, or the diagnostic just tracks the solver share.
+            uns = meta['unsolved']
+            unsc = uns.sum().clamp_min(1.0)
+            uv_p = (v_alpha.sum(1) * uns).sum() / unsc
+            uv_t = (meta['v_obs'].sum(1) * uns).sum() / unsc
+            uevm = evm * uns.unsqueeze(1).expand(-1, mask.shape[1]).reshape(-1)
+            uevc = uevm.sum().clamp_min(1.0)
+            ua_p = (q_alpha.reshape(-1, 3).sum(-1) * uevm).sum() / uevc
+            ua_t = (meta['ev_alpha'].reshape(-1, 3).sum(-1) * uevm).sum() / uevc
             diag = torch.stack([
                 total, L_klv, L_kla, L_cev, L_cea, L_cons,
                 v_alpha.sum(1).mean(), meta['v_obs'].sum(1).mean(), qa_p, qa_t,
+                uv_p, uv_t, ua_p, ua_t, uns.mean(),
             ]).to('cpu', copy=False).tolist()
         parts = dict(zip(('loss', 'klv', 'kla', 'cev', 'cea', 'cons',
-                          'cv_p', 'cv_t', 'ca_p', 'ca_t'), diag))
+                          'cv_p', 'cv_t', 'ca_p', 'ca_t',
+                          'uv_p', 'uv_t', 'ua_p', 'ua_t', 'unsolved'), diag))
         return total, parts
 
     _Z_CORNER = {1: _WIN, 0: _DRAW, -1: _LOSS}
@@ -1470,6 +1486,7 @@ if _HAS_TORCH:
         v_obs = np.empty((B, 3), np.float32)
         z_idx = np.zeros(B, np.int64)
         z_w = np.zeros(B, np.float32)
+        unsolved = np.zeros(B, np.float32)
         played = np.zeros(B, np.int64)
         played_w = np.zeros(B, np.float32)
         cons_w = np.zeros(B, np.float32)
@@ -1485,6 +1502,7 @@ if _HAS_TORCH:
                 ev_mask[i, s['ev_idx']] = True
                 ev_alpha[i, s['ev_idx']] = s['ev_alpha']
             v_obs[i] = s['v_obs']
+            unsolved[i] = 0.0 if s['solved'] else 1.0
             z_w[i] = s['z_w']
             z_idx[i] = _Z_CORNER[int(round(float(s['z'])))]
             p = int(s['played'])
@@ -1503,6 +1521,7 @@ if _HAS_TORCH:
         meta = {'pad_act': t(pad_act), 'pad_mask': t(pad_mask),
                 'ev_mask': t(ev_mask), 'ev_alpha': t(ev_alpha),
                 'v_obs': t(v_obs), 'z_idx': t(z_idx), 'z_w': t(z_w),
+                'unsolved': t(unsolved),
                 'played': t(played), 'played_w': t(played_w),
                 'cons_w': t(cons_w), 'cons_row': t(cons_row),
                 'cons_isnn': t(cons_isnn), 'cons_term': t(cons_term)}
@@ -2251,7 +2270,8 @@ if _HAS_TORCH:
         hist = {'ep': [], 'loss': [], 'klv': [], 'kla': [], 'cev': [], 'cea': [],
                 'cons': [], 'draw_pct': [], 'plies': [], 'buf': [], 'aux': [],
                 'elo': [], 'quick_ep': [], 'q_w': [], 'q_d': [], 'q_l': [],
-                'cv_p': [], 'cv_t': [], 'ca_p': [], 'ca_t': []}
+                'cv_p': [], 'cv_t': [], 'ca_p': [], 'ca_t': [],
+                'uv_p': [], 'uv_t': [], 'ua_p': [], 'ua_t': [], 'unsolved': []}
         replay_buffer, start_ep, aux_total = [], 1, 0
 
         ckpt = load_checkpoint(cfg.checkpoint_dir) if cfg.resume else None
@@ -2277,7 +2297,16 @@ if _HAS_TORCH:
                     elo_pool.elo.pop(lb, None)
             elo_pool.order = kept
             elo_pool.players = ['random'] + list(kept)
-            hist = ckpt['hist']; start_ep = ckpt['ep'] + 1
+            # A checkpoint written before a diagnostic was added has no series
+            # for it; back-fill with NaN so the columns stay aligned and the
+            # first eval after a resume doesn't KeyError.
+            old = ckpt['hist']
+            n = len(old.get('ep', []))
+            for k, v in hist.items():
+                if k not in old:
+                    old[k] = [float('nan')] * (n if k != 'elo' else 0)
+            hist = old
+            start_ep = ckpt['ep'] + 1
             log(f'resumed at ep {ckpt["ep"]}')
 
         n_params = sum(p.numel() for p in base_network.parameters())
@@ -2349,13 +2378,19 @@ if _HAS_TORCH:
                 ml = lambda k: float(np.mean(accs[k])) if accs[k] else float('nan')
                 hist['ep'].append(ep); hist['loss'].append(ml('loss'))
                 for k in ('klv', 'kla', 'cev', 'cea', 'cons',
-                          'cv_p', 'cv_t', 'ca_p', 'ca_t'):
+                          'cv_p', 'cv_t', 'ca_p', 'ca_t',
+                          'uv_p', 'uv_t', 'ua_p', 'ua_t', 'unsolved'):
                     hist[k].append(ml(k))
                 hist['draw_pct'].append(draw_pct); hist['plies'].append(plies)
                 hist['buf'].append(len(replay_buffer)); hist['aux'].append(aux_total)
                 # Concentration (α₀) of predicted vs target Dirichlets per head.
+                # Both populations, because the all-sample mean mostly reports
+                # how much of the buffer the solver labelled (see full_loss).
                 conc = (f'conc(pred/tgt) v {ml("cv_p"):.1f}/{ml("cv_t"):.1f} '
-                        f'a {ml("ca_p"):.1f}/{ml("ca_t"):.1f}')
+                        f'a {ml("ca_p"):.1f}/{ml("ca_t"):.1f} | unsolved '
+                        f'({100*ml("unsolved"):.0f}% of batch) '
+                        f'v {ml("uv_p"):.2f}/{ml("uv_t"):.2f} '
+                        f'a {ml("ua_p"):.2f}/{ml("ua_t"):.2f}')
                 # WEIGHTED share of the total loss per term — the number to tune
                 # loss_weights by.  If one term sits near 100% the others have
                 # effectively stopped training.
