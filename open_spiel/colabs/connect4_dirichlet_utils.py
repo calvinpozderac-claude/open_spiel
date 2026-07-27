@@ -520,7 +520,19 @@ def _node_solved_outcome(node):
 def _propagate_solved(path, aux=None):
     """Walk leaf→root; when a node becomes fully solved, prove the parent edge
     entering it (flipped).  Emits an EXACT solver-labelled training sample per
-    newly solved node (a solved node is never re-descended, so at most once)."""
+    newly solved node.
+
+    Each NODE is emitted at most once: proving the parent edge makes
+    `_select_leaf` stop there instead of descending, so a solved node never
+    appears on a later path (verified: 0 repeats across 11.5k emissions).  That
+    is NOT per-POSITION de-duplication, and nothing else de-duplicates either.
+    Connect 4 transposes heavily and every root search rebuilds the subtrees the
+    previous move discarded, so the same board legitimately arrives as several
+    distinct nodes.  Measured over 900 games (95.8k samples): 12% of solver rows
+    are repeated boards, against 18% for ordinary self-play rows — openings
+    recur far more than solved endgames do.  If that matters for your run, cap
+    the per-game aux count or de-duplicate the replay buffer; the bigger lever
+    is the solver SHARE of the buffer (~76%), not the repeats."""
     for k in range(len(path) - 1, 0, -1):
         node = path[k][0]
         out = _node_solved_outcome(node)
