@@ -1374,7 +1374,15 @@ if _HAS_TORCH:
         ce_v = -v_logp.gather(1, meta['z_idx'].unsqueeze(1)).squeeze(1)
         L_cev = (zw * ce_v).sum() / zw.sum().clamp_min(1.0)
 
-        # (4) action cross-entropy on the move actually played
+        # (4) action cross-entropy on the move actually played.
+        # NOTE when reading the logged `cev` vs `cea`: they are NOT measured on
+        # the same positions.  Solver-labelled aux samples have no played action,
+        # so `cea` covers self-play moves only, while `cev` also includes every
+        # aux sample — and those are exact, near-terminal, and easy.  In a
+        # Connect 4 run aux samples are the MAJORITY of the buffer (~69% measured
+        # over 2000 episodes), which is most of why `cev` reads ~0.25 while `cea`
+        # sits at ~0.70.  The gap is a difference in sample population, not
+        # evidence that the action head is learning the outcome less well.
         pw = meta['played_w'] * zw
         pl_idx = meta['played'].clamp_min(0)
         q_played_logp = q_logp.gather(
