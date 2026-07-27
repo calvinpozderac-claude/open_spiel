@@ -816,6 +816,27 @@ class Config:
     # search.  'mean' for search_agg is the natural fix (concentration ≈ n·α₀);
     # pairing search_agg='mean' with target_agg='mixture' gives an annealing
     # search AND a budget-independent target.  'sum' is plain conjugate evidence.
+    #
+    # MEASURED, on target_agg (2000 episodes/arm, 70k params, one seed, search
+    # fixed at 'mixture' in both).  Arm B is the documented pairing for 'mean'
+    # targets — kl_normalize=True, plus w_klv raised 16x to restore the state
+    # KL's share of the loss, which normalisation had cut from 17% to 1%:
+    #     head to head, search-free (200 games)  mixture 69.5%  (+143 Elo)
+    #     head to head, MCTS-64      (60 games)  mixture 60.8%  ( +76 Elo)
+    #     vs a common anchor, search-free        mixture 53.3%, mean 28.3%
+    #     vs random                              mixture 100%,  mean 91.2%
+    #     outcome accuracy / NLL on held-out     mixture 67.4% / 0.677
+    #       positions with known results         mean    62.2% / 0.872
+    # 'mean' targets DO make the concentration channel live — predicted α₀ spans
+    # 20x across positions (p10 0.84, p90 16.8) versus 2.6x (0.12 to 0.31) under
+    # 'mixture'.  It just does not pay: ranking positions by predicted α₀, the
+    # top-quartile minus bottom-quartile accuracy gap is +15 points under
+    # 'mixture' against +12 (and non-monotonic) under 'mean'.  A compressed,
+    # nearly-floored concentration still orders positions usefully, and the
+    # per-observation normalisation that 'mean' requires costs more — it weakens
+    # both KL terms, and the action KL is what Thompson selection reads.
+    # Caveat: three flags differ between the arms, so this indicts the
+    # CONFIGURATION, not 'mean' targets in isolation.
 
     # ── search ────────────────────────────────────────────────────────────────
     selection: str = 'dirichlet'      # exact draw | 'gaussian' approximation
