@@ -831,7 +831,10 @@ class Config:
     curr_depth0: float = 8.0          # MCTS covers only the last `depth` plies
     curr_mcts_tail: int = 24
     curr_step: float = 4.0
-    curr_val_thresh: float = 0.40
+    curr_val_thresh: float = 0.40     # push the frontier back once the STATE
+                                      # cross-entropy drops below this, i.e. the
+                                      # net predicts the outcome at the current
+                                      # depth (ln 3 = 1.10 is chance)
     curr_max_depth: float = 42.0
     restart_prob: float = 0.0         # backward-restart curriculum
     restart_k_min: int = 2
@@ -1859,7 +1862,17 @@ if _HAS_TORCH:
                 return self.network, self.device, True
             net = self._pool_nets.get(net_id)
             if net is None:
-                net = load_benchmark_net(self.checkpoint_dir, net_id, self.net_sig)
+                try:
+                    net = load_benchmark_net(self.checkpoint_dir, net_id,
+                                             self.net_sig)
+                except Exception as e:
+                    # A worker picks its pool opponent by listing the checkpoint
+                    # directory, so the file can vanish before we load it.  An
+                    # exception here would kill the server thread and leave every
+                    # worker blocked on a response that never comes, so fall back
+                    # to the live net for this request instead.
+                    print(f'pool net {net_id} unavailable ({e}) — using live net')
+                    return self.network, self.device, True
                 self._pool_nets[net_id] = net
             return net, 'cpu', False
 
