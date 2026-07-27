@@ -56,13 +56,20 @@ def test_primitives():
 
 
 def test_single_component_roundtrip():
-    print('\nSingle-observation round-trip (all three rules)')
+    print('\nSingle-observation round-trip')
     a = np.array([4.0, 1.0, 3.0])
     acc = acc_of([a])
     for mode in c4.AGGREGATIONS:
         got = c4.observed_alpha(acc, mode)
-        check(f'{mode}: n=1 returns the observation itself',
-              close(got, a, 1e-9), f'{got}')
+        if mode == c4.AGG_ADDITIVE:
+            # 'additive' deliberately discards the leaf's concentration: one
+            # observation is one unit of evidence, so it returns the MEAN.
+            check('additive: n=1 returns the mean, total 1',
+                  close(got, c4.dir_mean(a), 1e-9) and abs(got.sum() - 1) < 1e-9,
+                  f'{got}')
+        else:
+            check(f'{mode}: n=1 returns the observation itself',
+                  close(got, a, 1e-9), f'{got}')
 
 
 def test_identical_observations():
@@ -74,13 +81,17 @@ def test_identical_observations():
         mix = c4.observed_alpha(acc, c4.AGG_MIXTURE)
         mean = c4.observed_alpha(acc, c4.AGG_MEAN)
         summ = c4.observed_alpha(acc, c4.AGG_SUM)
+        add = c4.observed_alpha(acc, c4.AGG_ADDITIVE)
         check(f'mixture stays at a0 (n={n})', close(mix.sum(), a0, 1e-6),
               f'{mix.sum()}')
         check(f'mean grows as n(a0+1)-1 (n={n})',
               close(mean.sum(), n * (a0 + 1) - 1, 1e-6), f'{mean.sum()}')
         check(f'sum grows as n*a0 (n={n})', close(summ.sum(), n * a0, 1e-6),
               f'{summ.sum()}')
-        for nm, got in (('mixture', mix), ('mean', mean), ('sum', summ)):
+        check(f'additive a0 == visit count (n={n})', close(add.sum(), n, 1e-9),
+              f'{add.sum()}')
+        for nm, got in (('mixture', mix), ('mean', mean), ('sum', summ),
+                        ('additive', add)):
             check(f'{nm} preserves the mean (n={n})',
                   close(c4.dir_mean(got), c4.dir_mean(a), 1e-9))
 
@@ -124,6 +135,70 @@ def test_mean_against_monte_carlo():
     tv_got = (m * (1 - m)).sum() / (got.sum() + 1.0)
     check('total variance of the AVERAGE matched',
           close(tv_got, tv_target, 5e-3), f'{tv_got} vs {tv_target}')
+
+
+def test_additive_rule():
+    print('\nAdditive backup: alpha0 IS the visit count')
+    rng = np.random.default_rng(11)
+    # alpha0 == n for arbitrary, differing leaf beliefs and concentrations.
+    for n in (1, 3, 17, 240):
+        alphas = [rng.dirichlet(np.ones(3)) * rng.uniform(0.05, 500)
+                  for _ in range(n)]
+        got = c4.observed_alpha(acc_of(alphas), c4.AGG_ADDITIVE)
+        check(f'a0 == n regardless of leaf concentration (n={n})',
+              abs(got.sum() - n) < 1e-9, f'{got.sum()} vs {n}')
+        want = np.mean([a / a.sum() for a in alphas], axis=0)
+        check(f'mean == average of leaf means (n={n})',
+              close(c4.dir_mean(got), want, 1e-9))
+
+    # The leaf's own confidence is discarded: same means, wildly different
+    # concentrations, identical result.
+    m = [np.array([0.7, 0.1, 0.2]), np.array([0.1, 0.1, 0.8])]
+    weak = acc_of([x * 0.3 for x in m])
+    strong = acc_of([x * 900.0 for x in m])
+    check('leaf concentration does not affect the additive belief',
+          close(c4.observed_alpha(weak, c4.AGG_ADDITIVE),
+                c4.observed_alpha(strong, c4.AGG_ADDITIVE), 1e-9))
+
+    # A proven-terminal spike contributes ONE unit, not TERMINAL_CONC units.
+    spike = c4._SPIKE[c4._WIN]
+    one = c4.observed_alpha(acc_of([spike]), c4.AGG_ADDITIVE)
+    check('a terminal spike is worth one visit',
+          abs(one.sum() - 1.0) < 1e-9 and one[c4._WIN] > 0.99, f'{one}')
+    mixed = c4.observed_alpha(
+        acc_of([spike] + [np.array([0.1, 0.1, 0.8]) * 40] * 3),
+        c4.AGG_ADDITIVE)
+    check('…so three ordinary losing visits outweigh one proven win',
+          c4.dir_value(mixed) < 0, f'{c4.dir_value(mixed):.3f}')
+
+    # Spread anneals as 1/sqrt(n+1) with agreeing leaves -- exactly, since
+    # alpha0 == n and Var[v] carries the Dirichlet's 1/(alpha0+1).  (The
+    # asymptotic 1/sqrt(n) only holds for large n: at n=4->16 the true ratio is
+    # sqrt(17/5) = 1.844, not 2.)
+    scaled = []
+    for n in (4, 16, 64, 256):
+        a = c4.observed_alpha(acc_of([np.array([0.8, 0.08, 0.12]) * 40] * n),
+                              c4.AGG_ADDITIVE)
+        _ev, var = c4.dir_value_mean_var(a)
+        scaled.append(np.sqrt(var) * np.sqrt(n + 1))
+    check('sd * sqrt(n+1) is constant across n',
+          max(scaled) - min(scaled) < 1e-9,
+          f'{[round(x, 6) for x in scaled]}')
+    sd4, sd256 = scaled[0] / np.sqrt(5), scaled[-1] / np.sqrt(257)
+    check('64x the visits shrinks sd by exactly sqrt(257/5) = 7.17x',
+          abs(sd4 / sd256 - np.sqrt(257 / 5)) < 1e-9,
+          f'{sd4 / sd256:.4f}')
+
+    # Conflicting leaves stay less certain than agreeing ones at equal n.
+    agree = c4.observed_alpha(
+        acc_of([np.array([0.8, 0.08, 0.12]) * 40] * 8), c4.AGG_ADDITIVE)
+    split = c4.observed_alpha(
+        acc_of([np.array([0.9, 0.05, 0.05]) * 40] * 4
+               + [np.array([0.05, 0.05, 0.9]) * 40] * 4), c4.AGG_ADDITIVE)
+    check('disagreement keeps more spread at the same visit count',
+          c4.dir_value_mean_var(split)[1] > c4.dir_value_mean_var(agree)[1],
+          f'{c4.dir_value_mean_var(split)[1]:.4f} vs '
+          f'{c4.dir_value_mean_var(agree)[1]:.4f}')
 
 
 def test_incremental_equals_batch():
@@ -728,6 +803,7 @@ def main():
     test_primitives()
     test_single_component_roundtrip()
     test_identical_observations()
+    test_additive_rule()
     test_mixture_against_monte_carlo()
     test_mean_against_monte_carlo()
     test_incremental_equals_batch()

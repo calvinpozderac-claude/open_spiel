@@ -43,6 +43,13 @@ SEARCH and for TRAINING TARGETS, because the two roles want different things:
   'sum'      conjugate evidence accumulation, α = Σ α_i.  Concentration grows
              linearly; the mean is precision-weighted, so one confident leaf
              (e.g. a terminal spike) dominates.
+  'additive' back up each leaf's MEAN PROBABILITY rather than its Dirichlet:
+             α = Σ m_i, so α₀ is exactly the VISIT COUNT and the mean is the
+             running average of leaf means.  One simulation is one soft-labelled
+             observation, whatever the leaf's own confidence was, and the belief
+             anneals at the textbook Thompson rate sd[v] ∝ 1/√n.  Disagreement
+             needs no separate term: conflicting leaves pull the mean toward the
+             middle, where M(1−M) — and hence the spread — is largest.
 
 Selection samples from  α_sel = α_net(s,a) + α_observed(s,a)  — the network's
 belief is a PRIOR whose pseudo-counts search adds evidence to, so a well-searched
@@ -145,7 +152,8 @@ _SPIKE[_WIN, _WIN] = _SPIKE[_DRAW, _DRAW] = _SPIKE[_LOSS, _LOSS] = TERMINAL_CONC
 AGG_MIXTURE = 'mixture'
 AGG_MEAN = 'mean'
 AGG_SUM = 'sum'
-AGGREGATIONS = (AGG_MIXTURE, AGG_MEAN, AGG_SUM)
+AGG_ADDITIVE = 'additive'
+AGGREGATIONS = (AGG_MIXTURE, AGG_MEAN, AGG_SUM, AGG_ADDITIVE)
 
 
 def flip_alpha(alpha):
@@ -225,11 +233,24 @@ def observed_alpha(acc, mode):
       'mean'     the average draw (1/n)Σ X_i:  Var = SV/n²
                  → concentration ≈ n·α₀, growing linearly with visits.
       'sum'      conjugate evidence:           α = SA  (no moment matching)
+      'additive' soft counts:                   α = SM,  so α₀ == n exactly
+                 → each simulation is ONE observation whose outcome label is the
+                   leaf's mean probability vector.  The leaf's own concentration
+                   is deliberately discarded: a confident leaf and a guess both
+                   count once, and a proven-terminal spike contributes its mean
+                   (≈ one unit on the proven corner) instead of TERMINAL_CONC
+                   units.  This is the plain Dirichlet-categorical posterior, so
+                   the spread shrinks as 1/√n and conflicting leaves stay
+                   uncertain by pulling the mean toward the middle.
 
     Returns a (3,) float64 array, or None if there is no evidence yet."""
     n = acc[0]
     if n <= 0.0:
         return None
+    if mode == AGG_ADDITIVE:
+        sm = acc[1]
+        return np.array([max(sm[0], ALPHA_FLOOR), max(sm[1], ALPHA_FLOOR),
+                         max(sm[2], ALPHA_FLOOR)])
     if mode == AGG_SUM:
         sa = acc[4]
         return np.array([max(sa[0], ALPHA_FLOOR), max(sa[1], ALPHA_FLOOR),
@@ -807,8 +828,8 @@ class Config:
     seed: int = 0
 
     # ── evidence collapse (see observed_alpha) ────────────────────────────────
-    search_agg: str = AGG_MIXTURE     # 'mixture' | 'mean' | 'sum'
-    target_agg: str = AGG_MIXTURE     # 'mixture' | 'mean' | 'sum'
+    search_agg: str = AGG_MIXTURE     # 'mixture' | 'mean' | 'sum' | 'additive'
+    target_agg: str = AGG_MIXTURE     # 'mixture' | 'mean' | 'sum' | 'additive'
     # 'mixture' everywhere is the default: concentration then measures how much
     # the backed-up evaluations DISAGREE, which is a property of the position and
     # so a well-posed learning target.  Its trade-off is that concentration does
@@ -837,6 +858,21 @@ class Config:
     # both KL terms, and the action KL is what Thompson selection reads.
     # Caveat: three flags differ between the arms, so this indicts the
     # CONFIGURATION, not 'mean' targets in isolation.
+    #
+    # 'additive' is the fourth rule and the one to try for SEARCH: α₀ == visit
+    # count, so the belief anneals at the standard 1/√n Thompson rate instead of
+    # pinning ('mixture') or exploding after two visits ('mean'/'sum').
+    # NOTE THE COUPLING before A/B-ing it.  Selection samples α_net + α_obs, and
+    # under 'additive' α_obs grows by exactly 1 per visit — so the network's
+    # concentration head now literally means "how many visits my opinion is
+    # worth".  The head was trained under the old semantics and currently emits
+    # ≈0.2 on ordinary positions and ≈35-44 on solved-looking ones, i.e. the
+    # prior is ignored where guidance would help and swamps the first ~40
+    # simulations where search would have settled it anyway.  Expect an A/B of
+    # 'additive' search to be measuring that mis-scaling as much as the rule.
+    # As a TARGET, α₀ == n makes the target budget-dependent (FAST=100 vs
+    # FULL=400 label the same position 100 and 400), which is what sank the
+    # 'mean' arm above.
 
     # ── search ────────────────────────────────────────────────────────────────
     selection: str = 'dirichlet'      # exact draw | 'gaussian' approximation
