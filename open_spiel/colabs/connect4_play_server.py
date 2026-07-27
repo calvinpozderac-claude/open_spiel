@@ -156,10 +156,23 @@ class Searcher:
                         probs[int(a)] = round(float(vis[i] / tot), 4)
         tgt = root.state_target()              # the searched state belief
         m = c4.dir_mean(tgt)
+        # TWO confidences, because they measure different things and the search
+        # one is pinned near zero under the default 'mixture' rule.  That rule
+        # moment-matches the mixture of every leaf belief backed up through the
+        # root, so its concentration reports how much those leaves DISAGREE —
+        # and it collapses harder the sharper the net gets (leaves at α₀≈70 that
+        # mildly disagree collapse to ≈7, strongly disagree to ≈0.5).  Over real
+        # unsolved positions at 400 sims the median is 0.13, so on its own it
+        # looks broken.  The net's own head is the number the training log's
+        # conc(pred/tgt) tracks, so show both and let them be compared.
         return {'sims': self.n_sims(),
                 'value': round(float(m[c4._WIN] - m[c4._LOSS]), 3),
                 'wdl': [round(float(x), 3) for x in m],
-                'conc': round(float(tgt.sum()), 1),
+                'conc': round(float(tgt.sum()), 3),
+                'net_conc': round(float(root.v_alpha.sum()), 1),
+                'net_wdl': [round(float(x), 3)
+                            for x in c4.dir_mean(root.v_alpha)],
+                'agg': c4._TARGET_AGG,
                 'solved': (None if solved is None else
                            ['win', 'draw', 'loss'][solved]),
                 'probs': probs}
@@ -505,9 +518,15 @@ function render(){
     const segs=wdl.children;
     for(let i=0;i<3;i++) segs[i].style.width=(sn.wdl[i]*100).toFixed(1)+'%';
     const solved=sn.solved?` · PROVEN ${sn.solved.toUpperCase()}`:'';
+    // Two confidences: the net's own head, and the searched belief's. Under the
+    // 'mixture' rule the searched one reports DISAGREEMENT between the lines
+    // below the root and sits near zero on any unresolved position, so it is
+    // labelled rather than presented as "the" confidence.
+    const netc=(sn.net_conc!==undefined)?` · net α₀ ${sn.net_conc}`:'';
     ev.textContent=`side to move — W ${(sn.wdl[0]*100).toFixed(0)}% `+
       `D ${(sn.wdl[1]*100).toFixed(0)}% L ${(sn.wdl[2]*100).toFixed(0)}% · `+
-      `eval ${sn.value>0?'+':''}${sn.value} · confidence α₀ ${sn.conc}${solved}`+
+      `eval ${sn.value>0?'+':''}${sn.value}${netc} · `+
+      `search α₀ ${sn.conc} (${sn.agg||'mixture'})${solved}`+
       (snInfo?` · ${snInfo}`:'');
   } else { wdl.style.display='none'; ev.textContent=snInfo; }
 
