@@ -829,11 +829,11 @@ class Config:
 
     # ── evidence collapse (see observed_alpha) ────────────────────────────────
     search_agg: str = AGG_ADDITIVE    # 'mixture' | 'mean' | 'sum' | 'additive'
-    target_agg: str = AGG_MIXTURE     # 'mixture' | 'mean' | 'sum' | 'additive'
-    # THE DEFAULT PAIRING is 'additive' for search and 'mixture' for targets,
-    # because the two roles want opposite things from the concentration.
+    target_agg: str = AGG_ADDITIVE    # 'mixture' | 'mean' | 'sum' | 'additive'
+    # THE DEFAULT IS 'additive' for both.
     #
-    # SEARCH wants it to GROW with evidence, so Thompson exploration anneals.
+    # SEARCH wants concentration to GROW with evidence, so Thompson exploration
+    # anneals.
     # 'additive' makes α₀ exactly the visit count — the plain
     # Dirichlet-categorical posterior, spread ∝ 1/√(n+1).  The alternatives both
     # fail here: 'mixture' reports how much the leaves DISAGREE, which does not
@@ -842,12 +842,15 @@ class Config:
     # independent — they are not, sharing a network and overlapping subtrees —
     # and hit ~140 after two visits, going greedy immediately.
     #
-    # TARGETS want it INDEPENDENT of the search budget, or the same position
-    # gets labelled differently by a FAST_SIMS and a FULL_SIMS game and the
-    # network is asked to predict something it cannot see.  'mixture' is the
-    # only one of the four with that property, and it is what the A/B below
-    # measured.  Its known cost is that ~54% of unsolved state targets land on
-    # the _floor_conc floor, carrying direction but no scale.
+    # As a TARGET, 'additive' says "this belief rests on n observations", which
+    # is a real and legible statement, and it removes the pathology that made
+    # 'mixture' targets nearly inert: ~54% of unsolved state targets landed on
+    # the _floor_conc floor, carrying a direction but no scale at all.  The
+    # trade-off is budget dependence — α₀ IS the simulation count, so a
+    # FAST_SIMS and a FULL_SIMS visit to the same position label it differently
+    # and the network cannot see which it is getting.  Note the two rules give
+    # the SAME target mean; they differ only in concentration.  See the second
+    # A/B below, which isolates exactly that.
     #
     # MEASURED, on target_agg (2000 episodes/arm, 70k params, one seed, search
     # fixed at 'mixture' in both).  Arm B is the documented pairing for 'mean'
