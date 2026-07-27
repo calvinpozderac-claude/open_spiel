@@ -20,9 +20,11 @@ Flags:
     --model2 PATH        second model for watch mode (default: same as --model)
     --port   N           HTTP port (default 8765)
     --device D           inference device (default cpu — batch-1..8 is CPU's regime)
-    --search-agg A       evidence rule for selection: mixture | mean | sum.
-                         Default: whatever --model's checkpoint was trained with
-                         (latest.pt records it), else 'mixture'.
+    --search-agg A       evidence rule for SELECTION: mixture|mean|sum|additive
+    --target-agg A       evidence rule for the displayed searched belief
+                         Both default to whatever --model's checkpoint was
+                         trained with (only a full latest.pt records it), else
+                         the Config defaults ('additive' / 'mixture').
     --wave   N           leaves evaluated per batched search wave (default 8)
     --snapshot-secs S    seconds between analysis snapshots while thinking (2)
 
@@ -887,6 +889,7 @@ def main():
     ap.add_argument('--port', type=int, default=8765)
     ap.add_argument('--device', default='cpu')
     ap.add_argument('--search-agg', default=None, choices=c4.AGGREGATIONS)
+    ap.add_argument('--target-agg', default=None, choices=c4.AGGREGATIONS)
     ap.add_argument('--wave', type=int, default=8)
     ap.add_argument('--snapshot-secs', type=float, default=2.0)
     args = ap.parse_args()
@@ -903,12 +906,17 @@ def main():
         NETS[1 - FIRST_PLAYER] = net
         NAMES[1 - FIRST_PLAYER] = name
 
-    # The evidence rule is a module-wide setting, so one choice covers the whole
-    # process: the flag if given, else what --model was trained with (only a
-    # full latest.pt records that), else the module default.
-    agg = args.search_agg or (cfg or {}).get('search_agg') or c4.AGG_MIXTURE
-    c4.set_search(search_agg=agg, target_agg=agg, selection='dirichlet')
-    print(f'Search: Thompson sampling, evidence rule {agg!r}, wave {WAVE}')
+    # The evidence rules are module-wide settings, so one choice covers the
+    # whole process.  They are NOT the same rule -- search wants concentration
+    # that grows with visits, the displayed belief is the training target's
+    # view -- so resolve them separately: the flag if given, else what --model
+    # was trained with (only a full latest.pt records that), else the defaults.
+    dflt = c4.Config()
+    sagg = args.search_agg or (cfg or {}).get('search_agg') or dflt.search_agg
+    tagg = args.target_agg or (cfg or {}).get('target_agg') or dflt.target_agg
+    c4.set_search(search_agg=sagg, target_agg=tagg, selection='dirichlet')
+    print(f'Search: Thompson sampling, selection rule {sagg!r}, '
+          f'displayed belief {tagg!r}, wave {WAVE}')
 
     srv = ThreadingHTTPServer(('0.0.0.0', args.port), Handler)
     print(f'Serving on http://localhost:{args.port}')

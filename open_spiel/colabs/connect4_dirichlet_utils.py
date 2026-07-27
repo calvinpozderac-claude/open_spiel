@@ -828,15 +828,26 @@ class Config:
     seed: int = 0
 
     # ── evidence collapse (see observed_alpha) ────────────────────────────────
-    search_agg: str = AGG_MIXTURE     # 'mixture' | 'mean' | 'sum' | 'additive'
+    search_agg: str = AGG_ADDITIVE    # 'mixture' | 'mean' | 'sum' | 'additive'
     target_agg: str = AGG_MIXTURE     # 'mixture' | 'mean' | 'sum' | 'additive'
-    # 'mixture' everywhere is the default: concentration then measures how much
-    # the backed-up evaluations DISAGREE, which is a property of the position and
-    # so a well-posed learning target.  Its trade-off is that concentration does
-    # not grow with visit count, so Thompson exploration does not anneal within a
-    # search.  'mean' for search_agg is the natural fix (concentration ≈ n·α₀);
-    # pairing search_agg='mean' with target_agg='mixture' gives an annealing
-    # search AND a budget-independent target.  'sum' is plain conjugate evidence.
+    # THE DEFAULT PAIRING is 'additive' for search and 'mixture' for targets,
+    # because the two roles want opposite things from the concentration.
+    #
+    # SEARCH wants it to GROW with evidence, so Thompson exploration anneals.
+    # 'additive' makes α₀ exactly the visit count — the plain
+    # Dirichlet-categorical posterior, spread ∝ 1/√(n+1).  The alternatives both
+    # fail here: 'mixture' reports how much the leaves DISAGREE, which does not
+    # shrink with sampling (median 0.128 over real unsolved positions at 400
+    # sims, i.e. pinned), while 'mean' and 'sum' assume the simulations are
+    # independent — they are not, sharing a network and overlapping subtrees —
+    # and hit ~140 after two visits, going greedy immediately.
+    #
+    # TARGETS want it INDEPENDENT of the search budget, or the same position
+    # gets labelled differently by a FAST_SIMS and a FULL_SIMS game and the
+    # network is asked to predict something it cannot see.  'mixture' is the
+    # only one of the four with that property, and it is what the A/B below
+    # measured.  Its known cost is that ~54% of unsolved state targets land on
+    # the _floor_conc floor, carrying direction but no scale.
     #
     # MEASURED, on target_agg (2000 episodes/arm, 70k params, one seed, search
     # fixed at 'mixture' in both).  Arm B is the documented pairing for 'mean'
@@ -859,10 +870,8 @@ class Config:
     # Caveat: three flags differ between the arms, so this indicts the
     # CONFIGURATION, not 'mean' targets in isolation.
     #
-    # 'additive' is the fourth rule and the one to try for SEARCH: α₀ == visit
-    # count, so the belief anneals at the standard 1/√n Thompson rate instead of
-    # pinning ('mixture') or exploding after two visits ('mean'/'sum').
-    # NOTE THE COUPLING before A/B-ing it.  Selection samples α_net + α_obs, and
+    # STATUS: search_agg='additive' is a reasoned default, NOT yet an A/B'd one
+    # — the arms above varied target_agg only.  NOTE THE COUPLING when testing.  Selection samples α_net + α_obs, and
     # under 'additive' α_obs grows by exactly 1 per visit — so the network's
     # concentration head now literally means "how many visits my opinion is
     # worth".  The head was trained under the old semantics and currently emits
