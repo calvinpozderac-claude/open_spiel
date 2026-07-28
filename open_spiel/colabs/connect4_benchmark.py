@@ -73,6 +73,7 @@ def thompson_config(name, shared):
         head_ch=shared['head_ch'], seed=shared['seed'],
         device_preference=shared['device'],
         search_agg=sagg, target_agg=tagg, kl_normalize=False,
+        cons_frac=shared['cons_frac'],
         selection='dirichlet',
         fast_sims=shared['fast_sims'], full_sims=shared['full_sims'],
         fast_prob=shared['fast_prob'], temp_threshold=shared['temp_threshold'],
@@ -136,6 +137,7 @@ def default_shared(**over):
         n_parallel_games=16, wave_per_game=4, pool_prob=0.2,
         batch_size=256, train_steps_per_ep=4, max_buffer=150_000,
         lr_peak=2e-3, lr_decay_eps=2000, weight_decay=1e-4, grad_clip=1.0,
+        cons_frac=1.0,
         quick_eval_every=250, quick_eval_games=30, deep_eval_every=1000,
         eval_sims=32, resume=True,
         c_puct=1.5, root_noise_frac=0.25, root_noise_alpha=1.0)

@@ -930,6 +930,7 @@ if _HAS_TORCH:
         device, backend = c4.pick_device(cfg.device_preference)
         c4.set_game(game)
         set_search(cfg.c_puct, cfg.virtual_loss)
+        c4.set_backend(backend, device)     # probe fused kernels on this device
         random.seed(cfg.seed); np.random.seed(cfg.seed)
         torch.manual_seed(cfg.seed)
 

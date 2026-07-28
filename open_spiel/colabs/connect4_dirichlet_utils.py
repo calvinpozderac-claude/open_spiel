@@ -1061,6 +1061,16 @@ class Config:
     # and is deliberately light.  Watch the printed `sh` shares: if one term sits
     # near 100% the others have effectively stopped training.
     loss_weights: tuple = (1.0, 2.0, 1.0, 1.0, 0.5)
+    cons_frac: float = 1.0            # fraction of samples whose SUCCESSOR is
+                                      # forwarded for the consistency term.  Each
+                                      # one adds a row to a second forward block,
+                                      # so 1.0 nearly doubles the training batch
+                                      # (~90% of samples have a successor).  The
+                                      # term stays unbiased when sub-sampled — it
+                                      # is a weight-normalised mean — so 0.25
+                                      # buys ~1.5x faster steps for a little
+                                      # extra gradient variance on the lightest
+                                      # of the five loss terms.
     kl_normalize: bool = False        # divide each Dirichlet KL by its target's
                                       # total concentration (a PER-OBSERVATION
                                       # KL).  Leave off for target_agg='mixture'
@@ -1385,6 +1395,16 @@ if _HAS_TORCH:
         return torch.from_numpy(obs.reshape(-1, *_OBS_SHAPE)).to(device)
 
     # ── DirectML-safe primitives (fused kernels lack DML backward) ────────────
+    # Which fused kernels this device can actually run.  Every entry here has a
+    # hand-rolled fallback below, written because DirectML lacked the kernel (or
+    # its backward).  The fallbacks are correct but expand ONE kernel into eight
+    # to thirty, and this workload is launch-bound rather than FLOP-bound — a
+    # 64ch/5blk trunk on a 6x7 board runs at roughly 10% of an RX 5700 XT's fp32
+    # peak — so which path is taken matters more than the arithmetic in it.
+    # Probed once against the real device, forward AND backward, since DirectML
+    # often implements one and not the other.
+    _NATIVE = {'lgamma': False, 'softplus': False, 'group_norm': False}
+
     class _GroupNorm(nn.Module):
         def __init__(self, num_groups, num_channels, eps=1e-5):
             super().__init__()
@@ -1393,6 +1413,9 @@ if _HAS_TORCH:
             self.bias = nn.Parameter(torch.zeros(num_channels))
 
         def forward(self, x):
+            if _NATIVE['group_norm']:
+                return F.group_norm(x, self.num_groups, self.weight, self.bias,
+                                    self.eps)
             n, c = x.shape[0], x.shape[1]
             xg = x.reshape(n, self.num_groups, -1)
             mean = xg.mean(dim=2, keepdim=True)
@@ -1408,6 +1431,8 @@ if _HAS_TORCH:
         return _GroupNorm(g, channels)
 
     def _softplus(x):
+        if _NATIVE['softplus']:
+            return F.softplus(x)
         return torch.relu(x) + torch.log(1.0 + torch.exp(-torch.abs(x)))
 
     class SEBlock(nn.Module):
@@ -1511,11 +1536,45 @@ if _HAS_TORCH:
 
     _LG_APPROX = False
 
-    def set_backend(backend):
-        """Pick exact (CUDA/CPU) vs GPU-approx (DirectML) lgamma/digamma so the
-        whole loss can run on-device."""
+    def _probe(fn, device, shape=(3,)):
+        """Does `fn` run on this device, forward AND backward, and agree with the
+        CPU?  False on any exception, mismatch, or non-finite gradient."""
+        try:
+            ref_in = torch.rand(shape).abs() + 0.5
+            x = ref_in.to(device).requires_grad_(True)
+            y = fn(x)
+            y.sum().backward()
+            return bool(torch.allclose(y.detach().to('cpu'), fn(ref_in), atol=1e-3)
+                        and x.grad is not None
+                        and bool(torch.isfinite(x.grad.to('cpu')).all()))
+        except Exception:
+            return False
+
+    def set_backend(backend, device=None):
+        """Choose fused kernels where the device supports them, hand-rolled
+        fallbacks where it does not.
+
+        This used to flip only lgamma/digamma, and only for DirectML — so the
+        softplus and GroupNorm fallbacks ran unconditionally and CUDA/CPU users
+        paid for them too.  Each fallback is correct but expands ONE kernel into
+        eight to thirty, and this workload is launch-bound rather than
+        FLOP-bound, so the choice matters more than the arithmetic.  Probed
+        against the real device because DirectML often implements a forward
+        without its backward."""
         global _LG_APPROX
-        _LG_APPROX = (backend == 'directml')
+        if device is None:
+            _LG_APPROX = (backend == 'directml')
+            _NATIVE.update(lgamma=not _LG_APPROX, softplus=True, group_norm=True)
+            return
+        _NATIVE['lgamma'] = (_probe(torch.lgamma, device)
+                             and _probe(torch.digamma, device))
+        _NATIVE['softplus'] = _probe(F.softplus, device)
+        _NATIVE['group_norm'] = _probe(lambda t: F.group_norm(t, 2), device,
+                                       shape=(2, 4, 3, 3))
+        _LG_APPROX = not _NATIVE['lgamma']
+        missing = [k for k, v in _NATIVE.items() if not v]
+        print(f'{backend}: no fused kernel for {missing} — using fallbacks'
+              if missing else f'{backend}: all fused kernels available')
 
     def _lg(x):
         return _lgamma_dml(x) if _LG_APPROX else torch.lgamma(x)
@@ -1645,7 +1704,7 @@ if _HAS_TORCH:
 
     _Z_CORNER = {1: _WIN, 0: _DRAW, -1: _LOSS}
 
-    def build_batch_meta(batch, device):
+    def build_batch_meta(batch, device, cons_frac=1.0, rng=None):
         """Pad a list of sample dicts into fixed-(B,K) target tensors on `device`,
         and collect the successor observations the consistency term needs.
         Returns (meta, obs2) where obs2 may be an empty list."""
@@ -1666,6 +1725,11 @@ if _HAS_TORCH:
         cons_isnn = np.zeros(B, bool)
         cons_term = np.full((B, 3), TERMINAL_EPS, np.float32)
         obs2 = []
+        if cons_frac >= 1.0:
+            keep_cons = np.ones(B, bool)
+        else:
+            r = rng if rng is not None else np.random
+            keep_cons = r.random(B) < cons_frac
         for i, s in enumerate(batch):
             k = len(s['legal'])
             pad_act[i, :k] = s['legal']
@@ -1682,12 +1746,18 @@ if _HAS_TORCH:
                 played[i] = p
                 played_w[i] = 1.0
                 if s['next_obs'] is not None:
-                    cons_w[i] = 1.0
-                    cons_row[i] = len(obs2)
-                    cons_isnn[i] = True
-                    obs2.append(s['next_obs'])
+                    # Each of these appends a row to the SECOND forward block, so
+                    # a full-coverage consistency term nearly doubles the batch.
+                    # Sub-sampling keeps the term unbiased (the loss is a
+                    # weight-normalised mean) at the cost of gradient variance,
+                    # and buys back most of that compute.
+                    if keep_cons[i]:
+                        cons_w[i] = 1.0
+                        cons_row[i] = len(obs2)
+                        cons_isnn[i] = True
+                        obs2.append(s['next_obs'])
                 elif s['next_term'] >= 0:
-                    cons_w[i] = 1.0
+                    cons_w[i] = 1.0          # terminal: free, no extra NN row
                     cons_term[i] = _SPIKE[s['next_term']]
         # ONE transfer per dtype, not fourteen.  DirectML allocates a D3D12
         # resource per host->device copy, and a long run makes hundreds of
@@ -1744,7 +1814,8 @@ if _HAS_TORCH:
             return fn(*a, **kw)
 
     def train_step(network, optimizer, batch, device, weights, grad_clip=1.0,
-                   model_lock=None, kl_normalize=False, with_consistency=True):
+                   model_lock=None, kl_normalize=False, with_consistency=True,
+                   cons_frac=1.0, rng=None):
         """One optimiser step, loss computed entirely ON-DEVICE for every backend.
 
         The consistency term needs the successor position's state belief, so the
@@ -1757,7 +1828,7 @@ if _HAS_TORCH:
         def _once():
             # Everything that touches the device lives in here, so a retry
             # redoes the whole step rather than resuming a half-built one.
-            meta, obs2 = build_batch_meta(batch, device)
+            meta, obs2 = build_batch_meta(batch, device, cons_frac, rng)
             if not with_consistency:
                 obs2 = []
                 meta['cons_w'] = torch.zeros_like(meta['cons_w'])
@@ -2434,7 +2505,7 @@ if _HAS_TORCH:
         set_game(game)
         set_search(cfg.search_agg, cfg.target_agg, cfg.selection,
                    cfg.virtual_loss)
-        set_backend(backend)
+        set_backend(backend, device)
         random.seed(cfg.seed); np.random.seed(cfg.seed)
         torch.manual_seed(cfg.seed)
 
@@ -2556,6 +2627,7 @@ if _HAS_TORCH:
         prev_fwd = (self_play.fwd_calls, self_play.fwd_rows)
         with_cons = cfg.loss_weights[4] > 0.0
         step_fails = 0
+        step_rng = np.random.default_rng(cfg.seed + 991)
         try:
             for ep in range(start_ep, cfg.num_episodes + 1):
                 network.eval()
@@ -2579,7 +2651,8 @@ if _HAS_TORCH:
                                 cfg.loss_weights, cfg.grad_clip,
                                 model_lock=model_lock,
                                 kl_normalize=cfg.kl_normalize,
-                                with_consistency=with_cons)
+                                with_consistency=with_cons,
+                                cons_frac=cfg.cons_frac, rng=step_rng)
                         except RuntimeError as e:
                             # Losing one step in thousands costs nothing; losing
                             # a multi-hour run to a transient device fault costs
