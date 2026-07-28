@@ -1689,15 +1689,59 @@ if _HAS_TORCH:
                 elif s['next_term'] >= 0:
                     cons_w[i] = 1.0
                     cons_term[i] = _SPIKE[s['next_term']]
-        t = lambda a: torch.from_numpy(a).to(device)
-        meta = {'pad_act': t(pad_act), 'pad_mask': t(pad_mask),
-                'ev_mask': t(ev_mask), 'ev_alpha': t(ev_alpha),
-                'v_obs': t(v_obs), 'z_idx': t(z_idx), 'z_w': t(z_w),
-                'unsolved': t(unsolved),
-                'played': t(played), 'played_w': t(played_w),
-                'cons_w': t(cons_w), 'cons_row': t(cons_row),
-                'cons_isnn': t(cons_isnn), 'cons_term': t(cons_term)}
+        # ONE transfer per dtype, not fourteen.  DirectML allocates a D3D12
+        # resource per host->device copy, and a long run makes hundreds of
+        # thousands of them (14 per step x 8 steps x thousands of episodes);
+        # past a few hundred thousand the heap fragments and the copy fails with
+        # a bare "RuntimeError: The parameter is incorrect" from inside .to().
+        # Packing by dtype and slicing on-device cuts the allocation count ~5x
+        # and is faster everywhere else too.
+        i64 = np.concatenate([pad_act.reshape(-1), z_idx, played, cons_row])
+        f32 = np.concatenate([ev_alpha.reshape(-1), v_obs.reshape(-1), z_w,
+                              played_w, cons_w, cons_term.reshape(-1), unsolved])
+        b8 = np.concatenate([pad_mask.reshape(-1), ev_mask.reshape(-1),
+                             cons_isnn])
+        ti = torch.from_numpy(i64).to(device)
+        tf = torch.from_numpy(f32).to(device)
+        tb = torch.from_numpy(b8).to(device)
+        BK = B * K
+        meta = {
+            'pad_act':   ti[:BK].view(B, K),
+            'z_idx':     ti[BK:BK + B],
+            'played':    ti[BK + B:BK + 2 * B],
+            'cons_row':  ti[BK + 2 * B:BK + 3 * B],
+            'ev_alpha':  tf[:BK * 3].view(B, K, 3),
+            'v_obs':     tf[BK * 3:BK * 3 + B * 3].view(B, 3),
+            'z_w':       tf[BK * 3 + B * 3:BK * 3 + B * 4],
+            'played_w':  tf[BK * 3 + B * 4:BK * 3 + B * 5],
+            'cons_w':    tf[BK * 3 + B * 5:BK * 3 + B * 6],
+            'cons_term': tf[BK * 3 + B * 6:BK * 3 + B * 9].view(B, 3),
+            'unsolved':  tf[BK * 3 + B * 9:BK * 3 + B * 10],
+            'pad_mask':  tb[:BK].view(B, K),
+            'ev_mask':   tb[BK:2 * BK].view(B, K),
+            'cons_isnn': tb[2 * BK:2 * BK + B],
+        }
         return meta, obs2
+
+    def device_retry(fn, *a, **kw):
+        """Run `fn`; on a device-level RuntimeError, release dead device tensors
+        and try once more.
+
+        DirectML allocates a D3D12 resource per host->device copy and fails with
+        a bare "RuntimeError: The parameter is incorrect" once its heap
+        fragments — observed after ~28k training steps of a long run, inside
+        `.to(device)` rather than in any op.  A gc pass usually frees enough for
+        the next allocation to succeed.  Genuine out-of-memory is re-raised
+        immediately; retrying that would only stall."""
+        try:
+            return fn(*a, **kw)
+        except RuntimeError as e:
+            if 'out of memory' in str(e).lower():
+                raise
+            import gc
+            gc.collect()
+            time.sleep(0.25)
+            return fn(*a, **kw)
 
     def train_step(network, optimizer, batch, device, weights, grad_clip=1.0,
                    model_lock=None, kl_normalize=False, with_consistency=True):
@@ -1709,24 +1753,30 @@ if _HAS_TORCH:
         (or a zero weight) the successor rows are not built at all."""
         import contextlib
         lock = model_lock or contextlib.nullcontext()
-        meta, obs2 = build_batch_meta(batch, device)
-        if not with_consistency:
-            obs2 = []
-            meta['cons_w'] = torch.zeros_like(meta['cons_w'])
-        obs = [s['obs'] for s in batch]
-        B = len(obs)
-        x = batch_to_tensor(obs + obs2, device)
-        with lock:
-            v_logits, v_conf, a_logits, a_conf = network(x)
-            out = (v_logits[:B], v_conf[:B], a_logits[:B], a_conf[:B])
-            out2 = ((v_logits[B:], v_conf[B:], a_logits[B:], a_conf[B:])
-                    if obs2 else None)
-            optimizer.zero_grad()
-            loss, parts = full_loss(out, out2, meta, weights, kl_normalize)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(network.parameters(), grad_clip)
-            optimizer.step()
-        return parts['loss'], parts
+
+        def _once():
+            # Everything that touches the device lives in here, so a retry
+            # redoes the whole step rather than resuming a half-built one.
+            meta, obs2 = build_batch_meta(batch, device)
+            if not with_consistency:
+                obs2 = []
+                meta['cons_w'] = torch.zeros_like(meta['cons_w'])
+            obs = [s['obs'] for s in batch]
+            B = len(obs)
+            x = batch_to_tensor(obs + obs2, device)
+            with lock:
+                v_logits, v_conf, a_logits, a_conf = network(x)
+                out = (v_logits[:B], v_conf[:B], a_logits[:B], a_conf[:B])
+                out2 = ((v_logits[B:], v_conf[B:], a_logits[B:], a_conf[B:])
+                        if obs2 else None)
+                optimizer.zero_grad()
+                loss, parts = full_loss(out, out2, meta, weights, kl_normalize)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(network.parameters(), grad_clip)
+                optimizer.step()
+            return parts['loss'], parts
+
+        return device_retry(_once)
 
     # ── DirectML-safe AdamW (aten::lerp has no DML kernel) ────────────────────
     class LerpFreeAdamW(torch.optim.Optimizer):
@@ -2505,6 +2555,7 @@ if _HAS_TORCH:
         bar_mark = (time.perf_counter(), self_play.stats['games']); inst_gs = 0.0
         prev_fwd = (self_play.fwd_calls, self_play.fwd_rows)
         with_cons = cfg.loss_weights[4] > 0.0
+        step_fails = 0
         try:
             for ep in range(start_ep, cfg.num_episodes + 1):
                 network.eval()
@@ -2522,11 +2573,25 @@ if _HAS_TORCH:
                 if len(replay_buffer) >= cfg.batch_size:
                     for _ in range(cfg.train_steps_per_ep):
                         batch = random.sample(replay_buffer, cfg.batch_size)
-                        _lv, parts = train_step(
-                            network, optimizer, batch, device, cfg.loss_weights,
-                            cfg.grad_clip, model_lock=model_lock,
-                            kl_normalize=cfg.kl_normalize,
-                            with_consistency=with_cons)
+                        try:
+                            _lv, parts = train_step(
+                                network, optimizer, batch, device,
+                                cfg.loss_weights, cfg.grad_clip,
+                                model_lock=model_lock,
+                                kl_normalize=cfg.kl_normalize,
+                                with_consistency=with_cons)
+                        except RuntimeError as e:
+                            # Losing one step in thousands costs nothing; losing
+                            # a multi-hour run to a transient device fault costs
+                            # a lot.  Give up only if it stops being transient.
+                            step_fails += 1
+                            log(f'  ! train step failed, skipped '
+                                f'({type(e).__name__}: {e}) '
+                                f'[{step_fails} consecutive]')
+                            if step_fails >= 20:
+                                raise
+                            continue
+                        step_fails = 0
                         for k, v in parts.items():
                             accs[k].append(v)
                     scheduler.step()

@@ -505,8 +505,15 @@ if _HAS_TORCH:
             k = len(s['legal'])
             act[i, :k] = s['legal']; mask[i, :k] = True
             pi[i, :k] = s['pi']; z[i] = s['z']
-        t = lambda a: torch.from_numpy(a).to(device)
-        return {'act': t(act), 'mask': t(mask), 'pi': t(pi), 'z': t(z)}
+        # One transfer per dtype (see build_batch_meta in the ThompsonZero
+        # module for why: DirectML fragments its D3D12 heap under a long run of
+        # many small host->device copies).
+        ti = torch.from_numpy(act.reshape(-1)).to(device)
+        tf = torch.from_numpy(np.concatenate([pi.reshape(-1), z])).to(device)
+        tb = torch.from_numpy(mask.reshape(-1)).to(device)
+        BK = B * K
+        return {'act': ti.view(B, K), 'mask': tb.view(B, K),
+                'pi': tf[:BK].view(B, K), 'z': tf[BK:BK + B]}
 
     def az_loss(logits, value, meta, value_weight=1.0):
         """AlphaZero's loss: cross-entropy to the visit distribution over LEGAL
@@ -526,16 +533,20 @@ if _HAS_TORCH:
                    grad_clip=1.0, model_lock=None):
         import contextlib
         lock = model_lock or contextlib.nullcontext()
-        x = c4.batch_to_tensor([s['obs'] for s in batch], device)
-        meta = build_batch(batch, device)
-        with lock:
-            logits, value = network(x)
-            optimizer.zero_grad()
-            loss, parts = az_loss(logits, value, meta, value_weight)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(network.parameters(), grad_clip)
-            optimizer.step()
-        return parts['loss'], parts
+
+        def _once():
+            x = c4.batch_to_tensor([s['obs'] for s in batch], device)
+            meta = build_batch(batch, device)
+            with lock:
+                logits, value = network(x)
+                optimizer.zero_grad()
+                loss, parts = az_loss(logits, value, meta, value_weight)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(network.parameters(), grad_clip)
+                optimizer.step()
+            return parts['loss'], parts
+
+        return c4.device_retry(_once)
 
     # ── Bots ──────────────────────────────────────────────────────────────────
     class AZMCTSBot:
@@ -993,6 +1004,7 @@ if _HAS_TORCH:
         bar = c4.Progress(cfg.quick_eval_every, label='ep ')
         bar_mark = (time.perf_counter(), self_play.stats['games']); inst = 0.0
         prev_fwd = (self_play.fwd_calls, self_play.fwd_rows)
+        step_fails = 0
         try:
             for ep in range(start_ep, cfg.num_episodes + 1):
                 network.eval()
@@ -1008,9 +1020,20 @@ if _HAS_TORCH:
                 if len(replay_buffer) >= cfg.batch_size:
                     for _ in range(cfg.train_steps_per_ep):
                         batch = random.sample(replay_buffer, cfg.batch_size)
-                        _lv, parts = train_step(network, optimizer, batch, device,
-                                                cfg.value_weight, cfg.grad_clip,
-                                                model_lock=model_lock)
+                        try:
+                            _lv, parts = train_step(
+                                network, optimizer, batch, device,
+                                cfg.value_weight, cfg.grad_clip,
+                                model_lock=model_lock)
+                        except RuntimeError as e:
+                            step_fails += 1
+                            log(f'  ! train step failed, skipped '
+                                f'({type(e).__name__}: {e}) '
+                                f'[{step_fails} consecutive]')
+                            if step_fails >= 20:
+                                raise
+                            continue
+                        step_fails = 0
                         for k, v in parts.items():
                             accs[k].append(v)
                     scheduler.step()
