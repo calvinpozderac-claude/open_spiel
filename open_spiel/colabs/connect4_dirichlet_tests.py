@@ -61,10 +61,12 @@ def test_single_component_roundtrip():
     acc = acc_of([a])
     for mode in c4.AGGREGATIONS:
         got = c4.observed_alpha(acc, mode)
-        if mode == c4.AGG_ADDITIVE:
+        if mode in (c4.AGG_ADDITIVE, c4.AGG_ADDITIVE_MLE):
             # 'additive' deliberately discards the leaf's concentration: one
             # observation is one unit of evidence, so it returns the MEAN.
-            check('additive: n=1 returns the mean, total 1',
+            # 'additive_mle' falls back to it below 3 observations, where the
+            # Dirichlet MLE is degenerate.
+            check(f'{mode}: n=1 returns the mean, total 1',
                   close(got, c4.dir_mean(a), 1e-9) and abs(got.sum() - 1) < 1e-9,
                   f'{got}')
         else:
@@ -199,6 +201,84 @@ def test_additive_rule():
           c4.dir_value_mean_var(split)[1] > c4.dir_value_mean_var(agree)[1],
           f'{c4.dir_value_mean_var(split)[1]:.4f} vs '
           f'{c4.dir_value_mean_var(agree)[1]:.4f}')
+
+
+def test_additive_mle():
+    print('\nadditive_mle: Dirichlet MLE of the backed-up leaf means')
+    rng = np.random.default_rng(3)
+
+    def mle_acc(xs):
+        c4.set_search(search_agg=c4.AGG_ADDITIVE_MLE,
+                      target_agg=c4.AGG_ADDITIVE_MLE)
+        a = c4._new_acc()
+        for x in xs:
+            c4._acc_add(a, c4._payload(np.asarray(x, float))[0])
+        return a
+
+    # Scalar special functions, against scipy where it is available.
+    try:
+        from scipy.special import digamma, polygamma
+        xs = np.exp(np.linspace(np.log(1e-3), np.log(500), 500))
+        e1 = max(abs(c4._digamma(float(x)) - digamma(x)) for x in xs)
+        e2 = max(abs(c4._trigamma(float(x)) - polygamma(1, x)) / polygamma(1, x)
+                 for x in xs)
+        e3 = max(abs(c4._inv_digamma(digamma(x)) - x) / x for x in xs)
+        check('digamma matches scipy', e1 < 1e-8, f'{e1:.2e}')
+        check('trigamma matches scipy', e2 < 1e-7, f'{e2:.2e}')
+        check('inverse_digamma inverts digamma (speed-tuned)', e3 < 2e-2,
+              f'{e3:.2e}')
+    except ImportError:
+        print('  [skip] scipy not installed — special-function accuracy skipped')
+    # Self-consistency needs no scipy: psi(psi^-1(y)) == y.
+    err = max(abs(c4._digamma(c4._inv_digamma(y)) - y)
+              for y in np.linspace(-8, 6, 400))
+    check('psi(psi^-1(y)) round-trips', err < 5e-2, f'{err:.2e}')
+
+    # Recovers a Dirichlet it was sampled from.
+    for true, tol in (([2., 1., 1.], 0.35), ([30., 4., 6.], 0.35)):
+        got = c4.observed_alpha(mle_acc(rng.dirichlet(true, size=400)),
+                                c4.AGG_ADDITIVE_MLE)
+        rel = abs(got.sum() - sum(true)) / sum(true)
+        check(f'recovers true a0={sum(true):.0f} within {tol:.0%}', rel < tol,
+              f'got {got.sum():.2f}')
+
+    # alpha0 tracks min(n, dispersion): it grows while data are scarce and
+    # saturates at the population value rather than at the visit count.
+    wide = [c4.observed_alpha(mle_acc(rng.dirichlet([2.1, .3, .6], size=n)),
+                              c4.AGG_ADDITIVE_MLE).sum() for n in (16, 64, 256)]
+    check('saturates for a dispersed population (does not track n)',
+          max(wide) < 8.0, f'{[round(v, 2) for v in wide]}')
+    tight = [c4.observed_alpha(mle_acc(rng.dirichlet([70., 10., 20.], size=n)),
+                               c4.AGG_ADDITIVE_MLE).sum() for n in (16, 256)]
+    check('grows toward the population value when leaves agree',
+          tight[1] > tight[0], f'{[round(v, 2) for v in tight]}')
+    check('a concentrated population reads far above a dispersed one',
+          tight[1] > 4 * max(wide), f'{tight[1]:.1f} vs {max(wide):.1f}')
+
+    # Below 3 observations it falls back to 'additive'.
+    for n in (1, 2):
+        xs = [np.array([0.7, 0.1, 0.2]) * 40] * n
+        got = c4.observed_alpha(mle_acc(xs), c4.AGG_ADDITIVE_MLE)
+        check(f'n={n} falls back to additive (a0 == n)',
+              abs(got.sum() - n) < 1e-9, f'{got.sum()}')
+
+    # A zero component must not poison the node: log(0) would be -inf forever.
+    got = c4.observed_alpha(mle_acc([np.array([1.0, 0.0, 0.0])] * 8
+                                    + [np.array([0.3, 0.3, 0.4])] * 8),
+                            c4.AGG_ADDITIVE_MLE)
+    check('a zero component is clamped, not fatal',
+          bool(np.all(np.isfinite(got))) and bool(np.all(got > 0)), f'{got}')
+
+    # With no MLE rule selected the log-sums are not maintained; asking for the
+    # rule anyway must degrade to 'additive' rather than return the [1,1,1] seed.
+    c4.set_search(search_agg=c4.AGG_ADDITIVE, target_agg=c4.AGG_ADDITIVE)
+    plain = c4._new_acc()
+    for _ in range(8):
+        c4._acc_add(plain, c4._payload(np.array([0.7, 0.1, 0.2]))[0])
+    got = c4.observed_alpha(plain, c4.AGG_ADDITIVE_MLE)
+    check('degrades to additive when the statistics were never maintained',
+          abs(got.sum() - 8.0) < 1e-9, f'{got.sum()}')
+    c4.set_search(search_agg=c4.AGG_MIXTURE, target_agg=c4.AGG_MIXTURE)
 
 
 def test_incremental_equals_batch():
@@ -804,6 +884,7 @@ def main():
     test_single_component_roundtrip()
     test_identical_observations()
     test_additive_rule()
+    test_additive_mle()
     test_mixture_against_monte_carlo()
     test_mean_against_monte_carlo()
     test_incremental_equals_batch()

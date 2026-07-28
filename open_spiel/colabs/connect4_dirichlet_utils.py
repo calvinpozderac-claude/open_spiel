@@ -50,6 +50,15 @@ SEARCH and for TRAINING TARGETS, because the two roles want different things:
              anneals at the textbook Thompson rate sd[v] ∝ 1/√n.  Disagreement
              needs no separate term: conflicting leaves pull the mean toward the
              middle, where M(1−M) — and hence the spread — is largest.
+  'additive_mle'  same observations (leaf means), but fit the Dirichlet by
+             MAXIMUM LIKELIHOOD rather than counting: solve
+             ψ(α_j) = ψ(α₀) + mean_i log x_ij by Minka's fixed point, from the
+             sufficient statistics (n, Σ log x).  α₀ then tracks
+             min(n, intrinsic dispersion) — it grows while observations are
+             scarce and saturates at the population value, so it is neither
+             pinned like 'mixture' nor budget-locked like 'additive'.  Measured
+             on real searched nodes the dispersion is only ~8-12, so it
+             saturates within ~10 visits and lands near 'mixture' in magnitude.
 
 Selection samples from  α_sel = α_net(s,a) + α_observed(s,a)  — the network's
 belief is a PRIOR whose pseudo-counts search adds evidence to, so a well-searched
@@ -153,7 +162,72 @@ AGG_MIXTURE = 'mixture'
 AGG_MEAN = 'mean'
 AGG_SUM = 'sum'
 AGG_ADDITIVE = 'additive'
-AGGREGATIONS = (AGG_MIXTURE, AGG_MEAN, AGG_SUM, AGG_ADDITIVE)
+AGG_ADDITIVE_MLE = 'additive_mle'
+AGGREGATIONS = (AGG_MIXTURE, AGG_MEAN, AGG_SUM, AGG_ADDITIVE, AGG_ADDITIVE_MLE)
+
+# ── 'additive_mle' tuning.  Speed is preferred to exactness here: the estimate
+# is a search statistic, not a reported quantity, and it moves slowly.
+_MLE_FLOOR = 1e-9      # clamp on x before log().  A single zero component would
+                       # set L[j] = -inf permanently and NaN the node forever.
+_MLE_GROWTH = 1.3      # refresh the fixed point when n reaches n*GROWTH, not
+                       # every update: ~23 refreshes over a 400-sim search
+                       # instead of 400, and MORE accurate than one step per
+                       # update because each refresh iterates to near-convergence
+_MLE_STEPS = 12        # Minka iterations per refresh
+_MLE_NEWTON = 2        # Newton steps inside inverse-digamma (0.8% max rel err;
+                       # 3 would give ~1e-5 for ~15% more cost)
+
+
+# ── Scalar digamma / trigamma / inverse-digamma (pure Python, no numpy dispatch
+# on the backup hot path).  Shift up to 6 by recurrence, then asymptotic series;
+# accurate to ~1e-10 against scipy over x in [1e-3, 500].
+_DIGAMMA_1 = -0.5772156649015329            # digamma(1) = -Euler-Mascheroni
+
+
+def _digamma(x):
+    r = 0.0
+    while x < 6.0:
+        r -= 1.0 / x
+        x += 1.0
+    f = 1.0 / (x * x)
+    return r + math.log(x) - 0.5 / x + f * (
+        -1.0 / 12 + f * (1.0 / 120 + f * (-1.0 / 252 + f * (1.0 / 240))))
+
+
+def _trigamma(x):
+    r = 0.0
+    while x < 6.0:
+        r += 1.0 / (x * x)
+        x += 1.0
+    f = 1.0 / (x * x)
+    return r + (1.0 / x) * (1.0 + 0.5 / x + f * (
+        1.0 / 6 + f * (-1.0 / 30 + f * (1.0 / 42 + f * (-1.0 / 30)))))
+
+
+def _inv_digamma(y):
+    """psi^-1(y) by Minka's initialiser plus a couple of Newton steps."""
+    x = math.exp(y) + 0.5 if y >= -2.22 else -1.0 / (y - _DIGAMMA_1)
+    for _ in range(_MLE_NEWTON):
+        x -= (_digamma(x) - y) / _trigamma(x)
+        if x < 1e-9:
+            x = 1e-9
+    return x
+
+
+def _mle_refresh(acc):
+    """One batch of Minka fixed-point steps from the sufficient statistics.
+    The MLE solves  psi(alpha_j) = psi(alpha_0) + mean_i log x_ij,  so (n, L) is
+    all the state needed and the iteration warm-starts from the last estimate."""
+    inv_n = 1.0 / acc[0]
+    L, A = acc[5], acc[6]
+    g0, g1, g2 = L[0] * inv_n, L[1] * inv_n, L[2] * inv_n
+    a0, a1, a2 = A[0], A[1], A[2]
+    for _ in range(_MLE_STEPS):
+        c = _digamma(a0 + a1 + a2)
+        a0 = _inv_digamma(c + g0)
+        a1 = _inv_digamma(c + g1)
+        a2 = _inv_digamma(c + g2)
+    A[0], A[1], A[2] = a0, a1, a2
 
 
 def flip_alpha(alpha):
@@ -233,6 +307,10 @@ def observed_alpha(acc, mode):
       'mean'     the average draw (1/n)Σ X_i:  Var = SV/n²
                  → concentration ≈ n·α₀, growing linearly with visits.
       'sum'      conjugate evidence:           α = SA  (no moment matching)
+      'additive_mle'  Dirichlet MLE of the same observations, from (n, Σ log x)
+                 → α₀ ≈ min(n, dispersion of the leaf means).  Falls back to
+                   'additive' below 3 observations, where the MLE is degenerate
+                   (a single sample is fit perfectly by α₀ → ∞).
       'additive' soft counts:                   α = SM,  so α₀ == n exactly
                  → each simulation is ONE observation whose outcome label is the
                    leaf's mean probability vector.  The leaf's own concentration
@@ -247,6 +325,16 @@ def observed_alpha(acc, mode):
     n = acc[0]
     if n <= 0.0:
         return None
+    if mode == AGG_ADDITIVE_MLE:
+        # Below 3 observations the Dirichlet MLE is degenerate (one sample is
+        # fit perfectly by alpha0 -> infinity), and acc[5] being untouched means
+        # the statistics were never maintained.  Both fall back to 'additive',
+        # which is where the MLE sits at small n anyway.
+        if n >= 3.0 and acc[5][0] < 0.0:
+            A = acc[6]
+            return np.array([max(A[0], ALPHA_FLOOR), max(A[1], ALPHA_FLOOR),
+                             max(A[2], ALPHA_FLOOR)])
+        mode = AGG_ADDITIVE
     if mode == AGG_ADDITIVE:
         sm = acc[1]
         return np.array([max(sm[0], ALPHA_FLOOR), max(sm[1], ALPHA_FLOOR),
@@ -270,11 +358,18 @@ def observed_alpha(acc, mode):
 
 
 def _new_acc():
-    """A fresh evidence accumulator: [n, SM, SQ, SV, SA] as plain Python floats.
-    Python lists, not numpy: these are mutated once per node per simulation, and
-    numpy's per-op dispatch overhead on 3-vectors dwarfs the arithmetic."""
+    """A fresh evidence accumulator, as plain Python floats.  Python lists, not
+    numpy: these are mutated once per node per simulation, and numpy's per-op
+    dispatch overhead on 3-vectors dwarfs the arithmetic.
+
+        [0] n    [1] SM = sum m   [2] SQ = sum m^2   [3] SV = sum var
+        [4] SA = sum alpha
+        [5] L    = sum log m      — 'additive_mle' sufficient statistic
+        [6] A    = current MLE estimate
+        [7] next refresh threshold
+    Slots 5-7 are only maintained when an 'additive_mle' rule is selected."""
     return [0.0, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0]]
+            [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0]
 
 
 def _payload(alpha):
@@ -302,12 +397,23 @@ def _payload(alpha):
 def _acc_add(acc, pl):
     """Fold one payload into an accumulator.  O(1), pure scalar."""
     m, q, v, a = pl
-    acc[0] += 1.0
+    n = acc[0] + 1.0
+    acc[0] = n
     SM, SQ, SV, SA = acc[1], acc[2], acc[3], acc[4]
     SM[0] += m[0]; SM[1] += m[1]; SM[2] += m[2]
     SQ[0] += q[0]; SQ[1] += q[1]; SQ[2] += q[2]
     SV[0] += v[0]; SV[1] += v[1]; SV[2] += v[2]
     SA[0] += a[0]; SA[1] += a[1]; SA[2] += a[2]
+    if _MLE_ACTIVE:
+        # Accumulating the logs is cheap; the fixed point is not, so it only
+        # runs on the geometric schedule (see _MLE_GROWTH).
+        L = acc[5]
+        x = m[0]; L[0] += math.log(x if x > _MLE_FLOOR else _MLE_FLOOR)
+        x = m[1]; L[1] += math.log(x if x > _MLE_FLOOR else _MLE_FLOOR)
+        x = m[2]; L[2] += math.log(x if x > _MLE_FLOOR else _MLE_FLOOR)
+        if n >= acc[7]:
+            acc[7] = max(n + 1.0, n * _MLE_GROWTH)
+            _mle_refresh(acc)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -317,13 +423,16 @@ _SEARCH_AGG = AGG_MIXTURE      # evidence rule used for SELECTION
 _TARGET_AGG = AGG_MIXTURE      # evidence rule used for TRAINING TARGETS
 _GAUSSIAN_SELECT = False       # exact Dirichlet draw vs cached-moment Gaussian
 _VIRTUAL_LOSS = 1.0            # penalty on v for an in-flight edge
+_MLE_ACTIVE = False            # maintain the 'additive_mle' log-sums in _acc_add
+                               # (skipped entirely when no rule needs them, so
+                               # the default backup pays nothing for this)
 
 
 def set_search(search_agg=None, target_agg=None, selection=None,
                virtual_loss=None):
     """Configure the tree for this PROCESS.  Self-play workers call it themselves
     from their cfg so a spawned process matches the parent exactly."""
-    global _SEARCH_AGG, _TARGET_AGG, _GAUSSIAN_SELECT, _VIRTUAL_LOSS
+    global _SEARCH_AGG, _TARGET_AGG, _GAUSSIAN_SELECT, _VIRTUAL_LOSS, _MLE_ACTIVE
     if search_agg is not None:
         if search_agg not in AGGREGATIONS:
             raise ValueError(f'search_agg must be one of {AGGREGATIONS}')
@@ -338,6 +447,7 @@ def set_search(search_agg=None, target_agg=None, selection=None,
         _GAUSSIAN_SELECT = (selection == 'gaussian')
     if virtual_loss is not None:
         _VIRTUAL_LOSS = float(virtual_loss)
+    _MLE_ACTIVE = AGG_ADDITIVE_MLE in (_SEARCH_AGG, _TARGET_AGG)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -828,8 +938,9 @@ class Config:
     seed: int = 0
 
     # ── evidence collapse (see observed_alpha) ────────────────────────────────
-    search_agg: str = AGG_ADDITIVE    # 'mixture' | 'mean' | 'sum' | 'additive'
-    target_agg: str = AGG_ADDITIVE    # 'mixture' | 'mean' | 'sum' | 'additive'
+    # 'mixture' | 'mean' | 'sum' | 'additive' | 'additive_mle'
+    search_agg: str = AGG_ADDITIVE
+    target_agg: str = AGG_ADDITIVE
     # THE DEFAULT IS 'additive' for both.
     #
     # SEARCH wants concentration to GROW with evidence, so Thompson exploration
@@ -851,6 +962,19 @@ class Config:
     # and the network cannot see which it is getting.  Note the two rules give
     # the SAME target mean; they differ only in concentration.  See the second
     # A/B below, which isolates exactly that.
+    #
+    # 'additive_mle' is kept DISTINCT from 'additive' so the combinations can be
+    # tested separately.  It fits the same observations by maximum likelihood
+    # instead of counting them, which grounds the concentration in the actual
+    # dispersion of the backed-up leaves rather than in the simulation budget.
+    # Measured beforehand on real searched nodes at 400 sims: median α₀ 8.1 for
+    # state nodes and 12.3 for action nodes, against 7.1 / 8.4 for 'mixture' and
+    # 401 / 54 for 'additive'.  So it is a better-grounded estimate of what
+    # 'mixture' approximates, NOT a way to keep 'additive' magnitudes — expect
+    # it to need the KL weights raised (~2.5x) to preserve the distillation
+    # pressure that won 'additive' its +200 Elo, since both rules produce the
+    # same target MEAN and differ only in how hard the KL pulls on it.
+    # Cost: 1.18 us per accumulator update against 0.69 for 'additive'.
     #
     # MEASURED, on target_agg (2000 episodes/arm, 70k params, one seed, search
     # fixed at 'mixture' in both).  Arm B is the documented pairing for 'mean'
