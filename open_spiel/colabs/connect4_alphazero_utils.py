@@ -576,8 +576,18 @@ if _HAS_TORCH:
                 optimizer.zero_grad()
                 loss, parts = az_loss(logits, value, meta, value_weight)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(network.parameters(), grad_clip)
-                optimizer.step()
+                gnorm = torch.nn.utils.clip_grad_norm_(network.parameters(),
+                                                       grad_clip)
+                # Same guard as the ThompsonZero engine: a NaN norm becomes a
+                # NaN scale factor, AdamW writes NaN into every weight, and the
+                # run continues while being dead.  Skipping costs one batch.
+                ok = (math.isfinite(parts['loss'])
+                      and bool(torch.isfinite(gnorm)))
+                if ok:
+                    optimizer.step()
+                else:
+                    optimizer.zero_grad(set_to_none=True)
+                parts['nonfinite'] = 0.0 if ok else 1.0
             return parts['loss'], parts
 
         return c4.device_retry(_once)
@@ -948,7 +958,9 @@ if _HAS_TORCH:
 
     def save_benchmark_net(checkpoint_dir, label, net):
         os.makedirs(checkpoint_dir, exist_ok=True)
-        torch.save(_cpu_sd(net), os.path.join(checkpoint_dir, f'bench_{label}.pt'))
+        sd = _cpu_sd(net)
+        c4._assert_finite_sd(sd, f'bench_{label}.pt')
+        torch.save(sd, os.path.join(checkpoint_dir, f'bench_{label}.pt'))
 
     def load_benchmark_net(checkpoint_dir, label, sig):
         net = AlphaZeroNet(*sig)
@@ -961,6 +973,7 @@ if _HAS_TORCH:
     def save_checkpoint(checkpoint_dir, ep, net, optimizer, scheduler, hist,
                         cfg=None):
         os.makedirs(checkpoint_dir, exist_ok=True)
+        c4._assert_finite_sd(_cpu_sd(net), f'latest.pt at ep {ep}')
         blob = {'ep': ep, 'model': _cpu_sd(net), 'optim': optimizer.state_dict(),
                 'sched': scheduler.state_dict() if scheduler else None,
                 'hist': hist, 'cfg': asdict(cfg) if cfg is not None else None}

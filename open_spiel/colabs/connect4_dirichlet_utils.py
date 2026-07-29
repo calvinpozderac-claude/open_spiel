@@ -1504,10 +1504,28 @@ if _HAS_TORCH:
             a = self.a_out(h).view(-1, _NUM_ACTIONS, 4)
             return v[:, :3], v[:, 3], a[..., :3], a[..., 3]
 
+    # Above this, softplus(x) and x differ by log1p(exp(-x)) — 2e-9 at x=20,
+    # far below fp32 resolution at that magnitude — so the two are the same
+    # number and only one of them can overflow.
+    _CONF_LINEAR = 20.0
+
     def _conf(raw):
         """RAW concentration output → α₀ > 0.  UNBOUNDED above: softplus only,
-        with a positivity floor so an fp32 underflow to 0 can't NaN the KL."""
-        return _softplus(raw).clamp_min(ALPHA_FLOOR)
+        with a positivity floor so an fp32 underflow to 0 can't NaN the KL.
+
+        The transcendental part is evaluated on a CLAMPED input and the linear
+        branch spliced back in, so no backend can overflow here no matter how
+        its softplus is implemented.  This is not hypothetical: a kernel that
+        computes softplus as log1p(exp(x)) — rather than PyTorch's
+        threshold-at-20 form — returns +inf for x > 88.7 in fp32, and the
+        `additive` rule drives targets to exactly that range (α₀ = visit count,
+        so α₀ ≈ 89 at full_sims).  One +inf reaches lgamma as inf−inf = NaN in
+        the KL, and inf×0 = NaN in the masked action mean; the next backward
+        then writes NaN into every weight.  Clamping the input rather than the
+        OUTPUT also keeps the gradient clean: torch.where alone would still
+        differentiate the dead branch and multiply inf by zero."""
+        safe = _softplus(raw.clamp(max=_CONF_LINEAR))
+        return torch.where(raw > _CONF_LINEAR, raw, safe).clamp_min(ALPHA_FLOOR)
 
     # ── lgamma / digamma with a DirectML-friendly fallback ────────────────────
     # The closed-form Dirichlet KL's only expensive pieces are lgamma (the log
@@ -1536,17 +1554,40 @@ if _HAS_TORCH:
 
     _LG_APPROX = False
 
+    # Magnitudes the loss actually feeds these ops.  α ranges from ALPHA_FLOOR
+    # (a masked-out or underflowed component) up past TERMINAL_CONC, and with
+    # the `additive` rule α₀ is the visit count — so ~full_sims, not O(1).  The
+    # probe used to sample [0.5, 1.5] only, which every backend gets right; the
+    # kernels that break do so in the tails, which is precisely where they were
+    # never asked.
+    _PROBE_MAGS = (1e-9, 1e-3, 0.5, 1.0, 20.0, 89.0, 200.0)
+
     def _probe(fn, device, shape=(3,)):
         """Does `fn` run on this device, forward AND backward, and agree with the
-        CPU?  False on any exception, mismatch, or non-finite gradient."""
+        CPU ACROSS THE RANGE THE LOSS USES?  False on any exception, mismatch,
+        or non-finite value.
+
+        Correct-on-easy-inputs is not the question — a wrong kernel here is not
+        caught by any test, it silently poisons a multi-hour run — so this
+        sweeps the real dynamic range and demands finite, CPU-matching output
+        and gradients at every magnitude."""
         try:
-            ref_in = torch.rand(shape).abs() + 0.5
-            x = ref_in.to(device).requires_grad_(True)
-            y = fn(x)
-            y.sum().backward()
-            return bool(torch.allclose(y.detach().to('cpu'), fn(ref_in), atol=1e-3)
-                        and x.grad is not None
-                        and bool(torch.isfinite(x.grad.to('cpu')).all()))
+            for mag in _PROBE_MAGS:
+                ref_in = (torch.rand(shape).abs() + 0.5) * mag
+                x = ref_in.to(device).requires_grad_(True)
+                y = fn(x)
+                y.sum().backward()
+                ref_out = fn(ref_in)
+                if not torch.isfinite(y.detach().to('cpu')).all():
+                    return False
+                if not torch.isfinite(ref_out).all():
+                    continue        # CPU itself has no finite answer here
+                if not torch.allclose(y.detach().to('cpu'), ref_out,
+                                      rtol=1e-3, atol=1e-3):
+                    return False
+                if x.grad is None or not torch.isfinite(x.grad.to('cpu')).all():
+                    return False
+            return True
         except Exception:
             return False
 
@@ -1843,8 +1884,22 @@ if _HAS_TORCH:
                 optimizer.zero_grad()
                 loss, parts = full_loss(out, out2, meta, weights, kl_normalize)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(network.parameters(), grad_clip)
-                optimizer.step()
+                gnorm = torch.nn.utils.clip_grad_norm_(network.parameters(),
+                                                       grad_clip)
+                # A single non-finite step is unrecoverable: clip_grad_norm_
+                # turns a NaN norm into a NaN scale factor, AdamW writes NaN
+                # into every weight and every moment, and the run is dead while
+                # continuing to look alive.  Skipping the step instead costs one
+                # batch.  `parts['loss']` is already on the host (full_loss
+                # stacks the diagnostics into one transfer), so the only added
+                # sync is the grad norm.
+                ok = (math.isfinite(parts['loss'])
+                      and bool(torch.isfinite(gnorm)))
+                if ok:
+                    optimizer.step()
+                else:
+                    optimizer.zero_grad(set_to_none=True)
+                parts['nonfinite'] = 0.0 if ok else 1.0
             return parts['loss'], parts
 
         return device_retry(_once)
@@ -2436,9 +2491,27 @@ if _HAS_TORCH:
         c.load_state_dict(_cpu_sd(net)); c.eval()
         return c
 
+    def _assert_finite_sd(sd, what):
+        """Refuse to persist a poisoned network.
+
+        A NaN net still plays (argmax of NaN picks index 0) and still trains, so
+        nothing downstream notices — it just overwrites the last good weights
+        and the resume checkpoint with garbage.  Failing the SAVE keeps the most
+        recent healthy checkpoint on disk to restart from."""
+        bad = [k for k, v in sd.items()
+               if torch.is_tensor(v) and v.is_floating_point()
+               and not torch.isfinite(v).all()]
+        if bad:
+            raise ValueError(
+                f'refusing to save {what}: non-finite weights in {len(bad)} '
+                f'tensor(s), e.g. {bad[:3]}. The most recent healthy checkpoint '
+                f'on disk is untouched — restart from it.')
+
     def save_benchmark_net(checkpoint_dir, label, net):
         os.makedirs(checkpoint_dir, exist_ok=True)
-        torch.save(_cpu_sd(net), os.path.join(checkpoint_dir, f'bench_{label}.pt'))
+        sd = _cpu_sd(net)
+        _assert_finite_sd(sd, f'bench_{label}.pt')
+        torch.save(sd, os.path.join(checkpoint_dir, f'bench_{label}.pt'))
 
     def load_benchmark_net(checkpoint_dir, label, sig):
         net = C4DirichletNet(*sig)
@@ -2451,6 +2524,7 @@ if _HAS_TORCH:
     def save_checkpoint(checkpoint_dir, ep, base_network, optimizer, scheduler,
                         elo_pool, hist, cfg=None):
         os.makedirs(checkpoint_dir, exist_ok=True)
+        _assert_finite_sd(_cpu_sd(base_network), f'latest.pt at ep {ep}')
         blob = {'ep': ep, 'model': _cpu_sd(base_network),
                 'optim': optimizer.state_dict(),
                 'sched': scheduler.state_dict() if scheduler else None,
@@ -2709,6 +2783,14 @@ if _HAS_TORCH:
                 tot = sum(v for v in comp.values() if v == v) or float('nan')
                 share = 'sh ' + ' '.join(f'{k} {100 * v / tot:.0f}%'
                                          for k, v in comp.items())
+                # Steps whose loss or gradient was not finite and were therefore
+                # NOT applied.  Loud on purpose: a silent NaN destroyed three
+                # 4-hour arms once already.
+                nf = float(np.sum(accs['nonfinite'])) if accs['nonfinite'] else 0.0
+                if nf:
+                    log(f'  ! {nf:.0f} of {len(accs["nonfinite"])} train steps '
+                        f'had a non-finite loss/gradient and were SKIPPED — '
+                        f'weights are intact, but something is wrong upstream.')
                 curr_s = ''
                 if cfg.curriculum:
                     cd = self_play.curr_depth

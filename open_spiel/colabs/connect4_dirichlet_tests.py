@@ -683,6 +683,112 @@ def test_train_step_learns():
     check('with_consistency=False zeroes the consistency term', pc['cons'] == 0.0)
 
 
+def test_conf_no_overflow():
+    """The `additive` rule drives target alpha0 to the visit count, so the
+    concentration head is trained toward ~full_sims.  Past x = 88.7 a softplus
+    written as log1p(exp(x)) overflows fp32 to +inf, which reaches lgamma as
+    inf-inf = NaN and inf*0 = NaN in the masked action mean -- and one NaN
+    backward writes NaN into every weight.  _conf must be finite for any input
+    on either softplus path."""
+    if not c4._HAS_TORCH:
+        return
+    import torch
+    import torch.nn.functional as F
+    print('\n_conf cannot overflow (the NaN-run regression)')
+    c4.set_backend('cpu', device='cpu')
+    raw = torch.tensor([-1e4, -50., 0., 1.4, 20., 88., 89., 200., 1e4])
+    saved = c4._NATIVE['softplus']
+    outs = {}
+    for native in (True, False):
+        c4._NATIVE['softplus'] = native
+        x = raw.clone().requires_grad_(True)
+        y = c4._conf(x)
+        y.sum().backward()
+        outs[native] = y.detach()
+        check(f'_conf finite for every input (native softplus={native})',
+              bool(torch.isfinite(y.detach()).all()), f'{y.detach()}')
+        check(f'_conf gradient finite everywhere (native softplus={native})',
+              bool(torch.isfinite(x.grad).all()), f'{x.grad}')
+        check(f'_conf stays positive (native softplus={native})',
+              bool((y.detach() > 0).all()))
+    c4._NATIVE['softplus'] = saved
+    check('both softplus paths agree',
+          bool(torch.allclose(outs[True], outs[False], rtol=1e-5, atol=1e-6)))
+    # Above the splice point _conf must be the identity to fp32 precision, and
+    # below it must still be a real softplus.
+    check('_conf(x) == x for large x',
+          bool(torch.allclose(c4._conf(torch.tensor([89., 200., 1e4])),
+                              torch.tensor([89., 200., 1e4]), rtol=1e-6)))
+    check('_conf matches softplus below the splice',
+          bool(torch.allclose(c4._conf(torch.tensor([-3., 0.5, 1.4, 19.])),
+                              F.softplus(torch.tensor([-3., 0.5, 1.4, 19.])),
+                              rtol=1e-6, atol=1e-9)))
+
+    # The probe is what SELECTS the kernel, so it has to reject a bad one.
+    check('_probe accepts a correct softplus', c4._probe(F.softplus, 'cpu'))
+    check('_probe REJECTS a softplus that overflows at large x',
+          not c4._probe(lambda t: torch.log1p(torch.exp(t)), 'cpu'))
+    check('_probe accepts lgamma / digamma / group_norm',
+          c4._probe(torch.lgamma, 'cpu') and c4._probe(torch.digamma, 'cpu')
+          and c4._probe(lambda t: F.group_norm(t, 2), 'cpu', shape=(2, 4, 3, 3)))
+
+
+def test_nonfinite_step_is_skipped():
+    """A non-finite loss must never reach the weights: clip_grad_norm_ turns a
+    NaN norm into a NaN scale, AdamW then writes NaN into every parameter and
+    moment, and the run keeps going while being dead."""
+    if not c4._HAS_TORCH:
+        return
+    import tempfile
+    import torch
+    print('\na non-finite step is skipped, not applied')
+    c4.set_game(MockGame())
+    c4.set_backend('cpu', device='cpu')
+    net = c4.C4DirichletNet(8, 1, 2)
+    opt = torch.optim.AdamW(net.parameters(), lr=1e-2)
+    batch = [{'obs': np.zeros(MOCK_OBS_DIM, np.float16),
+              'legal': np.array([0, 1], np.int32),
+              'v_obs': np.array([2., 1., 1.], np.float32),
+              'ev_idx': np.array([0], np.int32),
+              'ev_alpha': np.array([[2., 1., 1.]], np.float32),
+              'played': 0, 'next_obs': None, 'next_term': -1,
+              'z': np.float32(0.0), 'z_w': np.float32(1.0), 'solved': False,
+              'player': 0} for _ in range(8)]
+    w = (1., 1., 1., 1., 0.)
+    _lv, parts = c4.train_step(net, opt, batch, 'cpu', w, 1.0)
+    check('a healthy step is flagged finite', parts['nonfinite'] == 0.0)
+
+    with torch.no_grad():
+        net.v_out.bias[3] = float('nan')
+    before = {n: p.detach().clone() for n, p in net.named_parameters()}
+    _lv, parts = c4.train_step(net, opt, batch, 'cpu', w, 1.0)
+    check('a non-finite step is flagged', parts['nonfinite'] == 1.0)
+    changed = [n for n, p in net.named_parameters()
+               if n != 'v_out.bias' and not torch.equal(before[n], p.detach())]
+    check('the skipped step changed NO weight', not changed, f'{changed}')
+    check('the NaN did not spread beyond where it was injected',
+          int(torch.isnan(net.v_out.bias.detach()).sum()) == 1)
+    with torch.no_grad():
+        net.v_out.bias[3] = 1.4
+    _lv, parts = c4.train_step(net, opt, batch, 'cpu', w, 1.0)
+    check('training resumes normally afterwards',
+          parts['nonfinite'] == 0.0 and np.isfinite(parts['loss']))
+
+    # Saving must refuse a poisoned net rather than clobber a good checkpoint.
+    d = tempfile.mkdtemp()
+    c4.save_benchmark_net(d, 'good', net)
+    with torch.no_grad():
+        net.v_out.bias[3] = float('nan')
+    raised = False
+    try:
+        c4.save_benchmark_net(d, 'bad', net)
+    except ValueError:
+        raised = True
+    check('saving a non-finite net raises instead of overwriting', raised)
+    check('the healthy checkpoint is still readable',
+          c4.load_benchmark_net(d, 'good', (8, 1, 2)) is not None)
+
+
 def test_batch_meta_masking():
     if not c4._HAS_TORCH:
         return
@@ -899,6 +1005,8 @@ def main():
     test_degenerate_draws()
     test_torch()
     test_torch_losses()
+    test_conf_no_overflow()
+    test_nonfinite_step_is_skipped()
     test_batch_meta_masking()
     test_consistency_direction()
     test_train_step_learns()
