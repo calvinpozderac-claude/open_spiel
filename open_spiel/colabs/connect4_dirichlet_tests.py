@@ -7,6 +7,7 @@ a tiny built-in mock game).  The network/loss half is skipped automatically if
 torch is missing, and the end-to-end self-play half if pyspiel is missing.
 """
 
+import os
 import sys
 import numpy as np
 
@@ -789,6 +790,82 @@ def test_nonfinite_step_is_skipped():
           c4.load_benchmark_net(d, 'good', (8, 1, 2)) is not None)
 
 
+def test_rewind_to_generation():
+    """`latest.pt` is a run blob and `bench_N.pt` is a bare state_dict, so
+    deleting latest.pt restarts from episode 1 rather than from the newest
+    snapshot, and copying a bench file over it used to die with a bare
+    KeyError: 'model'.  rewind_to_generation is the supported way back."""
+    if not c4._HAS_TORCH:
+        return
+    import shutil
+    import tempfile
+    import torch
+    print('\nrewind_to_generation')
+    c4.set_backend('cpu', device='cpu')
+    d = tempfile.mkdtemp()
+    net = c4.C4DirichletNet(8, 1, 2)
+    opt = torch.optim.AdamW(net.parameters(), lr=1e-3)
+    for g in ('1000', '4000', '12000'):
+        c4.save_benchmark_net(d, g, net)
+    pool = type('P', (), {
+        'elo': {'random': 1000., '1000': 1200., '4000': 1400., '12000': 900.},
+        'order': ['1000', '4000', '12000'],
+        'pair_games': {('1000', '4000'): 10, ('4000', '12000'): 6}})()
+    hist = dict(c4._new_hist(), ep=[1000, 4000, 12000], loss=[3., 2., 1.],
+                quick_ep=[1000, 12000], q_w=[5, 5], q_d=[0, 0], q_l=[5, 5],
+                elo=[{}, {}, {}])
+    c4.save_checkpoint(d, 12000, net, opt, None, pool, hist)
+
+    b = c4.rewind_to_generation(d, 4000, log=lambda *a: None)
+    check('episode counter rewinds to the snapshot', b['ep'] == 4000)
+    check('optimizer state is dropped', b['optim'] is None)
+    check('later generations leave the Elo order',
+          b['order'] == ['1000', '4000'], f"{b['order']}")
+    check("'random' survives (every Elo update reads it)", 'random' in b['elo'])
+    check('later generations leave the Elo table', '12000' not in b['elo'])
+    check('pair games mentioning a dropped generation are removed',
+          all('12000' not in k for k in b['pair_games']), f"{b['pair_games']}")
+    check('history truncates at the snapshot', b['hist']['ep'] == [1000, 4000])
+    check('the quick-eval series truncates independently',
+          b['hist']['quick_ep'] == [1000], f"{b['hist']['quick_ep']}")
+    check('every history column is present',
+          set(b['hist']) == set(c4._HIST_KEYS))
+
+    ck = c4.load_checkpoint(d)
+    check('the rewound checkpoint reloads', ck is not None and ck['ep'] == 4000)
+    n2 = c4.C4DirichletNet(8, 1, 2)
+    n2.load_state_dict(ck['model'])
+    check('the weights are the snapshot',
+          all(torch.equal(a, b_) for a, b_
+              in zip(net.parameters(), n2.parameters())))
+
+    # A bench file copied over latest.pt must say what to do, not KeyError.
+    shutil.copy(os.path.join(d, 'bench_4000.pt'), os.path.join(d, 'latest.pt'))
+    raised = ''
+    try:
+        c4.load_checkpoint(d)
+    except ValueError as e:
+        raised = str(e)
+    check('a bare state_dict at latest.pt raises a clear error',
+          'rewind_to_generation' in raised, raised[:80])
+    check('and rewinding still recovers from that state',
+          c4.rewind_to_generation(d, 1000,
+                                  log=lambda *a: None)['ep'] == 1000)
+    check('rewinding to a generation with no snapshot fails loudly',
+          _raises(FileNotFoundError, c4.rewind_to_generation, d, 7777,
+                  log=lambda *a: None))
+
+
+def _raises(exc, fn, *a, **kw):
+    try:
+        fn(*a, **kw)
+    except exc:
+        return True
+    except Exception:
+        return False
+    return False
+
+
 def test_batch_meta_masking():
     if not c4._HAS_TORCH:
         return
@@ -1007,6 +1084,7 @@ def main():
     test_torch_losses()
     test_conf_no_overflow()
     test_nonfinite_step_is_skipped()
+    test_rewind_to_generation()
     test_batch_meta_masking()
     test_consistency_direction()
     test_train_step_learns()

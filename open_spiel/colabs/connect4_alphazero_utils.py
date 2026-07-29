@@ -985,7 +985,51 @@ if _HAS_TORCH:
         path = os.path.join(checkpoint_dir, 'latest.pt')
         if not os.path.exists(path):
             return None
-        return torch.load(path, map_location='cpu', weights_only=False)
+        blob = torch.load(path, map_location='cpu', weights_only=False)
+        # Same trap as the ThompsonZero engine: bench_N.pt is a bare state_dict,
+        # latest.pt is a run blob, and copying one over the other to rewind a
+        # run otherwise fails with a bare KeyError: 'model'.
+        if isinstance(blob, dict) and 'model' not in blob:
+            if all(torch.is_tensor(v) for v in blob.values()):
+                raise ValueError(
+                    f'{path} is a bare network state_dict (a bench_N.pt), not a '
+                    f'resumable checkpoint. Use '
+                    f'rewind_to_generation(checkpoint_dir, N) instead.')
+            raise ValueError(f'{path} has no "model" key; not a checkpoint.')
+        return blob
+
+    def rewind_to_generation(checkpoint_dir, gen, log=print):
+        """Rebuild latest.pt from bench_{gen}.pt.  See the ThompsonZero engine's
+        docstring — this engine keeps no Elo pool, so only weights, episode
+        counter and history carry over."""
+        bench = os.path.join(checkpoint_dir, f'bench_{gen}.pt')
+        if not os.path.exists(bench):
+            raise FileNotFoundError(bench)
+        sd = torch.load(bench, map_location='cpu', weights_only=True)
+        c4._assert_finite_sd(sd, f'bench_{gen}.pt')
+        path = os.path.join(checkpoint_dir, 'latest.pt')
+        old = {}
+        if os.path.exists(path):
+            try:
+                old = torch.load(path, map_location='cpu', weights_only=False)
+            except Exception:
+                old = {}
+            if not isinstance(old, dict) or 'model' not in old:
+                old = {}
+        prev = old.get('hist') or {}
+        keep = sum(1 for e in prev.get('ep', []) if e <= gen)
+        qkeep = sum(1 for e in prev.get('quick_ep', []) if e <= gen)
+        hist = {}
+        for k, v in prev.items():
+            hist[k] = (v[:qkeep] if k in ('quick_ep', 'q_w', 'q_d', 'q_l')
+                       else v[:keep]) if isinstance(v, list) else v
+        blob = {'ep': int(gen), 'model': sd, 'optim': None, 'sched': None,
+                'hist': hist, 'cfg': old.get('cfg')}
+        tmp = path + '.tmp'
+        torch.save(blob, tmp)
+        os.replace(tmp, path)
+        log(f'rewound {checkpoint_dir} to generation {gen}')
+        return blob
 
     # ── Training driver ───────────────────────────────────────────────────────
     def _worker_cfg(cfg, sig):
@@ -1053,10 +1097,13 @@ if _HAS_TORCH:
         ckpt = load_checkpoint(cfg.checkpoint_dir) if cfg.resume else None
         if ckpt is not None:
             base_network.load_state_dict(ckpt['model'])
-            optimizer.load_state_dict(ckpt['optim'])
+            if ckpt.get('optim'):
+                optimizer.load_state_dict(ckpt['optim'])
+            else:
+                log('  (no optimizer state — starting Adam moments from zero)')
             if ckpt.get('sched'):
                 scheduler.load_state_dict(ckpt['sched'])
-            old = ckpt['hist']; n = len(old.get('ep', []))
+            old = ckpt.get('hist') or {}; n = len(old.get('ep', []))
             for k in hist:
                 if k not in old:
                     old[k] = [float('nan')] * n

@@ -2491,6 +2491,17 @@ if _HAS_TORCH:
         c.load_state_dict(_cpu_sd(net)); c.eval()
         return c
 
+    # One definition of the history schema, so a rewound or back-filled
+    # checkpoint has exactly the columns the plots and the eval line expect.
+    _HIST_KEYS = ('ep', 'loss', 'klv', 'kla', 'cev', 'cea', 'cons', 'draw_pct',
+                  'plies', 'buf', 'aux', 'elo', 'quick_ep', 'q_w', 'q_d', 'q_l',
+                  'cv_p', 'cv_t', 'ca_p', 'ca_t', 'uv_p', 'uv_t', 'ua_p',
+                  'ua_t', 'unsolved')
+    _HIST_QUICK = ('quick_ep', 'q_w', 'q_d', 'q_l')
+
+    def _new_hist():
+        return {k: [] for k in _HIST_KEYS}
+
     def _assert_finite_sd(sd, what):
         """Refuse to persist a poisoned network.
 
@@ -2541,9 +2552,77 @@ if _HAS_TORCH:
         if not os.path.exists(path):
             return None
         try:
-            return torch.load(path, map_location='cpu', weights_only=False)
+            blob = torch.load(path, map_location='cpu', weights_only=False)
         except Exception:
-            return torch.load(path, map_location='cpu')
+            blob = torch.load(path, map_location='cpu')
+        # `latest.pt` is a run blob; `bench_N.pt` is a bare state_dict.  Copying
+        # one over the other is the obvious way to try to rewind a run, so say
+        # what to do instead of failing later with KeyError: 'model'.
+        if isinstance(blob, dict) and 'model' not in blob:
+            if all(torch.is_tensor(v) for v in blob.values()):
+                raise ValueError(
+                    f'{path} is a bare network state_dict (a bench_N.pt), not a '
+                    f'resumable checkpoint. To restart a run from generation N, '
+                    f'use rewind_to_generation(checkpoint_dir, N) — it rebuilds '
+                    f'latest.pt with the right episode counter and Elo pool.')
+            raise ValueError(f'{path} has no "model" key and is not a '
+                             f'state_dict; it is not a usable checkpoint.')
+        return blob
+
+    def rewind_to_generation(checkpoint_dir, gen, log=print):
+        """Rebuild `latest.pt` so training resumes from the `bench_{gen}.pt`
+        snapshot, discarding everything after it.
+
+        Deleting latest.pt does NOT do this — it restarts from episode 1, since
+        the benchmark snapshots are never read as a resume point.  Optimizer and
+        scheduler state are dropped (they belong to the discarded episodes; the
+        LR schedule is recomputed from `ep`), history is truncated at `gen`, and
+        any Elo entry for a later generation is removed."""
+        bench = os.path.join(checkpoint_dir, f'bench_{gen}.pt')
+        if not os.path.exists(bench):
+            raise FileNotFoundError(bench)
+        sd = torch.load(bench, map_location='cpu', weights_only=True)
+        _assert_finite_sd(sd, f'bench_{gen}.pt')
+
+        path = os.path.join(checkpoint_dir, 'latest.pt')
+        old = {}
+        if os.path.exists(path):
+            try:
+                old = torch.load(path, map_location='cpu', weights_only=False)
+            except Exception:
+                old = {}
+            if not isinstance(old, dict) or 'model' not in old:
+                old = {}                      # a bench file copied into place
+
+        prev = old.get('hist') or {}
+        keep = sum(1 for e in prev.get('ep', []) if e <= gen)
+        qkeep = sum(1 for e in prev.get('quick_ep', []) if e <= gen)
+        hist = _new_hist()
+        for k in _HIST_KEYS:
+            v = prev.get(k)
+            if isinstance(v, list):
+                hist[k] = v[:qkeep if k in _HIST_QUICK else keep]
+
+        # Drop only the generations being discarded.  'random' is a permanent
+        # member of the pool and is NOT a generation label, so it has to survive
+        # — the Elo update reads elo['random'] on every match.
+        def _later(lb):
+            return str(lb).isdigit() and int(lb) > gen
+        order = [lb for lb in old.get('order', []) if not _later(lb)]
+        elo = {k: v for k, v in (old.get('elo') or {}).items() if not _later(k)}
+        pair = {tuple(sorted(k)): v
+                for k, v in (old.get('pair_games') or {}).items()
+                if not any(_later(p) for p in k)}
+
+        blob = {'ep': int(gen), 'model': sd, 'optim': None, 'sched': None,
+                'elo': elo, 'order': order, 'pair_games': pair,
+                'hist': hist, 'cfg': old.get('cfg')}
+        tmp = path + '.tmp'
+        torch.save(blob, tmp)
+        os.replace(tmp, path)
+        log(f'rewound {checkpoint_dir} to generation {gen} '
+            f'(optimizer state dropped, {len(order)} Elo entries kept)')
+        return blob
 
     # ══════════════════════════════════════════════════════════════════════════
     #  Training driver — the notebook calls this and nothing else
@@ -2634,27 +2713,35 @@ if _HAS_TORCH:
                            start_elo=cfg.start_elo, eval_temp=cfg.eval_temp,
                            max_eval_plies=cfg.eval_max_plies, seed=cfg.seed)
 
-        hist = {'ep': [], 'loss': [], 'klv': [], 'kla': [], 'cev': [], 'cea': [],
-                'cons': [], 'draw_pct': [], 'plies': [], 'buf': [], 'aux': [],
-                'elo': [], 'quick_ep': [], 'q_w': [], 'q_d': [], 'q_l': [],
-                'cv_p': [], 'cv_t': [], 'ca_p': [], 'ca_t': [],
-                'uv_p': [], 'uv_t': [], 'ua_p': [], 'ua_t': [], 'unsolved': []}
+        hist = _new_hist()
         replay_buffer, start_ep, aux_total = [], 1, 0
 
         ckpt = load_checkpoint(cfg.checkpoint_dir) if cfg.resume else None
         if ckpt is not None:
             base_network.load_state_dict(ckpt['model'])
-            optimizer.load_state_dict(ckpt['optim'])
+            # A rewound checkpoint (rewind_to_generation) carries weights only:
+            # the optimizer and scheduler state belonged to the episodes being
+            # discarded, and the LR schedule is a function of `ep` anyway.
+            if ckpt.get('optim'):
+                optimizer.load_state_dict(ckpt['optim'])
+            else:
+                log('  (no optimizer state in the checkpoint — starting Adam '
+                    'moments from zero)')
             if ckpt.get('sched'):
                 scheduler.load_state_dict(ckpt['sched'])
-            elo_pool.elo = ckpt['elo']; elo_pool.order = ckpt['order']
+            elo_pool.elo = dict(ckpt.get('elo') or {})
+            # 'random' is the pool's anchor and every Elo update reads it; a
+            # hand-edited or rewound checkpoint may not carry it.
+            elo_pool.elo.setdefault('random', cfg.start_elo)
+            elo_pool.order = list(ckpt.get('order') or [])
             elo_pool.pair_games = {frozenset(k): v
-                                   for k, v in ckpt['pair_games'].items()}
+                                   for k, v in (ckpt.get('pair_games')
+                                                or {}).items()}
             # A benchmark file can be missing (interrupted save, hand-cleaned
             # directory) — drop that rating rather than making the whole
             # checkpoint unloadable.
             kept = []
-            for lb in ckpt['order']:
+            for lb in list(elo_pool.order):
                 try:
                     elo_pool.nets[lb] = load_benchmark_net(cfg.checkpoint_dir,
                                                            lb, sig)
@@ -2667,7 +2754,7 @@ if _HAS_TORCH:
             # A checkpoint written before a diagnostic was added has no series
             # for it; back-fill with NaN so the columns stay aligned and the
             # first eval after a resume doesn't KeyError.
-            old = ckpt['hist']
+            old = ckpt.get('hist') or {}
             n = len(old.get('ep', []))
             for k, v in hist.items():
                 if k not in old:
