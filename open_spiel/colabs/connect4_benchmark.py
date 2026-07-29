@@ -341,3 +341,105 @@ def head_to_head_table(names, W, log=print):
             row.append('     ·' if i == j or g == 0
                        else f'{100*W[i, j]/g:6.0f}')
         log(f'{a:>10} ' + ' '.join(row))
+# ══════════════════════════════════════════════════════════════════════════════
+#  Scrutinising the AlphaZero control
+# ══════════════════════════════════════════════════════════════════════════════
+# A large win over a control is only evidence if the control was configured
+# competently.  These checks try to break that assumption before it is believed.
+# They are cheap and run against checkpoints you already have.
+
+def az_cpuct_sweep(shared, gen=4000, opponent='AA', sims=128, games=60,
+                   values=(0.5, 1.0, 1.5, 2.5, 4.0), seed=77, log=print):
+    """AlphaZero's strength is famously sensitive to c_puct, and the benchmark
+    picked one value (1.5) without tuning.  Replay the same matchup at several
+    values: if strength moves a lot, the control was mis-tuned at EVALUATION —
+    and, worse, was also mis-tuned during self-play, so its training data was
+    weaker than it needed to be."""
+    if GAME_REF[0] is None:
+        GAME_REF[0] = c4.load_game(); c4.set_game(GAME_REF[0])
+    sig = (shared['channels'], shared['num_blocks'], shared['head_ch'])
+    a = az.load_benchmark_net(arm_dir(shared['root'], 'AZ'), str(gen), sig)
+    o = c4.load_benchmark_net(arm_dir(shared['root'], opponent), str(gen), sig)
+    old = az._C_PUCT
+    log(f'\nAlphaZero c_puct sweep — AZ@{gen} vs {opponent}@{gen}, '
+        f'MCTS-{sims}, {games} games each')
+    out = {}
+    for cp in values:
+        az.set_search(c_puct=cp)
+        rng = np.random.default_rng(seed)
+        w = d = l = 0
+        for g in range(games):
+            first = ('alphazero', a) if g % 2 == 0 else ('thompson', o)
+            second = ('thompson', o) if g % 2 == 0 else ('alphazero', a)
+            s = play_game(first, second, sims, rng)
+            s_az = s if g % 2 == 0 else 1.0 - s
+            w += s_az == 1.0; d += s_az == 0.5; l += s_az == 0.0
+        sc = (w + 0.5 * d) / games
+        lo, hi = wilson(sc, games)
+        out[cp] = sc
+        log(f'  c_puct {cp:<5} AZ scores {100*sc:5.1f}% '
+            f'[{100*lo:4.1f},{100*hi:5.1f}]   W{w} D{d} L{l}')
+    az.set_search(c_puct=old)
+    best = max(out, key=out.get)
+    log(f'  best {best} at {100*out[best]:.1f}% vs configured 1.5 at '
+        f'{100*out.get(1.5, float("nan")):.1f}%')
+    return out
+
+
+def az_progression(shared, gens=(1000, 2000, 4000), sims=128, games=40,
+                   seed=88, log=print):
+    """Did the control still improve late, or had it plateaued?  A plateau means
+    the comparison is about a converged AlphaZero; continued improvement means it
+    was simply cut off early and the gap partly measures budget, not method."""
+    if GAME_REF[0] is None:
+        GAME_REF[0] = c4.load_game(); c4.set_game(GAME_REF[0])
+    sig = (shared['channels'], shared['num_blocks'], shared['head_ch'])
+    d = arm_dir(shared['root'], 'AZ')
+    nets = {g: ('alphazero', az.load_benchmark_net(d, str(g), sig))
+            for g in gens if os.path.exists(os.path.join(d, f'bench_{g}.pt'))}
+    log(f'\nAlphaZero self-progression, MCTS-{sims}, {games} games/pair')
+    ks = sorted(nets)
+    for i in range(len(ks) - 1):
+        a, b = ks[i + 1], ks[i]
+        rng = np.random.default_rng(seed)
+        sc = sum(play_game(nets[a], nets[b], sims, rng) if g % 2 == 0
+                 else 1.0 - play_game(nets[b], nets[a], sims, rng)
+                 for g in range(games)) / games
+        lo, hi = wilson(sc, games)
+        log(f'  AZ@{a} vs AZ@{b}: {100*sc:5.1f}% [{100*lo:4.1f},{100*hi:5.1f}]'
+            + ('   still improving' if lo > 0.5 else '   not resolved'))
+
+
+def search_value(shared, arms=('AA', 'AZ'), gen=4000, sims=128, games=40,
+                 seed=99, log=print):
+    """How much does search add on top of each raw network?  If AlphaZero's
+    search adds far less than ThompsonZero's, the deficit is in PUCT or the
+    scalar value head rather than in the learned policy."""
+    if GAME_REF[0] is None:
+        GAME_REF[0] = c4.load_game(); c4.set_game(GAME_REF[0])
+    sig = (shared['channels'], shared['num_blocks'], shared['head_ch'])
+    log(f'\nWhat search buys — net@{gen} with MCTS-{sims} vs the SAME net '
+        f'search-free, {games} games')
+    for name in arms:
+        engine = ARMS[name][0]
+        d = arm_dir(shared['root'], name)
+        net = (az.load_benchmark_net(d, str(gen), sig) if engine == 'alphazero'
+               else c4.load_benchmark_net(d, str(gen), sig))
+        rng = np.random.default_rng(seed)
+        w = d_ = l = 0
+        for g in range(games):
+            st = GAME_REF[0].new_initial_state()
+            for _ in range(2):
+                leg = st.legal_actions()
+                st.apply_action(int(leg[rng.integers(len(leg))]))
+            searched_side = g % 2
+            bots = {}
+            while not st.is_terminal():
+                use = sims if st.current_player() == searched_side else 0
+                st.apply_action(_move(engine, net, st, use, rng, bots))
+            r = st.returns()[searched_side]
+            w += r > 0; l += r < 0; d_ += r == 0
+        sc = (w + 0.5 * d_) / games
+        lo, hi = wilson(sc, games)
+        log(f'  {name}: searched side scores {100*sc:5.1f}% '
+            f'[{100*lo:4.1f},{100*hi:5.1f}]   W{w} D{d_} L{l}')
