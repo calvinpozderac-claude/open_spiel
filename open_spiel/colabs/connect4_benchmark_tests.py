@@ -129,6 +129,78 @@ def test_root_noise():
     check('frac=0 is a no-op', np.allclose(m.P, [0.98, 0.01, 0.01]))
 
 
+def test_root_noise_every_move():
+    """AlphaZero's exploration is Dirichlet noise at the root of EVERY move's
+    search.  Subtree reuse means the next root was expanded as a leaf, so a
+    naive implementation noises move 1 and nothing after."""
+    print('\nRoot noise is applied on every move, not just the first')
+    import torch
+    game = c4.load_game(); c4.set_game(game)
+    torch.manual_seed(0)
+    net = az.AlphaZeroNet(16, 1, 4)
+    shared = B.default_shared(num_episodes=1, fast_sims=16, full_sims=16,
+                              n_parallel_games=4, wave_per_game=4,
+                              pool_prob=0.0, use_workers=False,
+                              root_noise_frac=0.25)
+    cfg = B.alphazero_config(shared)
+    sp = az.ParallelSelfPlay(game, net, 'cpu', az._worker_cfg(cfg, (16, 1, 4)),
+                             seed=0)
+    seen = []
+    orig = az.add_root_noise
+    az.add_root_noise = lambda n, r, f=0.25, a=1.0: (seen.append(id(n)),
+                                                     orig(n, r, f, a))[1]
+    gen = sp.episodes()
+    ep = next(gen)
+    az.add_root_noise = orig
+    check('noise applied many times per game, not once',
+          len(seen) >= len(ep) // 2, f'{len(seen)} calls for {len(ep)} moves')
+    check('noise applied to DISTINCT root nodes',
+          len(set(seen)) > 1, f'{len(set(seen))} distinct roots')
+
+    # And a slot only gets noised once per move.
+    slot = {'root': az._AZNode(0, [0, 1, 2], np.array([.5, .3, .2]), 0.0),
+            'noised': False}
+    rng = np.random.default_rng(0)
+    wcfg = {'root_noise_frac': 0.25, 'root_noise_alpha': 1.0}
+    az.noise_root(slot, rng, wcfg)
+    first = slot['root'].P.copy()
+    az.noise_root(slot, rng, wcfg)
+    check('a second call in the same move is a no-op',
+          np.allclose(slot['root'].P, first), f'{slot["root"].P} vs {first}')
+
+
+def test_solver_samples_symmetric():
+    """The solver is part of BOTH engines' search, so it must be part of both
+    engines' data.  ThompsonZero always emitted solver-labelled samples; if
+    AlphaZero does not, the control trains on a fraction of the signal."""
+    print('\nAlphaZero emits solver-labelled samples too')
+    root = node(player=0)
+    child = node(player=1); root.children[0] = child
+    for i in range(3):
+        child.term[i] = c4._LOSS
+    aux = []
+    az._propagate_solved([(root, 0), (child, 0)], aux)
+    check('a newly solved node emits a sample', len(aux) == 1, f'{len(aux)}')
+    if aux:
+        t = aux[0]
+        check('carries the proven outcome, not a placeholder',
+              float(t['z']) == -1.0, f'{t["z"]}')   # LOSS for the child's mover
+        check('flagged solved', t.get('solved') is True)
+        check('policy target is a distribution',
+              abs(t['pi'].sum() - 1.0) < 1e-9, f'{t["pi"]}')
+    az._propagate_solved([(root, 0), (child, 0)], aux)
+    check('an already-proven edge does not emit again', len(aux) == 1,
+          f'{len(aux)}')
+    # finish_episode must not overwrite an exact proven outcome.
+    samples = [{'z': np.float32(0.0), 'player': 0, 'solved': False},
+               {'z': np.float32(-1.0), 'player': 0, 'solved': True}]
+    az.finish_episode(samples, [1.0, -1.0])
+    check('game outcome stamped on ordinary samples',
+          float(samples[0]['z']) == 1.0)
+    check('proven outcome preserved on solver samples',
+          float(samples[1]['z']) == -1.0, f'{samples[1]["z"]}')
+
+
 def test_loss():
     print('\nAlphaZero loss')
     import torch
@@ -292,6 +364,8 @@ def main():
     test_solver()
     test_visit_policy()
     test_root_noise()
+    test_root_noise_every_move()
+    test_solver_samples_symmetric()
     test_loss()
     test_selfplay_and_strength()
     test_tournament()

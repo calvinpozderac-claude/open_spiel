@@ -168,20 +168,35 @@ def _node_solved_outcome(node):
     return None
 
 
-def _propagate_solved(path):
+def _propagate_solved(path, aux=None):
+    """Prove parent edges bottom-up, and emit an EXACT solver-labelled training
+    sample per newly solved node.
+
+    The ThompsonZero arms have always done this, and for a long time this
+    function did not — which quietly gave them roughly three times the training
+    signal per game (their buffers measured ~70% solver-labelled) while the
+    control trained on self-play moves alone.  The solver is part of both
+    engines' search, so it has to be part of both engines' data."""
     for k in range(len(path) - 1, 0, -1):
-        out = _node_solved_outcome(path[k][0])
+        node = path[k][0]
+        out = _node_solved_outcome(node)
         if out is None:
             break
         parent, pidx = path[k - 1]
         if parent.term[pidx] >= 0:
             break
         _set_term(parent, pidx, int(_FLIP_TERM[out]))
+        if aux is not None and node.obs is not None:
+            aux.append({'obs': node.obs, 'legal': node.legal.copy(),
+                        'pi': visit_policy(node, 1.0).astype(np.float32),
+                        'z': np.float32(1.0 if out == _WIN else
+                                        (-1.0 if out == _LOSS else 0.0)),
+                        'player': int(node.player), 'solved': True})
 
 
-def _backup_terminal(path, value):
+def _backup_terminal(path, value, aux=None):
     _backup(path, value)
-    _propagate_solved(path)
+    _propagate_solved(path, aux)
 
 
 def _descend(root, action):
@@ -233,11 +248,13 @@ def root_value(root):
 def make_target(root):
     return {'obs': root.obs, 'legal': root.legal.copy(),
             'pi': visit_policy(root, 1.0).astype(np.float32),
-            'z': np.float32(0.0), 'player': int(root.player)}
+            'z': np.float32(0.0), 'player': int(root.player), 'solved': False}
 
 
 def finish_episode(samples, returns):
     for s in samples:
+        if s.get('solved'):
+            continue          # already carries an exact proven outcome
         s['z'] = np.float32(returns[s['player']])
     return samples
 
@@ -309,10 +326,23 @@ class Config:
 # Wire format:  request  (worker_id, net_id, obs (n,D) fp16, [legals int32, …])
 #               response [(priors (k,) f32, value float), …]
 
+def noise_root(slot, rng, cfg):
+    """AlphaZero mixes Dirichlet noise into the priors at the root of EVERY
+    move's search.  Subtree reuse means the next root is a node that was
+    expanded as a leaf, so noise has to be applied when the root ADVANCES, not
+    only when one is built from scratch — otherwise a game gets noise on move 1
+    and none afterwards, and the control loses most of its exploration."""
+    if slot['root'] is not None and not slot['noised']:
+        add_root_noise(slot['root'], rng, cfg['root_noise_frac'],
+                       cfg['root_noise_alpha'])
+        slot['noised'] = True
+
+
 def _slot_new(game, cfg, rng, checkpoint_dir):
     sims = cfg['fast_sims'] if rng.random() < cfg['fast_prob'] else cfg['full_sims']
-    slot = {'state': game.new_initial_state(), 'hist': [], 'actions': [],
-            'move': 0, 'sims': sims, 'root': None, 'n': 0, 'pool': None}
+    slot = {'state': game.new_initial_state(), 'hist': [], 'aux': [],
+            'actions': [], 'move': 0, 'sims': sims, 'root': None, 'n': 0,
+            'pool': None, 'noised': False}
     if cfg['pool_prob'] > 0 and rng.random() < cfg['pool_prob']:
         try:
             labels = [f[6:-3] for f in os.listdir(checkpoint_dir)
@@ -342,7 +372,8 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
             result = 'draw' if ret[0] == 0.0 else 'decisive'
         else:
             result = 'cutoff'
-        episode_q.put((s['hist'], 0, result, int(s['move'])))
+        episode_q.put((s['hist'] + s['aux'], len(s['aux']), result,
+                       int(s['move'])))
         slots[i] = _slot_new(game, cfg, rng, ckdir)
 
     slots = [_slot_new(game, cfg, rng, ckdir)
@@ -364,11 +395,12 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                 continue
             if _node_solved_outcome(s['root']) is not None:
                 continue
+            noise_root(s, rng, cfg)
             wave = min(cfg['wave'], s['sims'] - s['n'])
             for _ in range(max(wave, 0)):
                 path, st, val, edge = _select_leaf(s['root'], st0)
                 if st is None:
-                    _backup_terminal(path, val); s['n'] += 1; continue
+                    _backup_terminal(path, val, s['aux']); s['n'] += 1; continue
                 node, idx = edge
                 pending.append((i, path, node, idx))
                 if (id(node), idx) not in seen:
@@ -384,9 +416,9 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                 kind, a, b, player, leg, o = e
                 nd = _AZNode(player, leg, pri, val, obs=o)
                 if kind == 'root':
-                    add_root_noise(nd, rng, cfg['root_noise_frac'],
-                                   cfg['root_noise_alpha'])
                     slots[a]['root'] = nd
+                    slots[a]['noised'] = False
+                    noise_root(slots[a], rng, cfg)
                 else:
                     a.children[b] = nd
         for i, path, node, idx in pending:
@@ -405,6 +437,7 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
             pidx = int(np.nonzero(root.legal == a)[0][0])
             s['actions'].append(int(a))
             s['root'] = root.children[pidx]
+            s['noised'] = False          # the next search needs its own noise
             s['state'].apply_action(a); s['move'] += 1; s['n'] = 0
             if s['state'].is_terminal() or s['move'] >= cfg['max_plies']:
                 finish_and_reset(i)
@@ -426,6 +459,7 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                 (pri, _v), = pool_resp_q.get()
                 a = int(legal[int(np.asarray(pri).argmax())])
             s['root'] = _descend(s['root'], a)
+            s['noised'] = False
             state.apply_action(a); s['actions'].append(a); s['move'] += 1
             if state.is_terminal() or s['move'] >= cfg['max_plies']:
                 finish_and_reset(i)
@@ -655,7 +689,8 @@ if _HAS_TORCH:
             self.stats['games'] += 1; self.stats['plies'] += int(s['move'])
             if result == 'draw':   self.stats['draw'] += 1
             if result == 'cutoff': self.stats['cutoff'] += 1
-            data = s['hist']
+            self.last_aux = len(s['aux'])
+            data = s['hist'] + s['aux']
             self.slots[i] = _slot_new(self.game, self.cfg, self.rng,
                                       self.checkpoint_dir)
             return data
@@ -680,6 +715,7 @@ if _HAS_TORCH:
                 else:
                     a = policy_move(self._pool_net(pool['label']), state, 'cpu')
                 s['root'] = _descend(s['root'], a)
+                s['noised'] = False
                 state.apply_action(a); s['move'] += 1
                 if state.is_terminal() or s['move'] >= self.cfg['max_plies']:
                     done.append(self._finish(i))
@@ -692,11 +728,12 @@ if _HAS_TORCH:
                     evals.append(('root', i, None, s['state'])); continue
                 if _node_solved_outcome(s['root']) is not None:
                     continue
+                noise_root(s, self.rng, self.cfg)
                 wave = min(self.wave, s['sims'] - s['n'])
                 for _ in range(max(wave, 0)):
                     path, st, val, edge = _select_leaf(s['root'], s['state'])
                     if st is None:
-                        _backup_terminal(path, val); s['n'] += 1
+                        _backup_terminal(path, val, s['aux']); s['n'] += 1
                     else:
                         node, idx = edge
                         pending.append((i, path, node, idx))
@@ -713,9 +750,9 @@ if _HAS_TORCH:
                     nd = _AZNode(st.current_player(), leg, r / r.sum(),
                                  float(val), obs=o)
                     if kind == 'root':
-                        add_root_noise(nd, self.rng, self.cfg['root_noise_frac'],
-                                       self.cfg['root_noise_alpha'])
                         self.slots[a]['root'] = nd
+                        self.slots[a]['noised'] = False
+                        noise_root(self.slots[a], self.rng, self.cfg)
                     else:
                         a.children[b] = nd
             for i, path, node, idx in pending:
@@ -733,6 +770,7 @@ if _HAS_TORCH:
                               sample=(s['move'] < self.cfg['temp_threshold']))
                 pidx = int(np.nonzero(root.legal == a)[0][0])
                 s['root'] = root.children[pidx]
+                s['noised'] = False
                 s['state'].apply_action(a); s['move'] += 1; s['n'] = 0
                 if s['state'].is_terminal() or s['move'] >= self.cfg['max_plies']:
                     done.append(self._finish(i))
