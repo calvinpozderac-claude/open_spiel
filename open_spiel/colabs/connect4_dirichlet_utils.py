@@ -1098,6 +1098,16 @@ class Config:
     eval_temp: float = 6.0
     start_elo: float = 1000.0
     eval_device: str = 'cpu'
+    # ── Absolute strength against exactly-solved positions ────────────────────
+    # Every other eval here is RELATIVE (Elo against this run's own earlier
+    # checkpoints), which cannot tell an improving run from a collapsing one
+    # whose opponents collapsed with it.  Point `solved_dir` at a directory of
+    # Pascal Pons' test files and this reports the fraction of solved positions
+    # where the net picks an outcome-preserving move.  Off when unset.
+    solved_dir: str = ''
+    solved_every: int = 0        # 0 → every deep eval
+    solved_n: int = 200          # positions per bucket; 200 gives about +-3.5%
+    solved_sims: int = 0         # 0 → search-free (one batched forward)
 
     def resolved_workers(self):
         if self.selfplay_workers > 0:
@@ -2496,7 +2506,7 @@ if _HAS_TORCH:
     _HIST_KEYS = ('ep', 'loss', 'klv', 'kla', 'cev', 'cea', 'cons', 'draw_pct',
                   'plies', 'buf', 'aux', 'elo', 'quick_ep', 'q_w', 'q_d', 'q_l',
                   'cv_p', 'cv_t', 'ca_p', 'ca_t', 'uv_p', 'uv_t', 'ua_p',
-                  'ua_t', 'unsolved')
+                  'ua_t', 'unsolved', 'solved', 'solved_ep')
     _HIST_QUICK = ('quick_ep', 'q_w', 'q_d', 'q_l')
 
     def _new_hist():
@@ -2649,6 +2659,35 @@ if _HAS_TORCH:
         sig = (cfg.channels, cfg.num_blocks, cfg.head_ch)
         return C4DirichletNet(*sig).to(device), sig
 
+    def _load_solved_suites(cfg, log):
+        """Test suites for the absolute metric, or None when not configured."""
+        if not cfg.solved_dir:
+            return None
+        try:
+            import connect4_solved_eval as sev
+            suites = sev.Suite.build(cfg.solved_dir, limit=cfg.solved_n,
+                                     log=log)
+            log('solved-position eval: '
+                + ', '.join(f'{s.name} n={len(s)}' for s in suites.values()))
+            return suites
+        except Exception as e:
+            log(f'solved-position eval DISABLED ({type(e).__name__}: {e})')
+            return None
+
+    def _solved_eval_line(suites, net, cfg):
+        """(printable line, overall outcome-optimal rate) for one checkpoint."""
+        import connect4_solved_eval as sev
+        chooser, values = sev.thompson_player(
+            net, cfg.eval_device, sims=cfg.solved_sims)
+        parts, tot_n, tot_opt = [], 0, 0.0
+        for s in suites.values():
+            r = s.evaluate(chooser, values)
+            parts.append(f'{s.name} {100 * r["optimal"]:.0f}%')
+            tot_n += r['n']; tot_opt += r['optimal'] * r['n']
+        agg = tot_opt / tot_n if tot_n else float('nan')
+        return (f'optimal {100 * agg:.1f}% over {tot_n} solved positions  ('
+                + '  '.join(parts) + ')'), agg
+
     def run_training(cfg, game=None, log=print):
         """Full self-play + training run.  Prints the same two-tier eval scheme
         as the chess notebook and returns the history dict."""
@@ -2762,6 +2801,8 @@ if _HAS_TORCH:
             hist = old
             start_ep = ckpt['ep'] + 1
             log(f'resumed at ep {ckpt["ep"]}')
+
+        solved_suites = _load_solved_suites(cfg, log)
 
         n_params = sum(p.numel() for p in base_network.parameters())
         log(f'device={device} backend={backend} | params={n_params:,} '
@@ -2916,6 +2957,12 @@ if _HAS_TORCH:
                                        sorted(elo.items(), key=lambda kv: -kv[1])[:6])
                     log(f'ep {ep:6d} | {diag}')
                     log(f'         DEEP Elo@{cfg.eval_sims}: {ladder}')
+                    if solved_suites and (not cfg.solved_every
+                                          or ep % cfg.solved_every == 0):
+                        line, agg = _solved_eval_line(solved_suites, snap, cfg)
+                        hist['solved'].append(agg)
+                        hist['solved_ep'].append(ep)
+                        log(f'         SOLVED {line}')
                 else:
                     eval_net = cpu_clone(base_network, sig)
                     ref = elo_pool.order[-1]

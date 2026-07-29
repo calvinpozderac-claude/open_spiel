@@ -443,3 +443,70 @@ def search_value(shared, arms=('AA', 'AZ'), gen=4000, sims=128, games=40,
         lo, hi = wilson(sc, games)
         log(f'  {name}: searched side scores {100*sc:5.1f}% '
             f'[{100*lo:4.1f},{100*hi:5.1f}]   W{w} D{d_} L{l}')
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Absolute strength: every arm against exactly-solved positions
+#
+#  The round robin ranks the arms against EACH OTHER, which is silent about
+#  whether any of them is actually good.  This scores each checkpoint against
+#  ground truth on the same scale, so arms, generations and engines are all
+#  directly comparable — and a collapsed run reads as collapsed instead of
+#  merely losing.
+# ══════════════════════════════════════════════════════════════════════════════
+def solved_report(shared, solved_dir, gens=(1000, 2000), arms=None, sims=0,
+                  limit=200, log=print, include_random=True):
+    """Score every arm x generation against the solved-position suites.
+
+    `sims=0` is search-free.  Both engines then use the SAME one-ply value
+    lookahead, because AlphaZero has no per-action value head to read and
+    comparing a lookahead against a head-read measures the lookahead.  Set
+    sims>0 to score the full search instead."""
+    import connect4_solved_eval as sev
+    if GAME_REF[0] is None:
+        GAME_REF[0] = c4.load_game()
+        c4.set_game(GAME_REF[0])
+    suites = sev.Suite.build(solved_dir, limit=limit, log=log)
+    players = load_players(shared, gens=gens, arms=arms,
+                           include_random=include_random)
+    rows = {}
+    for label, (engine, net) in players.items():
+        if engine == 'random':
+            chooser, values = sev.random_player(0)
+        elif engine == 'alphazero':
+            chooser, values = sev.alphazero_player(net, 'cpu', sims=sims)
+        else:
+            chooser, values = sev.thompson_player(net, 'cpu', sims=sims,
+                                                  lookahead=(sims == 0))
+        tot_n = 0
+        acc = {'optimal': 0.0, 'perfect': 0.0, 'blunder': 0.0}
+        va = mj = vs = 0.0
+        for s in suites.values():
+            r = s.evaluate(chooser, values)
+            for k in acc:
+                acc[k] += r[k] * r['n']
+            if 'value_acc' in r:
+                va += r['value_acc'] * r['n']
+                mj += r['majority'] * r['n']
+                vs += r['value_sign'] * r['n']
+            tot_n += r['n']
+        row = {k: v / tot_n for k, v in acc.items()}
+        row['n'] = tot_n
+        if values is not None:
+            row.update(value_acc=va / tot_n, majority=mj / tot_n,
+                       value_sign=vs / tot_n)
+        rows[label] = row
+    order = sorted(rows, key=lambda k: -rows[k]['optimal'])
+    log(f'\n=== solved-position strength ('
+        f'{"search-free" if sims == 0 else f"MCTS-{sims}"}, '
+        f'{rows[order[0]]["n"]} positions)')
+    log(f'{"player":<14}{"optimal":>10}{"perfect":>10}{"blunder":>10}'
+        f'{"value":>9}{"base":>7}{"v-sign":>9}')
+    for k in order:
+        r = rows[k]
+        log(f'{k:<14}{100 * r["optimal"]:>9.1f}%{100 * r["perfect"]:>9.1f}%'
+            f'{100 * r["blunder"]:>9.1f}%'
+            + (f'{100 * r["value_acc"]:>8.1f}%{100 * r["majority"]:>6.0f}%'
+               f'{100 * r["value_sign"]:>8.1f}%' if 'value_acc' in r
+               else f'{"-":>9}{"-":>7}{"-":>9}'))
+    return rows

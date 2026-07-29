@@ -305,6 +305,12 @@ class Config:
     weight_decay: float = 1e-4
     grad_clip: float = 1.0
     value_weight: float = 1.0         # loss = policy CE + value_weight * MSE
+    # Absolute strength against exactly-solved positions; see the ThompsonZero
+    # Config for why a relative Elo ladder is not enough.  Off when unset.
+    solved_dir: str = ''
+    solved_every: int = 0
+    solved_n: int = 200
+    solved_sims: int = 0
 
     # eval
     quick_eval_every: int = 250
@@ -1046,6 +1052,33 @@ if _HAS_TORCH:
                     root_noise_frac=cfg.root_noise_frac,
                     root_noise_alpha=cfg.root_noise_alpha)
 
+    def _load_solved_suites(cfg, log):
+        if not cfg.solved_dir:
+            return None
+        try:
+            import connect4_solved_eval as sev
+            suites = sev.Suite.build(cfg.solved_dir, limit=cfg.solved_n,
+                                     log=log)
+            log('solved-position eval: '
+                + ', '.join(f'{s.name} n={len(s)}' for s in suites.values()))
+            return suites
+        except Exception as e:
+            log(f'solved-position eval DISABLED ({type(e).__name__}: {e})')
+            return None
+
+    def _solved_eval_line(suites, net, cfg):
+        import connect4_solved_eval as sev
+        chooser, values = sev.alphazero_player(
+            net, cfg.eval_device, sims=cfg.solved_sims)
+        parts, tot_n, tot_opt = [], 0, 0.0
+        for s in suites.values():
+            r = s.evaluate(chooser, values)
+            parts.append(f'{s.name} {100 * r["optimal"]:.0f}%')
+            tot_n += r['n']; tot_opt += r['optimal'] * r['n']
+        agg = tot_opt / tot_n if tot_n else float('nan')
+        return (f'optimal {100 * agg:.1f}% over {tot_n} solved positions  ('
+                + '  '.join(parts) + ')'), agg
+
     def run_training(cfg, game=None, log=print):
         """Self-play + training, logging in the same shape as the ThompsonZero
         driver so the two runs read alike."""
@@ -1092,7 +1125,8 @@ if _HAS_TORCH:
 
         hist = {'ep': [], 'loss': [], 'pol': [], 'val': [], 'tgt_ent': [],
                 'absv': [], 'draw_pct': [], 'plies': [], 'buf': [],
-                'quick_ep': [], 'q_w': [], 'q_d': [], 'q_l': []}
+                'quick_ep': [], 'q_w': [], 'q_d': [], 'q_l': [],
+                'solved': [], 'solved_ep': []}
         replay_buffer, start_ep = [], 1
         ckpt = load_checkpoint(cfg.checkpoint_dir) if cfg.resume else None
         if ckpt is not None:
@@ -1109,6 +1143,8 @@ if _HAS_TORCH:
                     old[k] = [float('nan')] * n
             hist = old; start_ep = ckpt['ep'] + 1
             log(f'resumed at ep {ckpt["ep"]}')
+
+        solved_suites = _load_solved_suites(cfg, log)
 
         n_params = sum(p.numel() for p in base_network.parameters())
         log(f'device={device} backend={backend} | params={n_params:,} '
@@ -1209,6 +1245,12 @@ if _HAS_TORCH:
                     save_benchmark_net(cfg.checkpoint_dir, str(ep), snap)
                     ref = snap
                     log(f'ep {ep:6d} | {diag}   [checkpoint saved]')
+                    if solved_suites and (not cfg.solved_every
+                                          or ep % cfg.solved_every == 0):
+                        line, agg = _solved_eval_line(solved_suites, snap, cfg)
+                        hist['solved'].append(agg)
+                        hist['solved_ep'].append(ep)
+                        log(f'         SOLVED {line}')
                 else:
                     eval_net = cpu_clone(base_network, sig)
                     w, d, l = quick_match(eval_net, ref, game,
