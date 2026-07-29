@@ -224,7 +224,7 @@ def _move(engine, net, state, sims, rng, bots, eval_temp=6.0):
         return int(leg[rng.integers(len(leg))])
     if engine == 'alphazero':
         if sims <= 0:
-            return az.policy_move(net, state, 'cpu')
+            return az.value_greedy_move(net, state, 'cpu')
         b = bots.get(id(net))
         if b is None:
             b = bots[id(net)] = az.AZMCTSBot(GAME_REF[0], net, 'cpu', sims,

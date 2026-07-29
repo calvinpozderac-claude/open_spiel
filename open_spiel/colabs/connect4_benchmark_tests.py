@@ -290,6 +290,20 @@ def test_selfplay_and_strength():
         w += r > 0; l += r < 0; d += r == 0
     check('MCTS-64 beats random', w >= 9, f'W{w} D{d} L{l}')
 
+    print('\nvalue_greedy_move: one-ply value lookahead, not policy argmax')
+    st = game.new_initial_state()
+    st.apply_action(3)  # one center move played; several legal replies remain
+    mv = az.value_greedy_move(net, st, 'cpu')
+    check('value_greedy_move returns a legal action', mv in st.legal_actions())
+    # A move one ply from a win must be preferred by value lookahead even if
+    # the (untrained, all-zero) policy head has no opinion at all.
+    st2 = game.new_initial_state()
+    for a in (0, 1, 0, 1, 0, 1):
+        st2.apply_action(a)
+    check('value_greedy_move takes the immediate win when one exists',
+          az.value_greedy_move(net, st2, 'cpu') == 0,
+          f'legal={st2.legal_actions()}')
+
 
 def test_tournament():
     print('\nTournament harness (mixed engines)')

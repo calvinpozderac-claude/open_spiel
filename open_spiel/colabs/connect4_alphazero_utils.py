@@ -631,6 +631,36 @@ if _HAS_TORCH:
         leg = state.legal_actions()
         return int(leg[int(np.asarray(lg[0][leg]).argmax())])
 
+    def value_greedy_move(network, state, device):
+        """Search-free move: one-ply lookahead with the value head.
+
+        AlphaZero has no per-action value estimate to read off directly (unlike
+        ThompsonZero's action heads) — the policy head is only a search prior,
+        trained to match visit counts, not to be argmax-accurate on its own. The
+        value head IS a genuine position evaluation, so the comparable
+        search-free move is to actually apply each legal action and take the
+        one whose child position it likes least for the opponent, exactly
+        mirroring how ThompsonZero's value_greedy_move reads its own per-action
+        heads. Terminal children use the true game outcome instead of the net,
+        matching how the network is (never) asked to evaluate terminal states
+        during search."""
+        leg = state.legal_actions()
+        pending_idx, pending_states, vals = [], [], [None] * len(leg)
+        for i, a in enumerate(leg):
+            cs = state.clone()
+            cs.apply_action(int(a))
+            if cs.is_terminal():
+                r = cs.returns()[state.current_player()]
+                vals[i] = float(r)
+            else:
+                pending_idx.append(i)
+                pending_states.append(cs)
+        if pending_states:
+            _lg, v, _o = nn_eval_states(network, device, pending_states)
+            for i, val in zip(pending_idx, v):
+                vals[i] = -float(val)
+        return int(leg[int(np.argmax(vals))])
+
     def quick_match(net_a, net_b, game, n_games, device, rng=None,
                     opening_plies=2, max_plies=42):
         rng = rng or np.random.default_rng()
