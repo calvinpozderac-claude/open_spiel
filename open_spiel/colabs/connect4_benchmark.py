@@ -77,6 +77,7 @@ def thompson_config(name, shared):
     """A ThompsonZero Config from the shared settings plus this arm's rules."""
     _eng, sagg, tagg, _d = ARMS[name]
     return c4.Config(
+        game_name=shared['game'],
         checkpoint_dir=arm_dir(shared['root'], name),
         num_episodes=shared['num_episodes'],
         channels=shared['channels'], num_blocks=shared['num_blocks'],
@@ -87,6 +88,7 @@ def thompson_config(name, shared):
         selection='dirichlet',
         fast_sims=shared['fast_sims'], full_sims=shared['full_sims'],
         fast_prob=shared['fast_prob'], temp_threshold=shared['temp_threshold'],
+        max_plies=shared['max_plies'], eval_max_plies=shared['eval_max_plies'],
         use_workers=shared['use_workers'],
         selfplay_workers=shared['workers'],
         games_per_worker=shared['games_per_worker'],
@@ -111,6 +113,7 @@ def thompson_config(name, shared):
 
 def alphazero_config(shared):
     return az.Config(
+        game_name=shared['game'],
         checkpoint_dir=arm_dir(shared['root'], 'AZ'),
         num_episodes=shared['num_episodes'],
         channels=shared['channels'], num_blocks=shared['num_blocks'],
@@ -121,6 +124,7 @@ def alphazero_config(shared):
         root_noise_alpha=shared['root_noise_alpha'],
         fast_sims=shared['fast_sims'], full_sims=shared['full_sims'],
         fast_prob=shared['fast_prob'], temp_threshold=shared['temp_threshold'],
+        max_plies=shared['max_plies'], eval_max_plies=shared['eval_max_plies'],
         use_workers=shared['use_workers'],
         selfplay_workers=shared['workers'],
         games_per_worker=shared['games_per_worker'],
@@ -146,7 +150,9 @@ def alphazero_config(shared):
 def default_shared(**over):
     """Everything the five arms hold in common.  Override any of it by keyword."""
     s = dict(
-        root='c4_benchmark', num_episodes=2000, seed=0, device='auto',
+        game='connect_four', root='c4_benchmark',
+        num_episodes=2000, seed=0, device='auto',
+        max_plies=42, eval_max_plies=42,
         channels=32, num_blocks=3, head_ch=8,
         fast_sims=50, full_sims=150, fast_prob=0.75, temp_threshold=12,
         use_workers=True, workers=0, games_per_worker=16, worker_wave=4,
@@ -174,12 +180,20 @@ def param_counts(shared):
     same 1x1 head conv — and it is where essentially all the capacity lives.
     The output layers differ because the methods emit different numbers of
     numbers per position: ThompsonZero needs 4 for the state Dirichlet and 4 per
-    action (32 total for 7 columns), AlphaZero needs 7 policy logits and 1 value
-    (8 total).  That is a real difference in what is being predicted, not a
-    handicap, and padding AlphaZero with unused parameters to equalise the total
-    would be worse than reporting it.
+    action, AlphaZero needs one logit per action plus one value.  That is a real
+    difference in what is being predicted, not a handicap, and padding AlphaZero
+    with unused parameters to equalise the total would be worse than reporting
+    it.
+
+    HOW BIG that difference is depends on the action count, and it does not stay
+    negligible.  On Connect 4 (7 actions) the heads are 15% of ThompsonZero and
+    the totals sit 13% apart.  On Othello (65) the action head emits 260 numbers
+    against AlphaZero's 66, the heads become the MAJORITY of ThompsonZero's
+    parameters, and the totals differ by more than a factor of two.  The trunk is
+    still identical, but "the trunk is where the capacity lives" stops being true
+    -- so the ratio is reported and flagged rather than left to be assumed away.
     """
-    game = c4.load_game(); c4.set_game(game)
+    game = c4.load_game(shared['game']); c4.set_game(game)
     sig = (shared['channels'], shared['num_blocks'], shared['head_ch'])
     tz, a = c4.C4DirichletNet(*sig), az.AlphaZeroNet(*sig)
     def split(net, head_names):
@@ -188,17 +202,35 @@ def param_counts(shared):
         return sum(p.numel() for p in net.parameters()) - head, head
     tz_trunk, tz_head = split(tz, {'v_out', 'a_out'})
     az_trunk, az_head = split(a, {'policy_out', 'value_out'})
+    tz_tot, az_tot = tz_trunk + tz_head, az_trunk + az_head
     return {'trunk (identical)': tz_trunk,
             'thompson heads': tz_head, 'alphazero heads': az_head,
-            'thompson total': tz_trunk + tz_head,
-            'alphazero total': az_trunk + az_head,
-            'trunk matches': tz_trunk == az_trunk}
+            'thompson total': tz_tot, 'alphazero total': az_tot,
+            'trunk matches': tz_trunk == az_trunk,
+            'actions': c4._NUM_ACTIONS,
+            'head share of thompson': round(tz_head / tz_tot, 3),
+            'thompson/alphazero params': round(tz_tot / az_tot, 2)}
+
+
+def report_params(shared, log=print):
+    """param_counts, printed, with the caveat spelled out when it matters."""
+    p = param_counts(shared)
+    for k, v in p.items():
+        log(f'  {k:26} {v}')
+    if p['thompson/alphazero params'] > 1.25:
+        log(f'  NOTE at {p["actions"]} actions ThompsonZero carries '
+            f'{p["thompson/alphazero params"]}x AlphaZero\'s parameters and '
+            f'{100 * p["head share of thompson"]:.0f}% of them are in its heads. '
+            f'The trunk is still identical, so search and self-play are matched, '
+            f'but the two networks are NOT the same size — read the AlphaZero '
+            f'row with that in mind.')
+    return p
 
 
 def train_arm(name, shared, log=print):
     """Train one arm to completion.  Resumable: re-running skips finished work
     when `resume` is on, because each driver reloads its own latest.pt."""
-    game = c4.load_game()
+    game = c4.load_game(shared['game'])
     t0 = time.time()
     log(f'\n{"=" * 78}\n=== ARM {name}: {ARMS[name][3]}\n{"=" * 78}')
     if ARMS[name][0] == 'alphazero':
@@ -223,7 +255,12 @@ def train_all(shared, arms=None, log=print):
 #  Round-robin tournament
 # ══════════════════════════════════════════════════════════════════════════════
 def load_players(shared, gens=(1000, 2000), arms=None, include_random=True):
-    """{label: (engine, net)} for every arm × generation that exists on disk."""
+    """{label: (engine, net)} for every arm × generation that exists on disk.
+
+    Also pins the tournament's game from `shared`, so round_robin and the
+    diagnostics below inherit it."""
+    GAME_REF[0] = c4.load_game(shared['game'])
+    c4.set_game(GAME_REF[0])
     sig = (shared['channels'], shared['num_blocks'], shared['head_ch'])
     players = {}
     for name in (arms or list(ARMS)):
@@ -302,12 +339,20 @@ def bradley_terry(W, iters=4000, lr=0.5, anchor_idx=None):
 
 
 def round_robin(players, sims, games_per_pair, seed=12345, log=print,
-                opening_plies=2):
+                opening_plies=2, game=None):
     """Every pair plays `games_per_pair` games, colours alternating.  Returns
-    (names, W, elo)."""
-    if GAME_REF[0] is None:
-        GAME_REF[0] = c4.load_game()
+    (names, W, elo).
+
+    The game comes from load_players (which reads it from `shared`); pass
+    `game` only when calling this without load_players.  It is deliberately not
+    defaulted to Connect 4 -- silently rating Othello networks on the wrong
+    board is exactly the kind of thing that produces a confident wrong table."""
+    if game is not None:
+        GAME_REF[0] = c4.load_game(game) if isinstance(game, str) else game
         c4.set_game(GAME_REF[0])
+    if GAME_REF[0] is None:
+        raise RuntimeError('no game set — call load_players(shared, ...) first, '
+                           'or pass game= explicitly')
     # Search is identical for every player, so the tournament compares NETWORKS
     # rather than two different search procedures.
     c4.set_search(search_agg=c4.AGG_ADDITIVE, target_agg=c4.AGG_ADDITIVE,
@@ -378,7 +423,7 @@ def az_cpuct_sweep(shared, gen=4000, opponent='AA', sims=128, games=60,
     and, worse, was also mis-tuned during self-play, so its training data was
     weaker than it needed to be."""
     if GAME_REF[0] is None:
-        GAME_REF[0] = c4.load_game(); c4.set_game(GAME_REF[0])
+        GAME_REF[0] = c4.load_game(shared['game']); c4.set_game(GAME_REF[0])
     sig = (shared['channels'], shared['num_blocks'], shared['head_ch'])
     a = az.load_benchmark_net(arm_dir(shared['root'], 'AZ'), str(gen), sig)
     o = c4.load_benchmark_net(arm_dir(shared['root'], opponent), str(gen), sig)
@@ -414,7 +459,7 @@ def az_progression(shared, gens=(1000, 2000, 4000), sims=128, games=40,
     the comparison is about a converged AlphaZero; continued improvement means it
     was simply cut off early and the gap partly measures budget, not method."""
     if GAME_REF[0] is None:
-        GAME_REF[0] = c4.load_game(); c4.set_game(GAME_REF[0])
+        GAME_REF[0] = c4.load_game(shared['game']); c4.set_game(GAME_REF[0])
     sig = (shared['channels'], shared['num_blocks'], shared['head_ch'])
     d = arm_dir(shared['root'], 'AZ')
     nets = {g: ('alphazero', az.load_benchmark_net(d, str(g), sig))
@@ -438,7 +483,7 @@ def search_value(shared, arms=('AA', 'AZ'), gen=4000, sims=128, games=40,
     search adds far less than ThompsonZero's, the deficit is in PUCT or the
     scalar value head rather than in the learned policy."""
     if GAME_REF[0] is None:
-        GAME_REF[0] = c4.load_game(); c4.set_game(GAME_REF[0])
+        GAME_REF[0] = c4.load_game(shared['game']); c4.set_game(GAME_REF[0])
     sig = (shared['channels'], shared['num_blocks'], shared['head_ch'])
     log(f'\nWhat search buys — net@{gen} with MCTS-{sims} vs the SAME net '
         f'search-free, {games} games')
@@ -486,7 +531,7 @@ def solved_report(shared, test_dir=None, gens=(1000, 2000), arms=None,
     sims>0 to score the full search instead."""
     import connect4_solved_eval as sev
     if GAME_REF[0] is None:
-        GAME_REF[0] = c4.load_game()
+        GAME_REF[0] = c4.load_game(shared['game'])
         c4.set_game(GAME_REF[0])
     suites = sev.Suite.build(test_dir or shared['solved_dir'],
                              limit=limit, log=log)
@@ -548,7 +593,7 @@ def value_report(shared, test_dir=None, gens=(1000, 2000), arms=None, limit=0,
     AlphaZero -- against the exact outcome in {-1, 0, +1}."""
     import connect4_solved_eval as sev
     if GAME_REF[0] is None:
-        GAME_REF[0] = c4.load_game()
+        GAME_REF[0] = c4.load_game(shared['game'])
         c4.set_game(GAME_REF[0])
     probe = sev.ValueProbe.build(test_dir or shared['solved_dir'],
                                  limit=limit, log=log)

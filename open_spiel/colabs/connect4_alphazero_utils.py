@@ -269,6 +269,7 @@ class Config:
     num_blocks: int = 3
     head_ch: int = 8
     device_preference: str = 'auto'
+    game_name: str = 'connect_four'
     checkpoint_dir: str = 'c4_alphazero_ckpt'
     resume: bool = True
     seed: int = 0
@@ -317,6 +318,13 @@ class Config:
     deep_eval_every: int = 1000
     eval_sims: int = 32
     eval_max_plies: int = 42
+    # Deep-eval Elo ladder, matched to the ThompsonZero arms so the two engines'
+    # ladders mean the same thing.
+    eval_games_per_pair: int = 4
+    eval_last_n: int = 3
+    eval_refresh_pairs: int = 10
+    eval_opening_plies: int = 2
+    start_elo: float = 1000.0
     eval_device: str = 'cpu'
 
     def resolved_workers(self):
@@ -695,7 +703,7 @@ if _HAS_TORCH:
                     leg = st.legal_actions()
                     mv = int(leg[rng.integers(len(leg))])
                 else:
-                    mv = policy_move(net, st, device)
+                    mv = value_greedy_move(net, st, device)
                 st.apply_action(mv); ply += 1
             if not st.is_terminal():
                 d += 1; continue
@@ -976,12 +984,17 @@ if _HAS_TORCH:
         return net
 
     def save_checkpoint(checkpoint_dir, ep, net, optimizer, scheduler, hist,
-                        cfg=None):
+                        cfg=None, elo_pool=None):
         os.makedirs(checkpoint_dir, exist_ok=True)
         c4._assert_finite_sd(_cpu_sd(net), f'latest.pt at ep {ep}')
         blob = {'ep': ep, 'model': _cpu_sd(net), 'optim': optimizer.state_dict(),
                 'sched': scheduler.state_dict() if scheduler else None,
-                'hist': hist, 'cfg': asdict(cfg) if cfg is not None else None}
+                'hist': hist, 'cfg': asdict(cfg) if cfg is not None else None,
+                'elo': elo_pool.elo if elo_pool else {},
+                'order': elo_pool.order if elo_pool else [],
+                'pair_games': ({tuple(sorted(k)): v for k, v
+                                in elo_pool.pair_games.items()}
+                               if elo_pool else {})}
         tmp = os.path.join(checkpoint_dir, 'latest.pt.tmp')
         torch.save(blob, tmp)
         os.replace(tmp, os.path.join(checkpoint_dir, 'latest.pt'))
@@ -1038,7 +1051,7 @@ if _HAS_TORCH:
 
     # ── Training driver ───────────────────────────────────────────────────────
     def _worker_cfg(cfg, sig):
-        return dict(seed=cfg.seed, game_name='connect_four', net_sig=sig,
+        return dict(seed=cfg.seed, game_name=cfg.game_name, net_sig=sig,
                     games_per_worker=cfg.games_per_worker, wave=cfg.worker_wave,
                     n_parallel=cfg.n_parallel_games,
                     wave_per_game=cfg.wave_per_game,
@@ -1050,6 +1063,13 @@ if _HAS_TORCH:
                     c_puct=cfg.c_puct, virtual_loss=cfg.virtual_loss,
                     root_noise_frac=cfg.root_noise_frac,
                     root_noise_alpha=cfg.root_noise_alpha)
+
+    def _elo_bot(game, net, device, sims, batch_size, rng, _temp):
+        return AZMCTSBot(game, net, device, sims, batch_size=batch_size,
+                         random_state=rng)
+
+    def _elo_pick(root, rng):
+        return root_pick(root, rng, sample=False)
 
     def _load_solved_probe(cfg, log):
         if not cfg.solved_dir:
@@ -1076,7 +1096,7 @@ if _HAS_TORCH:
         driver so the two runs read alike."""
         import threading
         from collections import defaultdict
-        game = game or c4.load_game()
+        game = game or c4.load_game(cfg.game_name)
         device, backend = c4.pick_device(cfg.device_preference)
         c4.set_game(game)
         set_search(cfg.c_puct, cfg.virtual_loss)
@@ -1118,7 +1138,17 @@ if _HAS_TORCH:
         hist = {'ep': [], 'loss': [], 'pol': [], 'val': [], 'tgt_ent': [],
                 'absv': [], 'draw_pct': [], 'plies': [], 'buf': [],
                 'quick_ep': [], 'q_w': [], 'q_d': [], 'q_l': [],
-                'solved': [], 'solved_ep': []}
+                'solved': [], 'solved_ep': [], 'elo': []}
+        # The same ladder the ThompsonZero arms are rated on, with this engine's
+        # bot injected — a parallel implementation would be free to drift, and
+        # the whole point of the control is that only the METHOD differs.
+        elo_pool = c4.EloPool(
+            game, cfg.eval_device, eval_sims=cfg.eval_sims,
+            games_per_pair=cfg.eval_games_per_pair, last_n=cfg.eval_last_n,
+            refresh_pairs=cfg.eval_refresh_pairs,
+            opening_plies=cfg.eval_opening_plies,
+            max_eval_plies=cfg.eval_max_plies, start_elo=cfg.start_elo,
+            seed=cfg.seed, bot_factory=_elo_bot, pick=_elo_pick)
         replay_buffer, start_ep = [], 1
         ckpt = load_checkpoint(cfg.checkpoint_dir) if cfg.resume else None
         if ckpt is not None:
@@ -1129,6 +1159,22 @@ if _HAS_TORCH:
                 log('  (no optimizer state — starting Adam moments from zero)')
             if ckpt.get('sched'):
                 scheduler.load_state_dict(ckpt['sched'])
+            elo_pool.elo = dict(ckpt.get('elo') or {})
+            elo_pool.elo.setdefault('random', cfg.start_elo)
+            elo_pool.order = list(ckpt.get('order') or [])
+            elo_pool.pair_games = {frozenset(k): v for k, v
+                                   in (ckpt.get('pair_games') or {}).items()}
+            kept = []
+            for lb in list(elo_pool.order):
+                try:
+                    elo_pool.nets[lb] = load_benchmark_net(cfg.checkpoint_dir,
+                                                           lb, sig)
+                    kept.append(lb)
+                except FileNotFoundError:
+                    log(f'  (benchmark {lb} missing — dropped from the Elo pool)')
+                    elo_pool.elo.pop(lb, None)
+            elo_pool.order = kept
+            elo_pool.players = ['random'] + list(kept)
             old = ckpt.get('hist') or {}; n = len(old.get('ep', []))
             for k in hist:
                 if k not in old:
@@ -1236,7 +1282,13 @@ if _HAS_TORCH:
                     snap = cpu_clone(base_network, sig)
                     save_benchmark_net(cfg.checkpoint_dir, str(ep), snap)
                     ref = snap
-                    log(f'ep {ep:6d} | {diag}   [checkpoint saved]')
+                    elo = elo_pool.add_checkpoint(str(ep), snap)
+                    hist['elo'].append(dict(elo))
+                    ladder = '  '.join(
+                        f'{k}={v:.0f}' for k, v in
+                        sorted(elo.items(), key=lambda kv: -kv[1])[:6])
+                    log(f'ep {ep:6d} | {diag}')
+                    log(f'         DEEP Elo@{cfg.eval_sims}: {ladder}')
                     if solved_probe and (not cfg.solved_every
                                           or ep % cfg.solved_every == 0):
                         line, agg = _solved_eval_line(solved_probe, snap, cfg)
@@ -1254,7 +1306,7 @@ if _HAS_TORCH:
                         f'W{w} D{d} L{l}')
                 log(f'         perf: {perf}')
                 save_checkpoint(cfg.checkpoint_dir, ep, base_network, optimizer,
-                                scheduler, hist, cfg)
+                                scheduler, hist, cfg, elo_pool)
                 bar.reset()
         finally:
             bar.close()

@@ -935,6 +935,7 @@ class Config:
                                       # the action head is nearly free and this
                                       # is NOT the parameter-count lever.
     device_preference: str = 'auto'   # 'cpu' | 'cuda' | 'directml' | 'auto'
+    game_name: str = 'connect_four'
     checkpoint_dir: str = 'c4_dirichlet_ckpt'
     resume: bool = True
     seed: int = 0
@@ -2439,11 +2440,28 @@ if _HAS_TORCH:
     # the last-N checkpoints + random, then `refresh_pairs` random pairs from the
     # whole pool play too (keeps old ratings mixing).  Elo K decays with the
     # number of games a pair has already played, so ratings settle.
+    def _thompson_bot(game, net, device, sims, batch_size, rng, temp):
+        return C4MCTSBot(game, net, device, sims, batch_size=batch_size,
+                         temp=temp, random_state=rng)
+
+    def _thompson_pick(root, rng):
+        return root_pick(root, rng, thompson=False)
+
     class EloPool:
+        """A rating ladder over saved checkpoints, played at a fixed simulation
+        budget.
+
+        Engine-agnostic: `bot_factory` and `pick` are the only two places that
+        know what kind of network this is, so the AlphaZero control uses the
+        same ladder rather than a parallel implementation that could drift."""
+
         def __init__(self, game, device, eval_sims=128, k_base=32.0,
                      k_halflife=30.0, games_per_pair=4, last_n=3,
                      refresh_pairs=10, opening_plies=2, batch_size=16,
-                     start_elo=1000.0, eval_temp=6.0, max_eval_plies=42, seed=0):
+                     start_elo=1000.0, eval_temp=6.0, max_eval_plies=42, seed=0,
+                     bot_factory=None, pick=None):
+            self.bot_factory = bot_factory or _thompson_bot
+            self.pick = pick or _thompson_pick
             self.game, self.device = game, device
             self.eval_sims = eval_sims
             self.eval_temp = eval_temp
@@ -2462,17 +2480,16 @@ if _HAS_TORCH:
             self.pair_games = {}
 
         def _bot(self, label):
-            return C4MCTSBot(self.game, self.nets[label], self.device,
-                             self.eval_sims, batch_size=self.batch_size,
-                             temp=self.eval_temp, random_state=self.rng)
+            return self.bot_factory(self.game, self.nets[label], self.device,
+                                    self.eval_sims, self.batch_size, self.rng,
+                                    self.eval_temp)
 
         def _move(self, label, bot_cache, state):
             if self.nets[label] is None:
                 leg = state.legal_actions()
                 return int(leg[self.rng.integers(len(leg))])
             bot = bot_cache.setdefault(label, self._bot(label))
-            root = bot.mcts_search(state)
-            return root_pick(root, self.rng, thompson=False)
+            return self.pick(bot.mcts_search(state), self.rng)
 
         def _play(self, a, b, bot_cache):
             """One game: `a` moves first.  A couple of random opening plies add
@@ -2689,7 +2706,7 @@ if _HAS_TORCH:
     # ══════════════════════════════════════════════════════════════════════════
     def _worker_cfg(cfg, sig):
         return dict(
-            seed=cfg.seed, game_name='connect_four', net_sig=sig,
+            seed=cfg.seed, game_name=cfg.game_name, net_sig=sig,
             games_per_worker=cfg.games_per_worker, wave=cfg.worker_wave,
             n_parallel=cfg.n_parallel_games, wave_per_game=cfg.wave_per_game,
             fast_sims=cfg.fast_sims, full_sims=cfg.full_sims,
@@ -2735,7 +2752,7 @@ if _HAS_TORCH:
         """Full self-play + training run.  Prints the same two-tier eval scheme
         as the chess notebook and returns the history dict."""
         import threading
-        game = game or load_game()
+        game = game or load_game(cfg.game_name)
         device, backend = pick_device(cfg.device_preference)
         set_game(game)
         set_search(cfg.search_agg, cfg.target_agg, cfg.selection,
@@ -3064,7 +3081,7 @@ if _HAS_TORCH:
         """Pit two saved benchmarks head-to-head at chosen search budgets, or
         measure how much search adds by giving one side sims=0 (search-free).
         `label` may also be 'random'.  Returns (wins_a, draws, wins_b)."""
-        game = game or load_game()
+        game = game or load_game(cfg.game_name)
         set_game(game)
         sig = (cfg.channels, cfg.num_blocks, cfg.head_ch)
         rng = np.random.default_rng(seed)
