@@ -765,3 +765,186 @@ def fetch(directory, url=None, log=print):
                         shutil.copyfileobj(src, out)
         os.remove(dest)
     return [b for b in BUCKETS if os.path.exists(os.path.join(directory, b))]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Fast value probe: one batched forward, per-category MSE
+#
+#  The move-accuracy metric above needs every child solved.  This one needs
+#  nothing but the position scores the files already carry, so it is cheap
+#  enough to run on every deep eval for every model.
+#
+#  The inputs are PRECONFIGURED: observation tensors are built once (replaying
+#  each move sequence through pyspiel is the only slow part) and cached to an
+#  .npz, so an evaluation is a single forward pass over a fixed array with no
+#  per-position Python work at all.  Both engines consume the same observation
+#  format, so one probe serves ThompsonZero, AlphaZero and anything added later.
+#
+#  Reported PER CATEGORY (true value -1 / 0 / +1), not just pooled.  The buckets
+#  are heavily win-skewed for the side to move, so a pooled MSE is dominated by
+#  the majority class: a net that answers "win" to everything gets a good pooled
+#  number and a terrible one on losses.  `mse_macro`, the unweighted mean of the
+#  three, is the imbalance-robust headline.
+# ══════════════════════════════════════════════════════════════════════════════
+_CATS = ((-1, 'loss'), (0, 'draw'), (1, 'win'))
+
+
+class ValueProbe:
+    """Precomputed observations + true values, for a one-forward-pass eval.
+
+    `obs` is (N, obs_dim) float16, `z` is (N,) int8 in {-1, 0, 1} from the
+    perspective of the PLAYER TO MOVE — the same perspective both value heads
+    are trained on, so no flipping is needed anywhere."""
+
+    def __init__(self, obs, z, bucket=None, buckets=None):
+        import numpy as np
+        self.obs = np.asarray(obs, dtype=np.float16)
+        self.z = np.asarray(z, dtype=np.int8)
+        self.bucket = None if bucket is None else np.asarray(bucket, np.int8)
+        self.buckets = list(buckets or [])
+
+    def __len__(self):
+        return len(self.z)
+
+    @classmethod
+    def build(cls, directory, buckets=None, limit=None, cache_path=None,
+              game=None, log=print):
+        """Load the test files and build (or reuse) the observation cache.
+
+        No solving happens here — only the position scores are needed."""
+        import numpy as np
+        cache_path = cache_path or os.path.join(directory, 'value_probe.npz')
+        by_bucket = load_dir(directory, buckets, limit)
+        names = sorted(by_bucket)
+        want = (';'.join(f'{b}:{len(by_bucket[b])}' for b in names))
+        if os.path.exists(cache_path):
+            try:
+                d = np.load(cache_path, allow_pickle=False)
+                if str(d['signature']) == want:
+                    log(f'value probe: {len(d["z"])} positions (cached)')
+                    return cls(d['obs'], d['z'], d['bucket'],
+                               [str(x) for x in d['names']])
+            except Exception:
+                pass
+        import connect4_dirichlet_utils as c4
+        game = game or c4.load_game()
+        obs, z, bkt = [], [], []
+        for bi, b in enumerate(names):
+            recs = by_bucket[b]
+            for st in states_for(recs, game):
+                obs.append(c4.make_obs(st))
+            z.extend(_sign(sc) for _s, sc, _p in recs)
+            bkt.extend([bi] * len(recs))
+            log(f'value probe: {BUCKET_NAMES.get(b, b)} n={len(recs)}')
+        probe = cls(np.asarray(obs, dtype=np.float16), z, bkt, names)
+        np.savez_compressed(cache_path, obs=probe.obs, z=probe.z,
+                            bucket=probe.bucket, names=np.array(names),
+                            signature=np.array(want))
+        return probe
+
+    def evaluate(self, predict):
+        """`predict(obs) -> (N,) scalars in [-1, 1]`.  Returns per-category MSE,
+        the mean prediction per category (which direction the net is wrong in),
+        the pooled MSE and the macro mean."""
+        import numpy as np
+        p = np.asarray(predict(self.obs), dtype=np.float64).reshape(-1)
+        if len(p) != len(self.z):
+            raise ValueError(f'predict returned {len(p)} values for '
+                             f'{len(self.z)} positions')
+        err = (p - self.z.astype(np.float64)) ** 2
+        res = {'n': int(len(p)), 'mse': float(err.mean())}
+        per = []
+        for k, name in _CATS:
+            m = self.z == k
+            res[f'n_{name}'] = int(m.sum())
+            if m.any():
+                res[f'mse_{name}'] = float(err[m].mean())
+                res[f'pred_{name}'] = float(p[m].mean())
+                per.append(res[f'mse_{name}'])
+            else:
+                res[f'mse_{name}'] = float('nan')
+                res[f'pred_{name}'] = float('nan')
+        res['mse_macro'] = float(sum(per) / len(per)) if per else float('nan')
+        return res
+
+    def by_bucket(self, predict):
+        """Same metrics, split by test-set bucket."""
+        import numpy as np
+        p = np.asarray(predict(self.obs), dtype=np.float64).reshape(-1)
+        out = {}
+        for bi, b in enumerate(self.buckets):
+            m = self.bucket == bi
+            if not m.any():
+                continue
+            sub = ValueProbe(self.obs[m], self.z[m])
+            out[BUCKET_NAMES.get(b, b)] = sub.evaluate(lambda _o, _p=p[m]: _p)
+        return out
+
+
+def line(res):
+    """One compact line for a training log."""
+    return (f'value-mse macro {res["mse_macro"]:.3f} pooled {res["mse"]:.3f}  '
+            f'W {res["mse_win"]:.2f} D {res["mse_draw"]:.2f} '
+            f'L {res["mse_loss"]:.2f}  mean-pred '
+            f'W {res["pred_win"]:+.2f} D {res["pred_draw"]:+.2f} '
+            f'L {res["pred_loss"]:+.2f}  n={res["n"]}')
+
+
+def value_report(rows, log=print, title=''):
+    """`rows` is {label: metrics-dict}, best macro-MSE first."""
+    if title:
+        log(f'\n=== {title}')
+    log(f'{"player":<16}{"macro":>8}{"pooled":>8}{"mse W":>8}{"mse D":>8}'
+        f'{"mse L":>8}{"predW":>8}{"predD":>8}{"predL":>8}')
+    for k in sorted(rows, key=lambda k: rows[k]['mse_macro']):
+        r = rows[k]
+        log(f'{k:<16}{r["mse_macro"]:>8.3f}{r["mse"]:>8.3f}'
+            f'{r["mse_win"]:>8.3f}{r["mse_draw"]:>8.3f}{r["mse_loss"]:>8.3f}'
+            f'{r["pred_win"]:>+8.2f}{r["pred_draw"]:>+8.2f}'
+            f'{r["pred_loss"]:>+8.2f}')
+    if rows:
+        r = next(iter(rows.values()))
+        log(f'(n={r["n"]}: win {r["n_win"]}, draw {r["n_draw"]}, '
+            f'loss {r["n_loss"]}.  A constant 0 predictor scores macro '
+            f'{(1 + 0 + 1) / 3:.3f}; predicting +1 always scores macro '
+            f'{(0 + 1 + 4) / 3:.3f}.)')
+    return rows
+
+
+def thompson_value_fn(net, device='cpu', batch=1024):
+    """ThompsonZero's scalar value: the state belief's posterior mean
+    E[win] - E[loss], which is the same [-1, 1] quantity AlphaZero's head
+    outputs.  (The concentration cancels in the mean, so this compares the two
+    engines' point estimates and not their confidence.)"""
+    import numpy as np
+    import torch
+    import connect4_dirichlet_utils as c4
+
+    def predict(obs):
+        out = []
+        for i in range(0, len(obs), batch):
+            x = c4.batch_to_tensor(obs[i:i + batch], device)
+            with torch.inference_mode():
+                v_logits, _vc, _al, _ac = net(x)
+                p3 = torch.softmax(v_logits, dim=-1)
+            q = p3.to('cpu').numpy()
+            out.append(q[:, c4._WIN] - q[:, c4._LOSS])
+        return np.concatenate(out) if out else np.zeros(0)
+    return predict
+
+
+def alphazero_value_fn(net, device='cpu', batch=1024):
+    """AlphaZero's scalar value head, already in [-1, 1]."""
+    import numpy as np
+    import torch
+    import connect4_dirichlet_utils as c4
+
+    def predict(obs):
+        out = []
+        for i in range(0, len(obs), batch):
+            x = c4.batch_to_tensor(obs[i:i + batch], device)
+            with torch.inference_mode():
+                _lg, v = net(x)
+            out.append(np.asarray(v.to('cpu').numpy()).reshape(-1))
+        return np.concatenate(out) if out else np.zeros(0)
+    return predict

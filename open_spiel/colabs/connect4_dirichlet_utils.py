@@ -1102,12 +1102,13 @@ class Config:
     # Every other eval here is RELATIVE (Elo against this run's own earlier
     # checkpoints), which cannot tell an improving run from a collapsing one
     # whose opponents collapsed with it.  Point `solved_dir` at a directory of
-    # Pascal Pons' test files and this reports the fraction of solved positions
-    # where the net picks an outcome-preserving move.  Off when unset.
+    # Pascal Pons' test files and each deep eval reports the value head's MSE
+    # against the exact outcome, PER CATEGORY (win/draw/loss) so a net that
+    # answers "win" to everything cannot hide behind a win-skewed test set.
+    # One batched forward over precomputed observations.  Off when unset.
     solved_dir: str = ''
     solved_every: int = 0        # 0 → every deep eval
-    solved_n: int = 200          # positions per bucket; 200 gives about +-3.5%
-    solved_sims: int = 0         # 0 → search-free (one batched forward)
+    solved_n: int = 0            # positions per bucket; 0 → all of them
 
     def resolved_workers(self):
         if self.selfplay_workers > 0:
@@ -2659,34 +2660,27 @@ if _HAS_TORCH:
         sig = (cfg.channels, cfg.num_blocks, cfg.head_ch)
         return C4DirichletNet(*sig).to(device), sig
 
-    def _load_solved_suites(cfg, log):
-        """Test suites for the absolute metric, or None when not configured."""
+    def _load_solved_probe(cfg, log):
+        """Precomputed value probe for the absolute metric, or None when it is
+        not configured.  Built once; each eval is then one forward pass."""
         if not cfg.solved_dir:
             return None
         try:
             import connect4_solved_eval as sev
-            suites = sev.Suite.build(cfg.solved_dir, limit=cfg.solved_n,
-                                     log=log)
-            log('solved-position eval: '
-                + ', '.join(f'{s.name} n={len(s)}' for s in suites.values()))
-            return suites
+            probe = sev.ValueProbe.build(cfg.solved_dir, limit=cfg.solved_n,
+                                         log=log)
+            return probe
         except Exception as e:
             log(f'solved-position eval DISABLED ({type(e).__name__}: {e})')
             return None
 
-    def _solved_eval_line(suites, net, cfg):
-        """(printable line, overall outcome-optimal rate) for one checkpoint."""
+    def _solved_eval_line(probe, net, cfg):
+        """Per-category value MSE for one checkpoint: a single batched forward
+        over the precomputed observations, so this is cheap enough to run at
+        every deep eval.  Returns (printable line, macro MSE)."""
         import connect4_solved_eval as sev
-        chooser, values = sev.thompson_player(
-            net, cfg.eval_device, sims=cfg.solved_sims)
-        parts, tot_n, tot_opt = [], 0, 0.0
-        for s in suites.values():
-            r = s.evaluate(chooser, values)
-            parts.append(f'{s.name} {100 * r["optimal"]:.0f}%')
-            tot_n += r['n']; tot_opt += r['optimal'] * r['n']
-        agg = tot_opt / tot_n if tot_n else float('nan')
-        return (f'optimal {100 * agg:.1f}% over {tot_n} solved positions  ('
-                + '  '.join(parts) + ')'), agg
+        res = probe.evaluate(sev.thompson_value_fn(net, cfg.eval_device))
+        return sev.line(res), res['mse_macro']
 
     def run_training(cfg, game=None, log=print):
         """Full self-play + training run.  Prints the same two-tier eval scheme
@@ -2802,7 +2796,7 @@ if _HAS_TORCH:
             start_ep = ckpt['ep'] + 1
             log(f'resumed at ep {ckpt["ep"]}')
 
-        solved_suites = _load_solved_suites(cfg, log)
+        solved_probe = _load_solved_probe(cfg, log)
 
         n_params = sum(p.numel() for p in base_network.parameters())
         log(f'device={device} backend={backend} | params={n_params:,} '
@@ -2957,9 +2951,9 @@ if _HAS_TORCH:
                                        sorted(elo.items(), key=lambda kv: -kv[1])[:6])
                     log(f'ep {ep:6d} | {diag}')
                     log(f'         DEEP Elo@{cfg.eval_sims}: {ladder}')
-                    if solved_suites and (not cfg.solved_every
+                    if solved_probe and (not cfg.solved_every
                                           or ep % cfg.solved_every == 0):
-                        line, agg = _solved_eval_line(solved_suites, snap, cfg)
+                        line, agg = _solved_eval_line(solved_probe, snap, cfg)
                         hist['solved'].append(agg)
                         hist['solved_ep'].append(ep)
                         log(f'         SOLVED {line}')

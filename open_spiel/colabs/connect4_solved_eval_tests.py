@@ -275,6 +275,102 @@ def test_adapters():
           > rr['optimal'])
 
 
+def test_value_probe():
+    try:
+        import numpy as np
+        import connect4_dirichlet_utils as c4
+    except Exception:
+        print('\n(torch/pyspiel missing — value-probe tests skipped)')
+        return
+    if not c4._HAS_TORCH:
+        return
+    print('\nValue probe (per-category MSE)')
+    d = tempfile.mkdtemp()
+    ev.generate(os.path.join(d, 'Test_L3_R1'), n=60, min_moves=30,
+                max_moves=36, seed=11, log=None)
+    c4.set_game(c4.load_game())
+    probe = ev.ValueProbe.build(d, log=lambda *a: None)
+    check('probe has one row per position', len(probe) == 60)
+    check('observations are the network input shape',
+          probe.obs.shape == (60, int(np.prod(c4._OBS_SHAPE))),
+          f'{probe.obs.shape}')
+    check('true values are in {-1,0,1}',
+          set(np.unique(probe.z)) <= {-1, 0, 1}, f'{np.unique(probe.z)}')
+    check('cache file written',
+          os.path.exists(os.path.join(d, 'value_probe.npz')))
+
+    # A rebuild must reuse the cache rather than replaying sequences.
+    calls = []
+    orig = ev.states_for
+    ev.states_for = lambda *a, **k: (calls.append(1), orig(*a, **k))[1]
+    try:
+        p2 = ev.ValueProbe.build(d, log=lambda *a: None)
+    finally:
+        ev.states_for = orig
+    check('a rebuild hits the cache', not calls, f'{len(calls)}')
+    check('the cached probe is identical',
+          np.array_equal(p2.z, probe.z) and np.array_equal(p2.obs, probe.obs))
+
+    # Exact predictor -> zero MSE everywhere.  This is what pins the metric.
+    r = probe.evaluate(lambda obs: probe.z.astype(float))
+    check('a perfect predictor scores 0 in every category',
+          r['mse'] == 0.0 and r['mse_macro'] == 0.0, f'{r}')
+
+    # Constant 0: squared error is 1 on wins and losses, 0 on draws.
+    r0 = probe.evaluate(lambda obs: np.zeros(len(probe)))
+    check('constant 0 scores 1.0 on wins and losses',
+          abs(r0['mse_win'] - 1.0) < 1e-12
+          and abs(r0['mse_loss'] - 1.0) < 1e-12, f'{r0}')
+    check('constant 0 scores 0 on draws',
+          r0['n_draw'] == 0 or abs(r0['mse_draw']) < 1e-12)
+
+    # Always-win: 0 on wins, 4 on losses.  The point of per-category reporting
+    # is that this is obvious here and invisible in a pooled number on a
+    # win-skewed set.
+    r1 = probe.evaluate(lambda obs: np.ones(len(probe)))
+    check('always-+1 scores 0 on wins but 4 on losses',
+          abs(r1['mse_win']) < 1e-12 and abs(r1['mse_loss'] - 4.0) < 1e-12,
+          f'{r1}')
+    check('pooled MSE flatters always-+1 relative to its macro',
+          r1['mse'] < r1['mse_macro'], f"{r1['mse']} vs {r1['mse_macro']}")
+    check('mean prediction is reported per category',
+          abs(r1['pred_win'] - 1.0) < 1e-9)
+    check('categories partition the set',
+          r1['n_win'] + r1['n_draw'] + r1['n_loss'] == len(probe))
+
+    # A wrong-length prediction must fail loudly, not silently misalign.
+    bad = False
+    try:
+        probe.evaluate(lambda obs: np.zeros(len(probe) - 1))
+    except ValueError:
+        bad = True
+    check('a wrong-length prediction raises', bad)
+
+    # Both engine adapters must run and stay in range.
+    import torch
+    import connect4_alphazero_utils as az
+    c4.set_backend('cpu', device='cpu')
+    torch.manual_seed(0)
+    tz = c4.C4DirichletNet(16, 1, 4); tz.eval()
+    azn = az.AlphaZeroNet(16, 1, 4); azn.eval()
+    for name, fn in (('thompson', ev.thompson_value_fn(tz, 'cpu')),
+                     ('alphazero', ev.alphazero_value_fn(azn, 'cpu'))):
+        v = np.asarray(fn(probe.obs)).reshape(-1)
+        check(f'{name} adapter returns one value per position',
+              len(v) == len(probe))
+        check(f'{name} values are within [-1, 1]',
+              bool(np.all(np.abs(v) <= 1.0 + 1e-6)), f'{v.min()}..{v.max()}')
+        check(f'{name} evaluate produces finite metrics',
+              np.isfinite(probe.evaluate(fn)['mse_macro']))
+    # An untrained net of either engine sits at value 0, so both must land on
+    # the constant-0 reference.
+    check('untrained nets match the constant-0 reference',
+          abs(probe.evaluate(ev.alphazero_value_fn(azn, 'cpu'))['mse_macro']
+              - r0['mse_macro']) < 1e-6)
+    check('by_bucket splits the report',
+          set(probe.by_bucket(ev.thompson_value_fn(tz, 'cpu'))) == {'End-Easy'})
+
+
 def main():
     test_bitboard()
     test_half()
@@ -284,6 +380,7 @@ def main():
     test_parse_and_roundtrip()
     test_suite_and_oracle()
     test_adapters()
+    test_value_probe()
     print()
     if _fails:
         print(f'{len(_fails)} FAILURES: {_fails}')

@@ -510,3 +510,30 @@ def solved_report(shared, solved_dir, gens=(1000, 2000), arms=None, sims=0,
                f'{100 * r["value_sign"]:>8.1f}%' if 'value_acc' in r
                else f'{"-":>9}{"-":>7}{"-":>9}'))
     return rows
+
+
+def value_report(shared, solved_dir, gens=(1000, 2000), arms=None, limit=0,
+                 log=print, per_bucket=False):
+    """Per-category value MSE for every arm x generation, on one absolute scale.
+
+    Cheap by construction: the observations are built once and every model is
+    then a single batched forward, so this is the metric to watch across a whole
+    benchmark rather than the move-accuracy one that needs children solved."""
+    import connect4_solved_eval as sev
+    if GAME_REF[0] is None:
+        GAME_REF[0] = c4.load_game()
+        c4.set_game(GAME_REF[0])
+    probe = sev.ValueProbe.build(solved_dir, limit=limit, log=log)
+    players = load_players(shared, gens=gens, arms=arms, include_random=False)
+    rows = {}
+    for label, (engine, net) in players.items():
+        fn = (sev.alphazero_value_fn(net, 'cpu') if engine == 'alphazero'
+              else sev.thompson_value_fn(net, 'cpu'))
+        rows[label] = probe.evaluate(fn)
+        if per_bucket:
+            for bname, r in probe.by_bucket(fn).items():
+                rows[f'{label}/{bname}'] = r
+    sev.value_report(rows, log=log,
+                     title=f'value MSE vs exact outcomes ({len(probe)} '
+                           f'positions, lower is better)')
+    return rows
