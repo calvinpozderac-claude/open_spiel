@@ -684,6 +684,74 @@ def test_train_step_learns():
     check('with_consistency=False zeroes the consistency term', pc['cons'] == 0.0)
 
 
+def test_probe_rejects_cpu_fallback():
+    """DirectML implements some operators only by shipping the tensor to the
+    CPU.  That returns the RIGHT numbers, so a correctness-only probe accepts it
+    — and then every loss evaluation pays a host round-trip and a full pipeline
+    sync, three times per training step, on a workload that is already
+    launch-bound.  It also prints an aten::lgamma.out warning on every run.
+    Correct and on-device are two questions and the probe must ask both."""
+    if not c4._HAS_TORCH:
+        return
+    import warnings
+    import torch
+    print('\nthe probe rejects a silent CPU fallback')
+    c4.set_backend('cpu', device='cpu')
+
+    def falls_back(x):
+        warnings.warn("The operator 'aten::lgamma.out' is not currently "
+                      "supported on the DML backend and will fall back to run "
+                      "on the CPU. This may have performance implications.",
+                      UserWarning)
+        return torch.lgamma(x)
+
+    ok, why = c4._probe(falls_back, 'cpu')
+    check('a fallback warning fails the probe', not ok)
+    check('the reason names the operator', 'aten::lgamma.out' in why, why)
+    check('the reason says it runs on the CPU', 'CPU' in why, why)
+
+    # The probe is a deliberate test, so its own warning must not be printed.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        c4._probe(falls_back, 'cpu')
+    check('the probe does not leak the warning it is testing for',
+          not caught, f'{[str(w.message)[:40] for w in caught]}')
+
+    # An unrelated warning must not disqualify a genuinely native kernel.
+    def noisy(x):
+        warnings.warn('unrelated deprecation', DeprecationWarning)
+        return torch.lgamma(x)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        ok2, _ = c4._probe(noisy, 'cpu')
+    check('an unrelated warning does not fail the probe', ok2)
+    check('and the CPU reference call is quiet too', not caught)
+
+    # A real native op still passes, and a wrong one still fails on numbers.
+    ok3, _ = c4._probe(torch.lgamma, 'cpu')
+    check('a native kernel still passes', ok3)
+    ok4, why4 = c4._probe(lambda t: torch.log1p(torch.exp(t)), 'cpu')
+    check('an overflowing kernel still fails on its numbers',
+          not ok4 and 'non-finite' in why4, why4)
+
+    # The hand-rolled series is what a rejected lgamma falls back TO, so it has
+    # to be right across the range the loss uses -- alpha runs from ALPHA_FLOOR
+    # past TERMINAL_CONC, and alpha0 reaches full_sims under the additive rule.
+    xs = torch.tensor([1e-9, 1e-3, 0.1, 1.0, 20.0, 89.0, 200.0, 500.0])
+    for name, got, ref in (('lgamma', c4._lgamma_dml(xs), torch.lgamma(xs)),
+                           ('digamma', c4._digamma_dml(xs), torch.digamma(xs))):
+        err = (got - ref).abs() / ref.abs().clamp_min(1.0)
+        check(f'_{name}_dml matches torch across the loss range '
+              f'(max rel err {float(err.max()):.1e})',
+              float(err.max()) < 1e-5)
+    g = xs.clone().requires_grad_(True)
+    c4._lgamma_dml(g).sum().backward()
+    d = (g.grad - torch.digamma(xs)).abs() / torch.digamma(xs).abs().clamp_min(1.0)
+    check(f'autograd through _lgamma_dml reproduces digamma '
+          f'(max rel err {float(d.max()):.1e})', float(d.max()) < 1e-5)
+    c4.set_backend('cpu', device='cpu')
+
+
 def test_conf_no_overflow():
     """The `additive` rule drives target alpha0 to the visit count, so the
     concentration head is trained toward ~full_sims.  Past x = 88.7 a softplus
@@ -726,12 +794,16 @@ def test_conf_no_overflow():
                               rtol=1e-6, atol=1e-9)))
 
     # The probe is what SELECTS the kernel, so it has to reject a bad one.
-    check('_probe accepts a correct softplus', c4._probe(F.softplus, 'cpu'))
-    check('_probe REJECTS a softplus that overflows at large x',
-          not c4._probe(lambda t: torch.log1p(torch.exp(t)), 'cpu'))
+    # _probe returns (ok, reason) -- index it, a non-empty tuple is truthy.
+    check('_probe accepts a correct softplus', c4._probe(F.softplus, 'cpu')[0])
+    rej, why = c4._probe(lambda t: torch.log1p(torch.exp(t)), 'cpu')
+    check('_probe REJECTS a softplus that overflows at large x', not rej)
+    check('…and says why', 'non-finite' in why, why)
     check('_probe accepts lgamma / digamma / group_norm',
-          c4._probe(torch.lgamma, 'cpu') and c4._probe(torch.digamma, 'cpu')
-          and c4._probe(lambda t: F.group_norm(t, 2), 'cpu', shape=(2, 4, 3, 3)))
+          c4._probe(torch.lgamma, 'cpu')[0]
+          and c4._probe(torch.digamma, 'cpu')[0]
+          and c4._probe(lambda t: F.group_norm(t, 2), 'cpu',
+                        shape=(2, 4, 3, 3))[0])
 
 
 def test_nonfinite_step_is_skipped():
@@ -1082,6 +1154,7 @@ def main():
     test_degenerate_draws()
     test_torch()
     test_torch_losses()
+    test_probe_rejects_cpu_fallback()
     test_conf_no_overflow()
     test_nonfinite_step_is_skipped()
     test_rewind_to_generation()

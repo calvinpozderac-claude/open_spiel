@@ -107,8 +107,10 @@ numpy and imports (and self-tests) without torch or a GPU.
 import math
 import os
 import random
+import re
 import sys
 import time
+import warnings
 from dataclasses import dataclass, asdict
 
 import numpy as np
@@ -1572,35 +1574,63 @@ if _HAS_TORCH:
     # kernels that break do so in the tails, which is precisely where they were
     # never asked.
     _PROBE_MAGS = (1e-9, 1e-3, 0.5, 1.0, 20.0, 89.0, 200.0)
+    # DirectML emits a UserWarning naming the operator and saying it will run on
+    # the CPU instead.  "Correct" and "actually ran on the GPU" are different
+    # questions, and the probe has to ask both: a silent CPU fallback returns the
+    # right numbers, so it passes a correctness check, while copying to host and
+    # back on every call — a full pipeline sync inside the loss, three times per
+    # training step, on a workload that is already launch-bound.
+    _FALLBACK_HINTS = ('not currently supported', 'fall back', 'fallback',
+                       'will run on the cpu')
+
+    def _fallback_warning(caught):
+        """A short reason from the first 'this op is not supported, running on
+        the CPU' warning in `caught`, or ''."""
+        for w in caught:
+            text = str(w.message)
+            if any(h in text.lower() for h in _FALLBACK_HINTS):
+                op = re.search(r"'([^']+)'", text)   # e.g. 'aten::lgamma.out'
+                return (f'{op.group(1)} runs on the CPU' if op
+                        else ' '.join(text.split())[:70])
+        return ''
 
     def _probe(fn, device, shape=(3,)):
-        """Does `fn` run on this device, forward AND backward, and agree with the
-        CPU ACROSS THE RANGE THE LOSS USES?  False on any exception, mismatch,
-        or non-finite value.
+        """Does `fn` run ON THIS DEVICE, forward AND backward, and agree with the
+        CPU ACROSS THE RANGE THE LOSS USES?  Returns (ok, reason-if-not).
 
         Correct-on-easy-inputs is not the question — a wrong kernel here is not
-        caught by any test, it silently poisons a multi-hour run — so this
-        sweeps the real dynamic range and demands finite, CPU-matching output
-        and gradients at every magnitude."""
+        caught by any test, it silently poisons a multi-hour run — so this sweeps
+        the real dynamic range and demands finite, CPU-matching output and
+        gradients at every magnitude, and rejects an operator the backend only
+        implements by shipping the tensor to the CPU."""
         try:
             for mag in _PROBE_MAGS:
                 ref_in = (torch.rand(shape).abs() + 0.5) * mag
                 x = ref_in.to(device).requires_grad_(True)
-                y = fn(x)
-                y.sum().backward()
-                ref_out = fn(ref_in)
+                # Suppress while probing: this call is a deliberate test, so its
+                # warning is an answer rather than something to print.
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter('always')
+                    y = fn(x)
+                    y.sum().backward()
+                why = _fallback_warning(caught)
+                if why:
+                    return False, f'no device kernel ({why})'
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    ref_out = fn(ref_in)   # CPU reference; its noise is not news
                 if not torch.isfinite(y.detach().to('cpu')).all():
-                    return False
+                    return False, f'non-finite output at x~{mag:g}'
                 if not torch.isfinite(ref_out).all():
                     continue        # CPU itself has no finite answer here
                 if not torch.allclose(y.detach().to('cpu'), ref_out,
                                       rtol=1e-3, atol=1e-3):
-                    return False
+                    return False, f'disagrees with the CPU at x~{mag:g}'
                 if x.grad is None or not torch.isfinite(x.grad.to('cpu')).all():
-                    return False
-            return True
-        except Exception:
-            return False
+                    return False, f'bad gradient at x~{mag:g}'
+            return True, ''
+        except Exception as e:
+            return False, f'{type(e).__name__}: {e}'
 
     def set_backend(backend, device=None):
         """Choose fused kernels where the device supports them, hand-rolled
@@ -1612,21 +1642,40 @@ if _HAS_TORCH:
         eight to thirty, and this workload is launch-bound rather than
         FLOP-bound, so the choice matters more than the arithmetic.  Probed
         against the real device because DirectML often implements a forward
-        without its backward."""
+        without its backward, and because it implements some operators only by
+        copying the tensor to the CPU -- which is worse here than the
+        hand-rolled version, since a host round-trip inside the loss
+        synchronises the whole pipeline."""
         global _LG_APPROX
         if device is None:
             _LG_APPROX = (backend == 'directml')
             _NATIVE.update(lgamma=not _LG_APPROX, softplus=True, group_norm=True)
             return
-        _NATIVE['lgamma'] = (_probe(torch.lgamma, device)
-                             and _probe(torch.digamma, device))
-        _NATIVE['softplus'] = _probe(F.softplus, device)
-        _NATIVE['group_norm'] = _probe(lambda t: F.group_norm(t, 2), device,
-                                       shape=(2, 4, 3, 3))
+        why = {}
+
+        def probe(name, fn, **kw):
+            ok, reason = _probe(fn, device, **kw)
+            if not ok:
+                why[name] = reason
+            return ok
+
+        # lgamma and digamma share one flag: the KL needs both, and _lgamma_dml
+        # supplies digamma through its own autograd, so they stand or fall
+        # together.  `&` not `and` so both are probed and both get reported.
+        _NATIVE['lgamma'] = (probe('lgamma', torch.lgamma)
+                             & probe('digamma', torch.digamma))
+        _NATIVE['softplus'] = probe('softplus', F.softplus)
+        _NATIVE['group_norm'] = probe('group_norm',
+                                      lambda t: F.group_norm(t, 2),
+                                      shape=(2, 4, 3, 3))
         _LG_APPROX = not _NATIVE['lgamma']
-        missing = [k for k, v in _NATIVE.items() if not v]
-        print(f'{backend}: no fused kernel for {missing} — using fallbacks'
-              if missing else f'{backend}: all fused kernels available')
+        if why:
+            print(f'{backend}: using fallbacks for '
+                  f'{sorted(k for k, v in _NATIVE.items() if not v)}')
+            for k in sorted(why):
+                print(f'  {k}: {why[k]}')
+        else:
+            print(f'{backend}: all fused kernels available')
 
     def _lg(x):
         return _lgamma_dml(x) if _LG_APPROX else torch.lgamma(x)
