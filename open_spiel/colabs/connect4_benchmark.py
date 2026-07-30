@@ -59,8 +59,18 @@ ARMS = {
 }
 
 
+# Where the solved-position test files live by default: a sibling of the arms'
+# checkpoint directories, so one benchmark root holds everything.
+#     <root>/bench_AA/ ... <root>/bench_AZ/ ... <root>/solved_tests/Test_L3_R1
+SOLVED_SUBDIR = 'solved_tests'
+
+
 def arm_dir(root, name):
     return os.path.join(root, f'bench_{name}')
+
+
+def solved_dir(root):
+    return os.path.join(root, SOLVED_SUBDIR)
 
 
 def thompson_config(name, shared):
@@ -93,6 +103,9 @@ def thompson_config(name, shared):
         quick_eval_games=shared['quick_eval_games'],
         deep_eval_every=shared['deep_eval_every'],
         eval_sims=shared['eval_sims'],
+        solved_dir=shared['solved_dir'],
+        solved_every=shared['solved_every'],
+        solved_n=shared['solved_n'],
         resume=shared['resume'])
 
 
@@ -124,6 +137,9 @@ def alphazero_config(shared):
         quick_eval_games=shared['quick_eval_games'],
         deep_eval_every=shared['deep_eval_every'],
         eval_sims=shared['eval_sims'],
+        solved_dir=shared['solved_dir'],
+        solved_every=shared['solved_every'],
+        solved_n=shared['solved_n'],
         resume=shared['resume'])
 
 
@@ -140,8 +156,14 @@ def default_shared(**over):
         cons_frac=1.0,
         quick_eval_every=250, quick_eval_games=30, deep_eval_every=1000,
         eval_sims=32, resume=True,
-        c_puct=1.5, root_noise_frac=0.25, root_noise_alpha=1.0)
+        c_puct=1.5, root_noise_frac=0.25, root_noise_alpha=1.0,
+        # Absolute strength against exactly-solved positions, reported at every
+        # deep eval for every arm.  Defaults to <root>/solved_tests so it
+        # follows an overridden root; set to '' to switch the metric off.
+        solved_dir=None, solved_every=0, solved_n=0)
     s.update(over)
+    if s['solved_dir'] is None:
+        s['solved_dir'] = os.path.join(s['root'], SOLVED_SUBDIR)
     return s
 
 
@@ -454,8 +476,8 @@ def search_value(shared, arms=('AA', 'AZ'), gen=4000, sims=128, games=40,
 #  directly comparable — and a collapsed run reads as collapsed instead of
 #  merely losing.
 # ══════════════════════════════════════════════════════════════════════════════
-def solved_report(shared, solved_dir, gens=(1000, 2000), arms=None, sims=0,
-                  limit=200, log=print, include_random=True):
+def solved_report(shared, test_dir=None, gens=(1000, 2000), arms=None,
+                  sims=0, limit=200, log=print, include_random=True):
     """Score every arm x generation against the solved-position suites.
 
     `sims=0` is search-free.  Both engines then use the SAME one-ply value
@@ -466,7 +488,8 @@ def solved_report(shared, solved_dir, gens=(1000, 2000), arms=None, sims=0,
     if GAME_REF[0] is None:
         GAME_REF[0] = c4.load_game()
         c4.set_game(GAME_REF[0])
-    suites = sev.Suite.build(solved_dir, limit=limit, log=log)
+    suites = sev.Suite.build(test_dir or shared['solved_dir'],
+                             limit=limit, log=log)
     players = load_players(shared, gens=gens, arms=arms,
                            include_random=include_random)
     rows = {}
@@ -512,8 +535,8 @@ def solved_report(shared, solved_dir, gens=(1000, 2000), arms=None, sims=0,
     return rows
 
 
-def value_report(shared, solved_dir, gens=(1000, 2000), arms=None, limit=0,
-                 log=print, per_bucket=False):
+def value_report(shared, test_dir=None, gens=(1000, 2000), arms=None,
+                 limit=0, log=print, per_bucket=False):
     """Per-category value MSE for every arm x generation, on one absolute scale.
 
     Cheap by construction: the observations are built once and every model is
@@ -523,7 +546,8 @@ def value_report(shared, solved_dir, gens=(1000, 2000), arms=None, limit=0,
     if GAME_REF[0] is None:
         GAME_REF[0] = c4.load_game()
         c4.set_game(GAME_REF[0])
-    probe = sev.ValueProbe.build(solved_dir, limit=limit, log=log)
+    probe = sev.ValueProbe.build(test_dir or shared['solved_dir'],
+                                 limit=limit, log=log)
     players = load_players(shared, gens=gens, arms=arms, include_random=False)
     rows = {}
     for label, (engine, net) in players.items():

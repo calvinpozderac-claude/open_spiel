@@ -7,6 +7,7 @@ tournament harness, and the Bradley-Terry rating fit.  Needs torch and pyspiel;
 the tree half also runs against a tiny mock game.
 """
 
+import os
 import sys
 import numpy as np
 
@@ -372,6 +373,33 @@ def test_matched_settings():
           len({B.arm_dir(shared['root'], n) for n in B.ARMS}) == len(B.ARMS))
 
 
+def test_solved_dir_plumbing():
+    """The notebook configures everything through `shared`, so a Config field
+    that is not forwarded by the builders is unreachable no matter what the
+    engine supports."""
+    print('\nsolved-position directory reaches both engines')
+    s = B.default_shared()
+    check('default_shared exposes solved_dir', bool(s['solved_dir']))
+    check('it sits under the benchmark root',
+          s['solved_dir'] == B.solved_dir(s['root']), s['solved_dir'])
+    check('it follows an overridden root',
+          B.default_shared(root='/tmp/xyz')['solved_dir']
+          == os.path.join('/tmp/xyz', B.SOLVED_SUBDIR))
+    check('an explicit value wins',
+          B.default_shared(solved_dir='/elsewhere')['solved_dir'] == '/elsewhere')
+    check("and '' switches the metric off",
+          B.default_shared(solved_dir='')['solved_dir'] == '')
+    for name, cfg in (('thompson', B.thompson_config('AA', s)),
+                      ('alphazero', B.alphazero_config(s))):
+        check(f'{name} Config gets solved_dir', cfg.solved_dir == s['solved_dir'])
+        check(f'{name} Config gets solved_every',
+              cfg.solved_every == s['solved_every'])
+        check(f'{name} Config gets solved_n', cfg.solved_n == s['solved_n'])
+    check('arms and test set share one root',
+          os.path.dirname(B.arm_dir(s['root'], 'AA'))
+          == os.path.dirname(s['solved_dir']))
+
+
 def main():
     test_puct()
     test_backup_signs()
@@ -384,6 +412,7 @@ def main():
     test_selfplay_and_strength()
     test_tournament()
     test_matched_settings()
+    test_solved_dir_plumbing()
     print()
     if _fails:
         print(f'{len(_fails)} FAILURES: {_fails}')
