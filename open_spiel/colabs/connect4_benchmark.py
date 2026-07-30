@@ -535,13 +535,17 @@ def solved_report(shared, test_dir=None, gens=(1000, 2000), arms=None,
     return rows
 
 
-def value_report(shared, test_dir=None, gens=(1000, 2000), arms=None,
-                 limit=0, log=print, per_bucket=False):
-    """Per-category value MSE for every arm x generation, on one absolute scale.
+def value_report(shared, test_dir=None, gens=(1000, 2000), arms=None, limit=0,
+                 log=print):
+    """Value MSE per difficulty for every arm x generation, on one scale.
 
     Cheap by construction: the observations are built once and every model is
     then a single batched forward, so this is the metric to watch across a whole
-    benchmark rather than the move-accuracy one that needs children solved."""
+    benchmark rather than the move-accuracy one that needs children solved.
+
+    The prediction is the network's scalar value for the player to move --
+    p_win - p_loss from ThompsonZero's state belief, the value head for
+    AlphaZero -- against the exact outcome in {-1, 0, +1}."""
     import connect4_solved_eval as sev
     if GAME_REF[0] is None:
         GAME_REF[0] = c4.load_game()
@@ -553,10 +557,7 @@ def value_report(shared, test_dir=None, gens=(1000, 2000), arms=None,
     for label, (engine, net) in players.items():
         fn = (sev.alphazero_value_fn(net, 'cpu') if engine == 'alphazero'
               else sev.thompson_value_fn(net, 'cpu'))
-        rows[label] = probe.evaluate(fn)
-        if per_bucket:
-            for bname, r in probe.by_bucket(fn).items():
-                rows[f'{label}/{bname}'] = r
+        rows[label] = probe.mse_by_bucket(fn)
     sev.value_report(rows, log=log,
                      title=f'value MSE vs exact outcomes ({len(probe)} '
                            f'positions, lower is better)')

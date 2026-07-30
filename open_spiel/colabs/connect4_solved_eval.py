@@ -317,6 +317,13 @@ BUCKETS = ('Test_L1_R1', 'Test_L1_R2', 'Test_L1_R3',
 BUCKET_NAMES = {'Test_L1_R1': 'Begin-Easy', 'Test_L1_R2': 'Begin-Medium',
                 'Test_L1_R3': 'Begin-Hard', 'Test_L2_R1': 'Middle-Easy',
                 'Test_L2_R2': 'Middle-Medium', 'Test_L3_R1': 'End-Easy'}
+BUCKET_SHORT = {'Test_L1_R1': 'Beg-E', 'Test_L1_R2': 'Beg-M',
+                'Test_L1_R3': 'Beg-H', 'Test_L2_R1': 'Mid-E',
+                'Test_L2_R2': 'Mid-M', 'Test_L3_R1': 'End-E'}
+# Easiest first, which is Pons' own naming read backwards: L3 (most stones on the
+# board) before L1, and R1 before R3 within a stage.  Only a display order.
+BUCKET_ORDER = ('Test_L3_R1', 'Test_L2_R1', 'Test_L2_R2',
+                'Test_L1_R1', 'Test_L1_R2', 'Test_L1_R3')
 SOURCE_URL = 'http://blog.gamesolver.org/solving-connect-four/02-test-protocol/'
 
 
@@ -780,11 +787,13 @@ def fetch(directory, url=None, log=print):
 #  per-position Python work at all.  Both engines consume the same observation
 #  format, so one probe serves ThompsonZero, AlphaZero and anything added later.
 #
-#  Reported PER CATEGORY (true value -1 / 0 / +1), not just pooled.  The buckets
-#  are heavily win-skewed for the side to move, so a pooled MSE is dominated by
-#  the majority class: a net that answers "win" to everything gets a good pooled
-#  number and a terrible one on losses.  `mse_macro`, the unweighted mean of the
-#  three, is the imbalance-robust headline.
+#  Two views of the same numbers.  `mse_by_bucket` gives one MSE per DIFFICULTY,
+#  which is what the training log prints -- the buckets differ in how far into
+#  the game they are and how deep the win is, so that is where a network's
+#  weakness actually shows.  `evaluate` additionally splits by CATEGORY (true
+#  value -1 / 0 / +1), which is worth having because the buckets are win-skewed
+#  for the side to move: a net that answers "win" to everything scores 0.00 on
+#  wins and 4.00 on losses, and pooling hides it.
 # ══════════════════════════════════════════════════════════════════════════════
 _CATS = ((-1, 'loss'), (0, 'draw'), (1, 'win'))
 
@@ -868,46 +877,70 @@ class ValueProbe:
         return res
 
     def by_bucket(self, predict):
-        """Same metrics, split by test-set bucket."""
+        """Full metrics per test-set bucket, easiest bucket first.  One forward
+        pass over the whole probe, then sliced."""
         import numpy as np
         p = np.asarray(predict(self.obs), dtype=np.float64).reshape(-1)
         out = {}
-        for bi, b in enumerate(self.buckets):
-            m = self.bucket == bi
-            if not m.any():
-                continue
+        for b in self._ordered():
+            m = self.bucket == self.buckets.index(b)
             sub = ValueProbe(self.obs[m], self.z[m])
             out[BUCKET_NAMES.get(b, b)] = sub.evaluate(lambda _o, _p=p[m]: _p)
         return out
 
+    def mse_by_bucket(self, predict):
+        """{bucket file name: MSE} in display order, plus 'all' for the pooled
+        value over every position.  MSE is between the network's scalar value
+        prediction and the exact outcome in {-1, 0, +1}."""
+        import numpy as np
+        p = np.asarray(predict(self.obs), dtype=np.float64).reshape(-1)
+        if len(p) != len(self.z):
+            raise ValueError(f'predict returned {len(p)} values for '
+                             f'{len(self.z)} positions')
+        err = (p - self.z.astype(np.float64)) ** 2
+        out = {}
+        for b in self._ordered():
+            out[b] = float(err[self.bucket == self.buckets.index(b)].mean())
+        out['all'] = float(err.mean())
+        return out
 
-def line(res):
-    """One compact line for a training log."""
-    return (f'value-mse macro {res["mse_macro"]:.3f} pooled {res["mse"]:.3f}  '
-            f'W {res["mse_win"]:.2f} D {res["mse_draw"]:.2f} '
-            f'L {res["mse_loss"]:.2f}  mean-pred '
-            f'W {res["pred_win"]:+.2f} D {res["pred_draw"]:+.2f} '
-            f'L {res["pred_loss"]:+.2f}  n={res["n"]}')
+    def _ordered(self):
+        """The buckets actually present, easiest first."""
+        import numpy as np
+        have = {b for bi, b in enumerate(self.buckets)
+                if np.any(self.bucket == bi)}
+        return ([b for b in BUCKET_ORDER if b in have]
+                + [b for b in self.buckets if b not in BUCKET_ORDER
+                   and b in have])
+
+
+def line(d):
+    """One compact line for a training log: the value MSE per difficulty.
+
+    `d` is what mse_by_bucket returns."""
+    return 'value-mse  ' + '  '.join(
+        f'{BUCKET_SHORT.get(k, k)} {v:.3f}' if k != 'all' else f'all {v:.3f}'
+        for k, v in d.items())
 
 
 def value_report(rows, log=print, title=''):
-    """`rows` is {label: metrics-dict}, best macro-MSE first."""
+    """`rows` is {label: {bucket: mse, ..., 'all': mse}} from mse_by_bucket,
+    printed as one column per difficulty, easiest first, best 'all' first."""
     if title:
         log(f'\n=== {title}')
-    log(f'{"player":<16}{"macro":>8}{"pooled":>8}{"mse W":>8}{"mse D":>8}'
-        f'{"mse L":>8}{"predW":>8}{"predD":>8}{"predL":>8}')
-    for k in sorted(rows, key=lambda k: rows[k]['mse_macro']):
+    cols = []
+    for r in rows.values():
+        for k in r:
+            if k not in cols:
+                cols.append(k)
+    head = ''.join(f'{BUCKET_SHORT.get(c, c):>9}' for c in cols)
+    log(f'{"player":<16}{head}')
+    for k in sorted(rows, key=lambda k: rows[k].get('all', float('inf'))):
         r = rows[k]
-        log(f'{k:<16}{r["mse_macro"]:>8.3f}{r["mse"]:>8.3f}'
-            f'{r["mse_win"]:>8.3f}{r["mse_draw"]:>8.3f}{r["mse_loss"]:>8.3f}'
-            f'{r["pred_win"]:>+8.2f}{r["pred_draw"]:>+8.2f}'
-            f'{r["pred_loss"]:>+8.2f}')
-    if rows:
-        r = next(iter(rows.values()))
-        log(f'(n={r["n"]}: win {r["n_win"]}, draw {r["n_draw"]}, '
-            f'loss {r["n_loss"]}.  A constant 0 predictor scores macro '
-            f'{(1 + 0 + 1) / 3:.3f}; predicting +1 always scores macro '
-            f'{(0 + 1 + 4) / 3:.3f}.)')
+        log(f'{k:<16}' + ''.join(
+            (f'{r[c]:>9.3f}' if c in r else f'{"-":>9}') for c in cols))
+    log('(MSE between the value prediction and the exact outcome in {-1,0,+1}; '
+        '0 is perfect, a constant-0 predictor scores 1 minus the draw fraction.)')
     return rows
 
 

@@ -370,6 +370,31 @@ def test_value_probe():
     check('by_bucket splits the report',
           set(probe.by_bucket(ev.thompson_value_fn(tz, 'cpu'))) == {'End-Easy'})
 
+    # Per-difficulty MSE: what the training log prints.
+    d = probe.mse_by_bucket(lambda obs: probe.z.astype(float))
+    check('mse_by_bucket is 0 for a perfect predictor',
+          all(v == 0.0 for v in d.values()), f'{d}')
+    check("mse_by_bucket carries an 'all' key", 'all' in d)
+    check('one entry per bucket present, plus all',
+          len(d) == len(probe.buckets) + 1, f'{list(d)}')
+    d0 = probe.mse_by_bucket(lambda obs: np.zeros(len(probe)))
+    check('constant 0 scores 1 minus the draw fraction',
+          abs(d0['all'] - (1.0 - (probe.z == 0).mean())) < 1e-12, f'{d0}')
+    check("pooled 'all' is the mean over every position, not of the buckets",
+          abs(d0['all'] - float(((0 - probe.z) ** 2).mean())) < 1e-12)
+    bad = False
+    try:
+        probe.mse_by_bucket(lambda obs: np.zeros(len(probe) - 1))
+    except ValueError:
+        bad = True
+    check('a wrong-length prediction raises here too', bad)
+    txt = ev.line(d0)
+    check('line() reports every difficulty', 'value-mse' in txt
+          and all(ev.BUCKET_SHORT[b] in txt for b in probe.buckets), txt)
+    check('line() reports the pooled value last', txt.rstrip().endswith(
+        f'all {d0["all"]:.3f}'), txt)
+
+
 
 def main():
     test_bitboard()

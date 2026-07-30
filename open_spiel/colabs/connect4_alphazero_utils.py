@@ -1064,12 +1064,12 @@ if _HAS_TORCH:
             return None
 
     def _solved_eval_line(probe, net, cfg):
-        """Per-category value MSE for one checkpoint: a single batched forward
+        """Value MSE per difficulty for one checkpoint: a single batched forward
         over the precomputed observations, so this is cheap enough to run at
-        every deep eval.  Returns (printable line, macro MSE)."""
+        every deep eval.  Returns (printable line, pooled MSE)."""
         import connect4_solved_eval as sev
-        res = probe.evaluate(sev.alphazero_value_fn(net, cfg.eval_device))
-        return sev.line(res), res['mse_macro']
+        d = probe.mse_by_bucket(sev.alphazero_value_fn(net, cfg.eval_device))
+        return sev.line(d), d['all']
 
     def run_training(cfg, game=None, log=print):
         """Self-play + training, logging in the same shape as the ThompsonZero
