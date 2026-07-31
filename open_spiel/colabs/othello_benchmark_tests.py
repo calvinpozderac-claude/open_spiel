@@ -226,15 +226,93 @@ def test_end_to_end_arms():
     check('every pair actually played', (W + W.T).sum() > 0)
 
 
+def test_capacity_matching():
+    """Equalising capacity and keeping the trunks identical are different
+    things and cannot both hold; both must work and both must be reported."""
+    print('\ncapacity matching')
+    s = ob.default_shared()
+    check('by default the trunks are identical', ob.az_sig(s) == ob.tz_sig(s))
+    p0 = ob.param_counts(s)
+    check('and totals are then unequal at 65 actions',
+          p0['thompson/alphazero params'] > 1.5,
+          f"{p0['thompson/alphazero params']}")
+
+    m = ob.match_capacity(s, log=lambda *a: None)
+    check('match_capacity does not mutate the input',
+          s.get('az_channels') is None)
+    check('it widens AlphaZero rather than ThompsonZero',
+          m['az_channels'] > s['channels'], f"{m['az_channels']}")
+    check('depth and head width are left alone',
+          ob.az_sig(m)[1:] == ob.tz_sig(m)[1:])
+    p1 = ob.param_counts(m)
+    check('totals now match within 2%',
+          abs(p1['thompson/alphazero params'] - 1.0) < 0.02,
+          f"{p1['thompson/alphazero params']}")
+    check('and the trunks are no longer identical', not p1['trunk matches'])
+    check('the AlphaZero trunk is the thing that grew',
+          p1['alphazero trunk'] > p0['alphazero trunk'])
+    check('ThompsonZero is untouched by the match',
+          p1['thompson total'] == p0['thompson total'])
+
+    # The knob has to reach the Config and the checkpoint loader, or the arm
+    # trains at one width and is rated at another.
+    cfg = ob.alphazero_config(m)
+    check('the widened trunk reaches the AlphaZero Config',
+          (cfg.channels, cfg.num_blocks, cfg.head_ch) == ob.az_sig(m),
+          f'{(cfg.channels, cfg.num_blocks, cfg.head_ch)}')
+    check('the ThompsonZero Config is unaffected',
+          (ob.thompson_config('MA', m).channels,) == (s['channels'],))
+
+    # A round trip through disk at the matched width.
+    import torch
+    d = tempfile.mkdtemp()
+    torch.manual_seed(0)
+    net = az.AlphaZeroNet(*ob.az_sig(m))
+    az.save_benchmark_net(d, '1', net)
+    back = az.load_benchmark_net(d, '1', ob.az_sig(m))
+    check('a matched-width AlphaZero net round-trips through disk',
+          all(torch.equal(a, b) for a, b
+              in zip(net.parameters(), back.parameters())))
+    bad = False
+    try:
+        az.load_benchmark_net(d, '1', ob.tz_sig(m))
+    except Exception:
+        bad = True
+    check('loading it at the WRONG width fails loudly', bad)
+
+    # The ratio shrinking with trunk size is the substantive point.
+    small = ob.param_counts(ob.default_shared(channels=32, num_blocks=3))
+    big = ob.param_counts(ob.default_shared(channels=128, num_blocks=8))
+    check('the mismatch shrinks as the trunk grows',
+          big['thompson/alphazero params'] < small['thompson/alphazero params'],
+          f"{big['thompson/alphazero params']} vs "
+          f"{small['thompson/alphazero params']}")
+
+
+def test_end_to_end_matched_capacity():
+    print('\na capacity-matched AlphaZero arm trains and is rated')
+    game = c4.load_game('othello')
+    c4.set_game(game)
+    s = ob.match_capacity(tiny(), log=lambda *a: None)
+    h = ob.train_arm('AZ', s, log=lambda *a: None)
+    check('it trained', bool(h.get('ep')))
+    check('it produced an Elo ladder', len(h['elo']) >= 1)
+    players = ob.load_players(s, gens=(2,), arms=('AZ',))
+    check('its checkpoint loads at the matched width',
+          any(k.startswith('AZ') for k in players), f'{list(players)}')
+
+
 def main():
     test_game_shape()
     test_observation_perspective()
     test_shared_defaults()
     test_worker_config_carries_the_game()
     test_param_report()
+    test_capacity_matching()
     test_elo_pool_is_engine_agnostic()
     test_alphazero_has_both_evals()
     test_end_to_end_arms()
+    test_end_to_end_matched_capacity()
     print()
     if _fails:
         print(f'{len(_fails)} FAILURES: {_fails}')

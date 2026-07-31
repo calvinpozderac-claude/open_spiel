@@ -108,3 +108,70 @@ def describe(log=print):
         f'noise_alpha={s["root_noise_alpha"]} eval_sims={s["eval_sims"]}')
     return dict(actions=n_act, obs_shape=shape, mean_plies=float(np.mean(lens)),
                 mean_branch=float(np.mean(branch)))
+
+
+#  Candidate trunks, smallest first.  8x8 board games at this scale are usually
+#  run at 64-128 channels and 5-10 residual blocks; the 32/3 default carried over
+#  from Connect 4 is below that range, and Connect 4 is a solved 10^13-state game
+#  where Othello is ~10^28.
+SIZES = ((32, 3, 8), (48, 4, 8), (64, 5, 8), (64, 5, 16),
+         (96, 6, 16), (128, 8, 16), (128, 10, 32))
+
+
+def sizing_table(shared=None, sizes=SIZES, games_per_arm=4000, n_arms=5,
+                 batch=128, log=print):
+    """Parameters and measured forward cost per candidate trunk, plus what each
+    would cost to actually run.
+
+    The throughput is measured HERE, so on a different device only the ratios
+    carry over — but the ratios are the part that decides the size.  The
+    games/hour column is anchored to 0.65 games/s, the rate the Connect 4 runs
+    achieved on an RX 5700 XT at 32/3/8, scaled by this game's evaluations per
+    game and the measured relative cost."""
+    import time
+    import torch
+    import connect4_alphazero_utils as _az
+    import connect4_dirichlet_utils as _c4
+    shared = shared or default_shared()
+    _c4.set_game(_c4.load_game(shared['game']))
+
+    def fwd_ms(net):
+        net.eval()
+        x = torch.randn(batch, *_c4._OBS_SHAPE)
+        with torch.inference_mode():
+            for _ in range(3):
+                net(x)
+            t0 = time.perf_counter()
+            for _ in range(6):
+                net(x)
+        return (time.perf_counter() - t0) / 6 * 1000
+
+    # Evaluations per self-play game, this game vs the Connect 4 reference.
+    ref_evals = 34 * (0.75 * 50 + 0.25 * 150)
+    evals = shared['max_plies'] and (
+        60 * (0.75 * shared['fast_sims'] + 0.25 * shared['full_sims']))
+    ref_rate = 0.65 * ref_evals            # NN evals/s observed at 32/3/8
+
+    log(f'{"trunk":>12}{"TZ params":>11}{"AZ params":>11}{"TZ/AZ":>7}'
+        f'{"rel cost":>10}{"games/s":>9}{"h/arm":>8}{"h x %d" % n_arms:>9}')
+    base, rows = None, []
+    for sig in sizes:
+        tz = _c4.C4DirichletNet(*sig)
+        a = _az.AlphaZeroNet(*sig)
+        ms = fwd_ms(tz)
+        base = base or ms
+        rel = ms / base
+        ntz = sum(p.numel() for p in tz.parameters())
+        naz = sum(p.numel() for p in a.parameters())
+        g = ref_rate / (evals * rel * (64 / 42))
+        h = games_per_arm / g / 3600
+        rows.append(dict(sig=sig, tz=ntz, az=naz, rel=rel, games_s=g, hours=h))
+        log(f'{sig[0]}/{sig[1]}/{sig[2]}'.rjust(12)
+            + f'{ntz:>11,}{naz:>11,}{ntz / naz:>7.2f}{rel:>9.1f}x'
+              f'{g:>9.3f}{h:>8.1f}{h * n_arms:>9.0f}')
+    log('  hours are indicative (tree overhead, batching and DirectML quirks '
+        'are not modelled); the ratios are the reliable part.')
+    log('  note TZ/AZ falls as the trunk grows: the head cost is fixed by the '
+        'action count while the trunk scales, so a size suited to Othello is '
+        'much closer to matched than 32/3/8 is.')
+    return rows

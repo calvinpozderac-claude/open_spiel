@@ -65,6 +65,66 @@ ARMS = {
 SOLVED_SUBDIR = 'solved_tests'
 
 
+def tz_sig(shared):
+    """(channels, num_blocks, head_ch) for the ThompsonZero arms."""
+    return (shared['channels'], shared['num_blocks'], shared['head_ch'])
+
+
+def az_sig(shared):
+    """Same for AlphaZero.  Defaults to ThompsonZero's, so the trunks are
+    identical unless the capacity knobs below are set."""
+    return (shared.get('az_channels') or shared['channels'],
+            shared.get('az_num_blocks') or shared['num_blocks'],
+            shared.get('az_head_ch') or shared['head_ch'])
+
+
+def _total_params(cls, sig):
+    return sum(p.numel() for p in cls(*sig).parameters())
+
+
+def match_capacity(shared, log=print, max_channels=1024):
+    """Return a copy of `shared` with AlphaZero widened to ThompsonZero's total
+    parameter count.
+
+    ThompsonZero emits 4 numbers per action against AlphaZero's one, so at a
+    large action count its output layer alone can outweigh the whole trunk: on
+    Othello at 32 channels it carries 2.09x AlphaZero's parameters.  Matching by
+    padding AlphaZero's HEAD would add parameters where they do nothing -- a
+    wider output projection for the same 66 numbers -- so this widens its TRUNK
+    instead, which is where capacity is actually used.  Depth and head width are
+    left alone so the two networks stay the same shape.
+
+    The trunks are then no longer identical, which was the previous definition of
+    matched.  Both definitions are defensible and they cannot both hold; this
+    picks equal capacity, and report_params prints whichever way it ends up.
+
+    Note the mismatch is largely an artifact of a small trunk: the head cost is
+    fixed while the trunk grows, so the ratio falls from 2.09 at 32 channels to
+    1.08 at 128.  At a size actually suited to Othello there is little to match.
+    """
+    import connect4_alphazero_utils as _az
+    import connect4_dirichlet_utils as _c4
+    game = _c4.load_game(shared['game'])
+    _c4.set_game(game)
+    target = _total_params(_c4.C4DirichletNet, tz_sig(shared))
+    blocks, head = shared['num_blocks'], shared['head_ch']
+    best, best_err = shared['channels'], None
+    ch = max(4, shared['channels'])
+    while ch <= max_channels:
+        err = abs(_total_params(_az.AlphaZeroNet, (ch, blocks, head)) - target)
+        if best_err is None or err < best_err:
+            best, best_err = ch, err
+        if _total_params(_az.AlphaZeroNet, (ch, blocks, head)) > target:
+            break
+        ch += 1
+    out = dict(shared, az_channels=best)
+    got = _total_params(_az.AlphaZeroNet, (best, blocks, head))
+    log(f'capacity match: AlphaZero {shared["channels"]} -> {best} channels '
+        f'({got:,} params vs ThompsonZero {target:,}, '
+        f'{100 * abs(got - target) / target:.1f}% apart)')
+    return out
+
+
 def arm_dir(root, name):
     return os.path.join(root, f'bench_{name}')
 
@@ -112,12 +172,12 @@ def thompson_config(name, shared):
 
 
 def alphazero_config(shared):
+    _ch, _bl, _hd = az_sig(shared)
     return az.Config(
         game_name=shared['game'],
         checkpoint_dir=arm_dir(shared['root'], 'AZ'),
         num_episodes=shared['num_episodes'],
-        channels=shared['channels'], num_blocks=shared['num_blocks'],
-        head_ch=shared['head_ch'], seed=shared['seed'],
+        channels=_ch, num_blocks=_bl, head_ch=_hd, seed=shared['seed'],
         device_preference=shared['device'],
         c_puct=shared['c_puct'],
         root_noise_frac=shared['root_noise_frac'],
@@ -151,6 +211,10 @@ def default_shared(**over):
     """Everything the five arms hold in common.  Override any of it by keyword."""
     s = dict(
         game='connect_four', root='c4_benchmark',
+        # AlphaZero network size.  None = identical to the ThompsonZero trunk.
+        # bench.match_capacity(shared) sets az_channels to equalise total
+        # parameters instead; see its docstring for the trade-off.
+        az_channels=None, az_num_blocks=None, az_head_ch=None,
         num_episodes=2000, seed=0, device='auto',
         max_plies=42, eval_max_plies=42,
         channels=32, num_blocks=3, head_ch=8,
@@ -194,8 +258,8 @@ def param_counts(shared):
     -- so the ratio is reported and flagged rather than left to be assumed away.
     """
     game = c4.load_game(shared['game']); c4.set_game(game)
-    sig = (shared['channels'], shared['num_blocks'], shared['head_ch'])
-    tz, a = c4.C4DirichletNet(*sig), az.AlphaZeroNet(*sig)
+    tz = c4.C4DirichletNet(*tz_sig(shared))
+    a = az.AlphaZeroNet(*az_sig(shared))
     def split(net, head_names):
         head = sum(p.numel() for n, p in net.named_parameters()
                    if n.split('.')[0] in head_names)
@@ -203,10 +267,12 @@ def param_counts(shared):
     tz_trunk, tz_head = split(tz, {'v_out', 'a_out'})
     az_trunk, az_head = split(a, {'policy_out', 'value_out'})
     tz_tot, az_tot = tz_trunk + tz_head, az_trunk + az_head
-    return {'trunk (identical)': tz_trunk,
+    return {'thompson trunk': tz_trunk, 'alphazero trunk': az_trunk,
             'thompson heads': tz_head, 'alphazero heads': az_head,
             'thompson total': tz_tot, 'alphazero total': az_tot,
             'trunk matches': tz_trunk == az_trunk,
+            'thompson trunk sig': tz_sig(shared),
+            'alphazero trunk sig': az_sig(shared),
             'actions': c4._NUM_ACTIONS,
             'head share of thompson': round(tz_head / tz_tot, 3),
             'thompson/alphazero params': round(tz_tot / az_tot, 2)}
@@ -217,13 +283,23 @@ def report_params(shared, log=print):
     p = param_counts(shared)
     for k, v in p.items():
         log(f'  {k:26} {v}')
+    # Warn in BOTH directions: the two definitions of "matched" cannot both
+    # hold, and whichever one is in force is the caveat on the AlphaZero row.
+    tr = p['alphazero trunk'] / p['thompson trunk']
     if p['thompson/alphazero params'] > 1.25:
         log(f'  NOTE at {p["actions"]} actions ThompsonZero carries '
             f'{p["thompson/alphazero params"]}x AlphaZero\'s parameters and '
             f'{100 * p["head share of thompson"]:.0f}% of them are in its heads. '
-            f'The trunk is still identical, so search and self-play are matched, '
-            f'but the two networks are NOT the same size — read the AlphaZero '
-            f'row with that in mind.')
+            f'The trunks are identical, so search and self-play are matched, but '
+            f'the two networks are NOT the same size. bench.match_capacity('
+            f'shared) equalises the totals by widening AlphaZero\'s trunk.')
+    elif tr > 1.25:
+        log(f'  NOTE totals are matched ({p["thompson/alphazero params"]}x) by '
+            f'giving AlphaZero a {tr:.1f}x WIDER trunk. That is the other '
+            f'horn: ThompsonZero\'s extra parameters are an output projection '
+            f'it needs to emit 4 numbers per action, whereas AlphaZero\'s are '
+            f'trunk capacity it can actually compute with. Matching totals may '
+            f'now favour AlphaZero; matching trunks favours ThompsonZero.')
     return p
 
 
@@ -261,7 +337,7 @@ def load_players(shared, gens=(1000, 2000), arms=None, include_random=True):
     diagnostics below inherit it."""
     GAME_REF[0] = c4.load_game(shared['game'])
     c4.set_game(GAME_REF[0])
-    sig = (shared['channels'], shared['num_blocks'], shared['head_ch'])
+    tsig, asig = tz_sig(shared), az_sig(shared)
     players = {}
     for name in (arms or list(ARMS)):
         engine = ARMS[name][0]
@@ -269,8 +345,9 @@ def load_players(shared, gens=(1000, 2000), arms=None, include_random=True):
         for g in gens:
             if not os.path.exists(os.path.join(d, f'bench_{g}.pt')):
                 continue
-            net = (az.load_benchmark_net(d, str(g), sig) if engine == 'alphazero'
-                   else c4.load_benchmark_net(d, str(g), sig))
+            net = (az.load_benchmark_net(d, str(g), asig)
+                   if engine == 'alphazero'
+                   else c4.load_benchmark_net(d, str(g), tsig))
             players[f'{name}@{g}'] = (engine, net)
     if include_random:
         players['random'] = ('random', None)
@@ -424,9 +501,10 @@ def az_cpuct_sweep(shared, gen=4000, opponent='AA', sims=128, games=60,
     weaker than it needed to be."""
     if GAME_REF[0] is None:
         GAME_REF[0] = c4.load_game(shared['game']); c4.set_game(GAME_REF[0])
-    sig = (shared['channels'], shared['num_blocks'], shared['head_ch'])
-    a = az.load_benchmark_net(arm_dir(shared['root'], 'AZ'), str(gen), sig)
-    o = c4.load_benchmark_net(arm_dir(shared['root'], opponent), str(gen), sig)
+    a = az.load_benchmark_net(arm_dir(shared['root'], 'AZ'), str(gen),
+                              az_sig(shared))
+    o = c4.load_benchmark_net(arm_dir(shared['root'], opponent), str(gen),
+                              tz_sig(shared))
     old = az._C_PUCT
     log(f'\nAlphaZero c_puct sweep — AZ@{gen} vs {opponent}@{gen}, '
         f'MCTS-{sims}, {games} games each')
@@ -460,7 +538,7 @@ def az_progression(shared, gens=(1000, 2000, 4000), sims=128, games=40,
     was simply cut off early and the gap partly measures budget, not method."""
     if GAME_REF[0] is None:
         GAME_REF[0] = c4.load_game(shared['game']); c4.set_game(GAME_REF[0])
-    sig = (shared['channels'], shared['num_blocks'], shared['head_ch'])
+    sig = az_sig(shared)
     d = arm_dir(shared['root'], 'AZ')
     nets = {g: ('alphazero', az.load_benchmark_net(d, str(g), sig))
             for g in gens if os.path.exists(os.path.join(d, f'bench_{g}.pt'))}
@@ -484,14 +562,14 @@ def search_value(shared, arms=('AA', 'AZ'), gen=4000, sims=128, games=40,
     scalar value head rather than in the learned policy."""
     if GAME_REF[0] is None:
         GAME_REF[0] = c4.load_game(shared['game']); c4.set_game(GAME_REF[0])
-    sig = (shared['channels'], shared['num_blocks'], shared['head_ch'])
     log(f'\nWhat search buys — net@{gen} with MCTS-{sims} vs the SAME net '
         f'search-free, {games} games')
     for name in arms:
         engine = ARMS[name][0]
         d = arm_dir(shared['root'], name)
-        net = (az.load_benchmark_net(d, str(gen), sig) if engine == 'alphazero'
-               else c4.load_benchmark_net(d, str(gen), sig))
+        net = (az.load_benchmark_net(d, str(gen), az_sig(shared))
+               if engine == 'alphazero'
+               else c4.load_benchmark_net(d, str(gen), tz_sig(shared)))
         rng = np.random.default_rng(seed)
         w = d_ = l = 0
         for g in range(games):
