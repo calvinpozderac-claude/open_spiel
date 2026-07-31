@@ -685,3 +685,100 @@ def value_report(shared, test_dir=None, gens=(1000, 2000), arms=None, limit=0,
                      title=f'value MSE vs exact outcomes ({len(probe)} '
                            f'positions, lower is better)')
     return rows
+
+def game_contrast(games=('connect_four', 'othello'), n=400, seed=0, log=print):
+    """Structural facts that decide which method's advantages transfer.
+
+    Two of ThompsonZero's advantages are game-dependent rather than universal:
+    an explicit draw category is only worth something in a game with draws, and
+    a per-action belief head is only cheap to train when its slots are legal
+    often enough to receive gradient."""
+    import numpy as np
+    import pyspiel
+    rng = np.random.default_rng(seed)
+    log(f'{"game":<14}{"draw %":>9}{"legal/pos":>11}{"plies":>8}'
+        f'{"slots":>7}{"slot use":>10}')
+    out = {}
+    for name in games:
+        g = pyspiel.load_game(name)
+        A = g.num_distinct_actions()
+        draws, legal, lens = 0, [], []
+        for _ in range(n):
+            st = g.new_initial_state()
+            L = 0
+            while not st.is_terminal():
+                la = st.legal_actions()
+                legal.append(len(la))
+                L += 1
+                st.apply_action(int(la[rng.integers(len(la))]))
+            draws += st.returns()[0] == 0
+            lens.append(L)
+        r = dict(draw_pct=100 * draws / n, legal=float(np.mean(legal)),
+                 plies=float(np.mean(lens)), actions=A,
+                 slot_use=float(np.mean(legal)) / A)
+        out[name] = r
+        log(f'{name:<14}{r["draw_pct"]:>8.1f}%{r["legal"]:>11.1f}'
+            f'{r["plies"]:>8.1f}{A:>7}{r["slot_use"]:>9.1%}')
+    log('  draw % is under RANDOM play — read it next to the draw rate your own '
+        'trained runs report, which is the one that matters.')
+    log('  slot use is the fraction of action-head outputs that are legal, and '
+        'so receive gradient, at a typical position.')
+    return out
+
+
+def sims_scaling(shared, a='MA', b='AZ', gen=4000, sims=(32, 64, 128, 256),
+                 games=40, seed=1234, log=print):
+    """Head-to-head at increasing simulation budgets, both sides equal.
+
+    Answers one specific question: does `a`'s advantage over `b` GROW with
+    search?  ThompsonZero's per-action posteriors tighten as an edge collects
+    visits (under the additive rule alpha0 IS the visit count), so if its edge
+    is search-limited the score should climb with sims.  A flat curve says the
+    difference is in the trained networks, not in how much search they are
+    given, and more simulations will not recover it.
+
+    This is an EVALUATION sweep on existing checkpoints — cheap, and it says
+    nothing directly about training with more simulations, which would need a
+    retrain.  It bounds the question rather than settling it."""
+    import numpy as np
+    if GAME_REF[0] is None:
+        GAME_REF[0] = c4.load_game(shared['game'])
+        c4.set_game(GAME_REF[0])
+    c4.set_search(search_agg=c4.AGG_ADDITIVE, target_agg=c4.AGG_ADDITIVE,
+                  selection='dirichlet')
+    pa, pb = None, None
+    for name, slot in ((a, 'a'), (b, 'b')):
+        engine = ARMS[name][0]
+        d = arm_dir(shared['root'], name)
+        sig = az_sig(shared) if engine == 'alphazero' else tz_sig(shared)
+        net = (az.load_benchmark_net(d, str(gen), sig) if engine == 'alphazero'
+               else c4.load_benchmark_net(d, str(gen), sig))
+        if slot == 'a':
+            pa = (engine, net)
+        else:
+            pb = (engine, net)
+    log(f'\n{a}@{gen} vs {b}@{gen} across simulation budgets, {games} games each')
+    log(f'{"sims":>7}{"score":>9}{"W-D-L":>12}{"Elo":>8}{"95% CI":>20}')
+    rows = []
+    for s in sims:
+        rng = np.random.default_rng(seed)
+        w = dr = l = 0
+        for g in range(games):
+            first, second = (pa, pb) if g % 2 == 0 else (pb, pa)
+            r = play_game(first, second, s, rng)
+            r = r if g % 2 == 0 else 1.0 - r
+            w += r == 1.0
+            dr += r == 0.5
+            l += r == 0.0
+        score = (w + 0.5 * dr) / games
+        lo, hi = wilson(score, games)
+        elo = (400 * np.log10(score / (1 - score))
+               if 0 < score < 1 else float('nan'))
+        rows.append(dict(sims=s, score=score, w=w, d=dr, l=l, elo=elo))
+        log(f'{s:>7}{score:>8.1%}{f"{w}-{dr}-{l}":>12}{elo:>8.0f}'
+            f'   [{lo:.1%}, {hi:.1%}]')
+    trend = rows[-1]['score'] - rows[0]['score']
+    log(f'  {a} gains {trend:+.1%} going from {sims[0]} to {sims[-1]} sims. '
+        f'With {games} games a swing under about '
+        f'{2 * (0.5 / games ** 0.5):.0%} is noise.')
+    return rows

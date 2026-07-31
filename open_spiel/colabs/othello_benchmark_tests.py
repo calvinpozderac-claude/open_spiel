@@ -31,12 +31,14 @@ def check(name, cond, detail=''):
 
 def tiny(**over):
     """A benchmark-shaped config small enough to run in seconds."""
-    return ob.default_shared(
+    base = dict(
         root=tempfile.mkdtemp(), num_episodes=2, channels=8, num_blocks=1,
         head_ch=2, fast_sims=8, full_sims=8, n_parallel_games=4,
         wave_per_game=4, pool_prob=0.0, use_workers=False, batch_size=16,
         train_steps_per_ep=2, quick_eval_every=2, deep_eval_every=2,
-        eval_sims=4, quick_eval_games=2, eval_games_per_pair=2, **over)
+        eval_sims=4, quick_eval_games=2, eval_games_per_pair=2)
+    base.update(over)
+    return ob.default_shared(**base)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -302,8 +304,48 @@ def test_end_to_end_matched_capacity():
           any(k.startswith('AZ') for k in players), f'{list(players)}')
 
 
+def test_game_contrast():
+    """The structural facts the method comparison turns on."""
+    print('\ngame contrast: what actually changed from Connect 4')
+    r = ob.game_contrast(n=120, log=lambda *a: None)
+    c, o = r['connect_four'], r['othello']
+    check('Othello has many more action slots', o['actions'] > 9 * c['actions'])
+    check('but only slightly more LEGAL moves per position',
+          1.0 < o['legal'] / c['legal'] < 2.0,
+          f"{o['legal']:.1f} vs {c['legal']:.1f}")
+    check('so head slots go from densely to sparsely supervised',
+          c['slot_use'] > 0.9 and o['slot_use'] < 0.2,
+          f"{c['slot_use']:.2f} -> {o['slot_use']:.2f}")
+    check('and games are much longer', o['plies'] > 2 * c['plies'])
+
+
+def test_sims_scaling():
+    print('\nsims_scaling runs and reports its own noise floor')
+    game = c4.load_game('othello')
+    c4.set_game(game)
+    s = tiny(max_plies=20, eval_max_plies=20, fast_sims=6, full_sims=6)
+    for arm in ('MA', 'AZ'):
+        ob.train_arm(arm, s, log=lambda *a: None)
+    lines = []
+    rows = ob.sims_scaling(s, a='MA', b='AZ', gen=2, sims=(2, 6), games=4,
+                           log=lines.append)
+    check('one row per simulation budget', len(rows) == 2, f'{rows}')
+    check('scores are probabilities',
+          all(0.0 <= r['score'] <= 1.0 for r in rows), f'{rows}')
+    check('win/draw/loss sum to the game count',
+          all(r['w'] + r['d'] + r['l'] == 4 for r in rows), f'{rows}')
+    check('the budgets are the ones asked for',
+          [r['sims'] for r in rows] == [2, 6])
+    check('it states the noise floor rather than leaving it implied',
+          any('noise' in ln for ln in lines), f'{lines[-1:]}')
+    check('it works with the arms reversed',
+          len(ob.sims_scaling(s, a='AZ', b='MA', gen=2, sims=(2,), games=2,
+                              log=lambda *a: None)) == 1)
+
+
 def main():
     test_game_shape()
+    test_game_contrast()
     test_observation_perspective()
     test_shared_defaults()
     test_worker_config_carries_the_game()
@@ -313,6 +355,7 @@ def main():
     test_alphazero_has_both_evals()
     test_end_to_end_arms()
     test_end_to_end_matched_capacity()
+    test_sims_scaling()
     print()
     if _fails:
         print(f'{len(_fails)} FAILURES: {_fails}')
