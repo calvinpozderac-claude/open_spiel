@@ -75,7 +75,19 @@ VAR_FLOOR = 1e-6          # keeps 1/(2v) and log(v) finite
 # KL = log(sigma_pred/sigma_target) to +inf, so proofs get a small floor rather
 # than an exact spike.  1e-4 is sd 0.01, i.e. 0.64 of a disc.
 TERMINAL_VAR = 1e-4
-LOGVAR_MIN, LOGVAR_MAX = -12.0, 2.0     # var in [6e-6, 7.4]
+# Prior spread of an untrained net.  Measured over 2000 random Othello games the
+# final differential has sd 0.291 normalised (18.6 discs, range [-52, +54]), so
+# 0.5 is 1.7x the real spread -- deliberately wide, and in board terms sd 0.5 is
+# a differential of 32, i.e. a 48-16 result, NOT 32 discs of one colour.
+INIT_SD = 0.5
+
+# The network's log-variance is NOT clamped.  A cap would hide a runaway rather
+# than prevent one, and there is no mechanism here that should produce one; if
+# it happens it should be visible and fixed at the source.  What that costs:
+# exp() overflows fp32 above logvar ~88.7 and underflows to 0 below ~-87, so the
+# loss diagnostics report the observed range every eval (`lv_lo`/`lv_hi`) and the
+# training step refuses to apply a non-finite update.  See the drift before the
+# explosion, rather than after.
 
 _WIN, _DRAW, _LOSS = 0, 1, 2            # only for reporting; matches c4
 
@@ -405,13 +417,15 @@ if _HAS_TORCH:
             self.v_out = nn.Linear(flat, 2)                    # mu, logvar
             self.a_out = nn.Linear(flat, c4._NUM_ACTIONS * 2)  # …per action
             # Untrained net: mean 0 (an even game) with a WIDE spread, so search
-            # dominates the prior from generation 0.  log(0.25) ~ -1.39 is sd
-            # 0.5, i.e. +-32 discs — deliberately uninformative.
+            # dominates the prior from generation 0.  INIT_SD = 0.5 is 1.7x the
+            # measured spread of real games — see the note on INIT_SD for what
+            # that means on a board.
             nn.init.zeros_(self.v_out.weight); nn.init.zeros_(self.a_out.weight)
             with torch.no_grad():
-                self.v_out.bias.zero_(); self.v_out.bias[1] = math.log(0.25)
+                lv0 = math.log(INIT_SD ** 2)
+                self.v_out.bias.zero_(); self.v_out.bias[1] = lv0
                 self.a_out.bias.view(c4._NUM_ACTIONS, 2).zero_()
-                self.a_out.bias.view(c4._NUM_ACTIONS, 2)[:, 1] = math.log(0.25)
+                self.a_out.bias.view(c4._NUM_ACTIONS, 2)[:, 1] = lv0
 
         def forward(self, x):
             h = self.head(self.body(self.stem(x)))
@@ -420,12 +434,11 @@ if _HAS_TORCH:
             return v[:, 0], v[:, 1], a[..., 0], a[..., 1]
 
     def _var(logvar):
-        """log-variance → variance, clamped at both ends.
-
-        The floor keeps 1/(2v) finite; the ceiling stops the NLL buying itself a
-        lower loss by declaring everything unpredictable, which is the standard
-        Gaussian-NLL failure mode."""
-        return torch.exp(logvar.clamp(LOGVAR_MIN, LOGVAR_MAX))
+        """log-variance → variance.  Deliberately unclamped: see the note on
+        INIT_SD.  VAR_FLOOR still applies inside kl_t/nll_t, but that is a
+        divide-by-zero guard six orders below any meaningful spread (sd 0.001 is
+        0.064 of a disc), not a cap on what the network may predict."""
+        return torch.exp(logvar)
 
     def kl_t(m1, v1, m2, v2):
         """KL( N(m1,v1) || N(m2,v2) ) in torch.  `1` is the target.
@@ -495,14 +508,16 @@ if _HAS_TORCH:
                  + w_nllv * L_nllv + w_nlla * L_nlla)
         with torch.no_grad():
             evc = evm.sum().clamp_min(1.0)
+            lv = torch.cat([v_lv.reshape(-1),
+                            a_lv.gather(1, act)[mask].reshape(-1)])
             diag = torch.stack([
                 total, L_klv, L_kla, L_nllv, L_nlla,
                 v_mu.mean(), v_var.sqrt().mean(),
                 (q_var.sqrt() * evm).sum() / evc,
                 (meta['ev_var'].sqrt() * evm).sum() / evc,
-                (mask.float().sum(1)).mean(),
+                lv.min(), lv.max(),
             ]).to('cpu', copy=False).tolist()
         parts = dict(zip(('loss', 'klv', 'kla', 'nllv', 'nlla',
-                          'v_mu', 'v_sd', 'a_sd_pred', 'a_sd_tgt', 'n_legal'),
-                         diag))
+                          'v_mu', 'v_sd', 'a_sd_pred', 'a_sd_tgt',
+                          'lv_lo', 'lv_hi'), diag))
         return total, parts

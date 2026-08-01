@@ -311,10 +311,30 @@ def test_network_and_loss():
     check('torch NLL matches the numpy NLL',
           np.allclose(vd.nll_t(a, b, cm).numpy(),
                       vd.nll(a.numpy(), b.numpy(), cm.numpy()), atol=1e-6))
-    check('_var clamps a huge log-variance',
-          float(vd._var(torch.tensor([50.0]))) <= math.exp(vd.LOGVAR_MAX) + 1e-6)
-    check('_var clamps a tiny one',
-          float(vd._var(torch.tensor([-50.0]))) >= math.exp(vd.LOGVAR_MIN) - 1e-12)
+    # The log-variance is deliberately NOT clamped: a cap would hide a runaway
+    # instead of preventing one.  What replaces it is visibility.
+    check('_var does not cap a large log-variance',
+          abs(float(vd._var(torch.tensor([8.0]))) - math.exp(8.0)) < 1e-3,
+          f'{float(vd._var(torch.tensor([8.0])))}')
+    check('_var does not floor a small one',
+          float(vd._var(torch.tensor([-30.0]))) < 1e-12)
+    check('no clamp constants remain',
+          not hasattr(vd, 'LOGVAR_MIN') and not hasattr(vd, 'LOGVAR_MAX'))
+    check('VAR_FLOOR is far below any meaningful spread (a divide-by-zero '
+          'guard, not a cap)',
+          vd.VAR_FLOOR ** 0.5 * vd.SCORE_SCALE < 0.1,
+          f'{vd.VAR_FLOOR ** 0.5 * vd.SCORE_SCALE:.4f} discs')
+
+    # INIT_SD must be honestly described: wider than reality, and it is a
+    # DIFFERENTIAL, so sd 0.5 is a 48-16 board rather than 32 discs of a colour.
+    check('INIT_SD is wider than the measured spread of real games',
+          vd.INIT_SD > 0.291, f'{vd.INIT_SD}')
+    diff = vd.INIT_SD * vd.SCORE_SCALE
+    check('INIT_SD in board terms is a 48-16 differential',
+          abs((64 + diff) / 2 - 48) < 1e-9, f'{(64 + diff) / 2:.0f}')
+    check('the net initialises to exactly INIT_SD',
+          abs(float(vd._var(net.v_out.bias.detach()[1:2]))
+              - vd.INIT_SD ** 2) < 1e-6)
 
 
 def main():
