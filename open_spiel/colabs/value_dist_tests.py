@@ -226,6 +226,10 @@ def test_solver():
     check('carrying the proven value and flagged solved',
           aux and abs(float(aux[0]['v_mu']) - 0.3) < 1e-6      # float32 target
           and aux[0]['solved'], f'{aux[:1]}')
+    check('a proven node trains its NLL on the exact value, not the played-out '
+          'result',
+          abs(float(aux[0]['z']) - 0.3) < 1e-6
+          and float(aux[0]['z_w']) == 1.0, f"{aux[0]['z']}, {aux[0]['z_w']}")
     vd.propagate_solved([(parent, 1), (child, 0)], aux)
     check('an already-proven edge does not emit again', len(aux) == 1)
 

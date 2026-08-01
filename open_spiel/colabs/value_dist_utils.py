@@ -350,8 +350,15 @@ def make_target(root, solved_value=None):
     searched = np.nonzero(root.visits() > 0)[0]
     if solved_value is None:
         v_mu, v_var = node_value(root)
+        # z is filled in by finish_episode once the real result is known.
+        z, z_w = 0.0, 0.0
     else:
         v_mu, v_var = float(solved_value), TERMINAL_VAR
+        # A proven node's final differential is KNOWN exactly, and it is better
+        # information than the played-out result: it is what optimal play from
+        # here yields, whereas the game may have deviated afterwards.  So the
+        # NLL trains on it directly rather than waiting for the outcome.
+        z, z_w = float(solved_value), 1.0
     return {
         'obs': root.obs,
         'legal': root.legal.copy(),
@@ -360,7 +367,7 @@ def make_target(root, solved_value=None):
         'ev_mu': mu[searched].astype(np.float32),
         'ev_var': var[searched].astype(np.float32),
         'played': -1,
-        'z': np.float32(0.0), 'z_w': np.float32(0.0),
+        'z': np.float32(z), 'z_w': np.float32(z_w),
         'solved': solved_value is not None,
         'player': int(root.player),
     }
@@ -510,14 +517,618 @@ if _HAS_TORCH:
             evc = evm.sum().clamp_min(1.0)
             lv = torch.cat([v_lv.reshape(-1),
                             a_lv.gather(1, act)[mask].reshape(-1)])
+            # Means and spreads are reported in DISCS, not in the internal
+            # normalised units.  The scale is X = differential/64, so a
+            # normalised sd of 0.29 is 19 discs of differential — the log line
+            # is what gets read, and it should read in board terms.
+            S = SCORE_SCALE
             diag = torch.stack([
                 total, L_klv, L_kla, L_nllv, L_nlla,
-                v_mu.mean(), v_var.sqrt().mean(),
-                (q_var.sqrt() * evm).sum() / evc,
-                (meta['ev_var'].sqrt() * evm).sum() / evc,
+                v_mu.mean() * S, v_var.sqrt().mean() * S,
+                (q_var.sqrt() * evm).sum() / evc * S,
+                (meta['ev_var'].sqrt() * evm).sum() / evc * S,
                 lv.min(), lv.max(),
             ]).to('cpu', copy=False).tolist()
         parts = dict(zip(('loss', 'klv', 'kla', 'nllv', 'nlla',
                           'v_mu', 'v_sd', 'a_sd_pred', 'a_sd_tgt',
                           'lv_lo', 'lv_hi'), diag))
         return total, parts
+
+    # ── Batching ──────────────────────────────────────────────────────────────
+    def build_batch_meta(batch, device):
+        """Pad the sample dicts into fixed-(B,K) tensors on `device`.
+
+        Packed into one transfer per dtype rather than one per array: DirectML
+        fragments its D3D12 heap under a long run of many small host-to-device
+        copies, which is what killed a multi-hour Dirichlet run."""
+        B = len(batch)
+        K = max(len(s['legal']) for s in batch)
+        act = np.zeros((B, K), np.int64)
+        mask = np.zeros((B, K), bool)
+        ev_mask = np.zeros((B, K), bool)
+        ev_mu = np.zeros((B, K), np.float32)
+        ev_var = np.ones((B, K), np.float32)
+        v_mu = np.zeros(B, np.float32)
+        v_var = np.ones(B, np.float32)
+        z = np.zeros(B, np.float32)
+        z_w = np.zeros(B, np.float32)
+        played = np.zeros(B, np.int64)
+        played_w = np.zeros(B, np.float32)
+        for i, s in enumerate(batch):
+            leg = np.asarray(s['legal'])
+            k = len(leg)
+            act[i, :k] = leg
+            mask[i, :k] = True
+            idx = np.asarray(s['ev_idx'], np.int64)
+            if len(idx):
+                ev_mask[i, idx] = True
+                ev_mu[i, idx] = s['ev_mu']
+                ev_var[i, idx] = s['ev_var']
+            v_mu[i] = s['v_mu']
+            v_var[i] = s['v_var']
+            z[i] = s['z']
+            z_w[i] = s['z_w']
+            p = int(s.get('played', -1))
+            if p >= 0:
+                played[i] = p
+                played_w[i] = 1.0
+        ti = torch.from_numpy(np.concatenate([act.reshape(-1), played])).to(device)
+        tf = torch.from_numpy(np.concatenate([
+            ev_mu.reshape(-1), ev_var.reshape(-1), v_mu, v_var, z, z_w,
+            played_w])).to(device)
+        tb = torch.from_numpy(np.concatenate([
+            mask.reshape(-1), ev_mask.reshape(-1)])).to(device)
+        BK = B * K
+        o = 0
+
+        def nxt(n, shape=None):
+            nonlocal o
+            t = tf[o:o + n]
+            o += n
+            return t.view(*shape) if shape else t
+
+        return {
+            'pad_act': ti[:BK].view(B, K), 'played': ti[BK:BK + B],
+            'pad_mask': tb[:BK].view(B, K),
+            'ev_mask': tb[BK:BK + BK].view(B, K),
+            'ev_mu': nxt(BK, (B, K)), 'ev_var': nxt(BK, (B, K)),
+            'v_mu': nxt(B), 'v_var': nxt(B), 'z': nxt(B), 'z_w': nxt(B),
+            'played_w': nxt(B),
+        }
+
+    def train_step(network, optimizer, batch, device, weights, grad_clip=1.0,
+                   model_lock=None):
+        """One optimiser step.  A non-finite loss or gradient is SKIPPED, never
+        applied: clip_grad_norm_ turns a NaN norm into a NaN scale and the
+        optimiser then poisons every weight and moment.  With the log-variance
+        deliberately unclamped this is the guard that makes a runaway visible
+        and survivable instead of silently fatal."""
+        import contextlib
+        lock = model_lock or contextlib.nullcontext()
+
+        def _once():
+            meta = build_batch_meta(batch, device)
+            x = c4.batch_to_tensor([s['obs'] for s in batch], device)
+            with lock:
+                out = network(x)
+                optimizer.zero_grad()
+                loss, parts = full_loss(out, meta, weights)
+                loss.backward()
+                gnorm = torch.nn.utils.clip_grad_norm_(network.parameters(),
+                                                       grad_clip)
+                ok = (math.isfinite(parts['loss'])
+                      and bool(torch.isfinite(gnorm)))
+                if ok:
+                    optimizer.step()
+                else:
+                    optimizer.zero_grad(set_to_none=True)
+                parts['nonfinite'] = 0.0 if ok else 1.0
+            return parts['loss'], parts
+
+        return c4.device_retry(_once)
+
+    # ── Bots ──────────────────────────────────────────────────────────────────
+    class GMCTSBot:
+        """Batched Thompson-sampling search over Gaussian beliefs."""
+
+        def __init__(self, game, network, device, max_simulations, batch_size=8,
+                     temp=1.0, random_state=None):
+            self.game, self.network, self.device = game, network, device
+            self.max_simulations = max_simulations
+            self.batch_size = batch_size
+            self.temp = temp
+            self._rng = random_state or np.random.default_rng()
+
+        def mcts_search(self, state, root=None):
+            if root is None:
+                root = expand_node(self.network, self.device, state)
+            sims = 0
+            while sims < self.max_simulations:
+                if node_solved(root) is not None:
+                    break
+                wave = min(self.batch_size, self.max_simulations - sims)
+                pending, uniq = [], {}
+                for _ in range(wave):
+                    path, st, val, edge = select_leaf(root, state, self._rng,
+                                                      self.temp)
+                    if st is None:
+                        backup_terminal(path, val[0], val[1])
+                        sims += 1
+                    else:
+                        node, idx = edge
+                        pending.append((path, node, idx))
+                        uniq.setdefault((id(node), idx), (node, idx, st))
+                if uniq:
+                    items = list(uniq.values())
+                    vm, vv, am, av, ob = nn_eval_states(
+                        self.network, self.device, [e[2] for e in items])
+                    for (node, idx, st), m, v, a_m, a_v, o in zip(
+                            items, vm, vv, am, av, ob):
+                        leg = st.legal_actions()
+                        node.children[idx] = GNode(st.current_player(), leg,
+                                                   a_m[leg], a_v[leg], m, v,
+                                                   obs=o)
+                for path, node, idx in pending:
+                    ch = node.children[idx]
+                    backup(path, -ch.mu, ch.var)     # child's view -> parent's
+                    sims += 1
+            return root
+
+    def value_greedy_move(network, state, device):
+        """Search-free: the action head's own believed mean, nothing expanded."""
+        _vm, _vv, am, _av, _o = nn_eval_states(network, device, [state])
+        leg = state.legal_actions()
+        return int(leg[int(np.asarray(am[0][leg]).argmax())])
+
+    def value_lookahead_move(network, state, device):
+        """Search-free with ONE ply: apply each move, score the child with the
+        STATE head, negate, true outcome for terminal children.  This is the
+        like-for-like read across engines — see c4.value_lookahead_move."""
+        leg = state.legal_actions()
+        vals = [None] * len(leg)
+        pend_i, pend_s = [], []
+        for i, a in enumerate(leg):
+            cs = state.clone()
+            cs.apply_action(int(a))
+            if cs.is_terminal():
+                vals[i] = othello_score(cs, state.current_player())
+            else:
+                pend_i.append(i)
+                pend_s.append(cs)
+        if pend_s:
+            vm, _vv, _am, _av, _o = nn_eval_states(network, device, pend_s)
+            for i, m in zip(pend_i, vm):
+                vals[i] = -float(m)
+        return int(leg[int(np.argmax(vals))])
+
+    # ── Self-play ─────────────────────────────────────────────────────────────
+    def _slot_new(game, cfg, rng):
+        return {'state': game.new_initial_state(), 'hist': [], 'aux': [],
+                'move': 0, 'root': None, 'n': 0,
+                'sims': (cfg['fast_sims'] if rng.random() < cfg['fast_prob']
+                         else cfg['full_sims'])}
+
+    class ParallelSelfPlay:
+        """`n_parallel` games advanced in lockstep so every leaf wave is one
+        batched forward.  Mirrors the AlphaZero driver's shape, so the arms are
+        matched on self-play as well as on the trunk."""
+
+        def __init__(self, game, network, device, cfg, seed=None):
+            self.game, self.network, self.device = game, network, device
+            self.cfg = cfg
+            self.rng = np.random.default_rng(seed)
+            self.last_aux = 0
+            self.stats = {'games': 0, 'draw': 0, 'plies': 0, 'cutoff': 0}
+            self.fwd_calls = self.fwd_rows = 0
+            self.slots = [_slot_new(game, cfg, self.rng)
+                          for _ in range(cfg['n_parallel'])]
+            self._done = []
+
+        def _finish(self, i):
+            s = self.slots[i]
+            st = s['state']
+            if st.is_terminal():
+                finish_episode(s['hist'], st)
+                sc = othello_score(st, 0)
+                self.stats['draw'] += sc == 0
+            else:
+                self.stats['cutoff'] += 1
+                s['hist'] = []
+            self.stats['games'] += 1
+            self.stats['plies'] += s['move']
+            self.last_aux = len(s['aux'])
+            out = s['hist'] + s['aux']
+            self.slots[i] = _slot_new(self.game, self.cfg, self.rng)
+            return out
+
+        def episodes(self):
+            cfg = self.cfg
+            while True:
+                idxs = list(range(len(self.slots)))
+                # 1. make sure every slot has a root
+                need = [i for i in idxs if self.slots[i]['root'] is None]
+                if need:
+                    states = [self.slots[i]['state'] for i in need]
+                    vm, vv, am, av, ob = nn_eval_states(self.network,
+                                                        self.device, states)
+                    self.fwd_calls += 1; self.fwd_rows += len(states)
+                    for j, i in enumerate(need):
+                        st = states[j]
+                        leg = st.legal_actions()
+                        self.slots[i]['root'] = GNode(
+                            st.current_player(), leg, am[j][leg], av[j][leg],
+                            vm[j], vv[j], obs=ob[j])
+                # 2. one wave of leaves across all slots
+                pending, uniq = [], {}
+                for i in idxs:
+                    s = self.slots[i]
+                    if node_solved(s['root']) is not None:
+                        continue
+                    for _ in range(cfg['wave_per_game']):
+                        path, st, val, edge = select_leaf(
+                            s['root'], s['state'], self.rng, cfg['temp'])
+                        if st is None:
+                            backup_terminal(path, val[0], val[1], s['aux'])
+                            s['n'] += 1
+                        else:
+                            node, idx = edge
+                            pending.append((i, path, node, idx))
+                            uniq.setdefault((id(node), idx), (node, idx, st))
+                if uniq:
+                    items = list(uniq.values())
+                    vm, vv, am, av, ob = nn_eval_states(
+                        self.network, self.device, [e[2] for e in items])
+                    self.fwd_calls += 1; self.fwd_rows += len(items)
+                    for (node, idx, st), m, v, a_m, a_v, o in zip(
+                            items, vm, vv, am, av, ob):
+                        leg = st.legal_actions()
+                        node.children[idx] = GNode(st.current_player(), leg,
+                                                   a_m[leg], a_v[leg], m, v,
+                                                   obs=o)
+                for i, path, node, idx in pending:
+                    ch = node.children[idx]
+                    backup(path, -ch.mu, ch.var)
+                    self.slots[i]['n'] += 1
+                # 3. advance any slot whose search budget is spent
+                for i in idxs:
+                    s = self.slots[i]
+                    root = s['root']
+                    if root is None:
+                        continue
+                    if s['n'] < s['sims'] and node_solved(root) is None:
+                        continue
+                    t = make_target(root)
+                    a = root_pick(root, self.rng,
+                                  thompson=s['move'] < cfg['temp_threshold'],
+                                  temp=cfg['temp'])
+                    pidx = int(np.nonzero(root.legal == a)[0][0])
+                    t['played'] = pidx
+                    s['hist'].append(t)
+                    s['state'].apply_action(a)
+                    s['move'] += 1
+                    s['n'] = 0
+                    s['root'] = root.children[pidx]
+                    if (s['state'].is_terminal()
+                            or s['move'] >= cfg['max_plies']):
+                        out = self._finish(i)
+                        if out:
+                            yield out
+
+        def shutdown(self):
+            pass
+
+    def quick_match(net_a, net_b, game, n_games, device, rng=None,
+                    opening_plies=2, max_plies=128):
+        """Search-free match, alternating colours.  Uses the one-ply lookahead so
+        it measures the same thing the benchmark's sims=0 round robin does."""
+        rng = rng or np.random.default_rng()
+        wa = d = wb = 0
+        for i in range(n_games):
+            a_side = i % 2
+            st = game.new_initial_state()
+            for _ in range(opening_plies):
+                if st.is_terminal():
+                    break
+                leg = st.legal_actions()
+                st.apply_action(int(leg[rng.integers(len(leg))]))
+            ply = 0
+            while not st.is_terminal() and ply < max_plies:
+                net = net_a if st.current_player() == a_side else net_b
+                if net is None:
+                    leg = st.legal_actions()
+                    mv = int(leg[rng.integers(len(leg))])
+                else:
+                    mv = value_lookahead_move(net, st, device)
+                st.apply_action(mv); ply += 1
+            if not st.is_terminal():
+                d += 1
+                continue
+            r = st.returns()[a_side]
+            wa += r > 0; wb += r < 0; d += r == 0
+        return int(wa), int(d), int(wb)
+
+    # ── Config ────────────────────────────────────────────────────────────────
+    from dataclasses import dataclass, asdict
+
+    @dataclass
+    class Config:
+        """Matched to the ThompsonZero / AlphaZero arms wherever the method does
+        not force a difference, so a benchmark compares representations rather
+        than budgets."""
+        game_name: str = 'othello'
+        checkpoint_dir: str = 'othello_gauss_ckpt'
+        num_episodes: int = 4000
+        seed: int = 0
+        device_preference: str = 'auto'
+        resume: bool = True
+        channels: int = 32
+        num_blocks: int = 3
+        head_ch: int = 8
+        # search
+        fast_sims: int = 100
+        full_sims: int = 300
+        fast_prob: float = 0.75
+        temp: float = 1.0
+        temp_threshold: int = 30
+        n_parallel_games: int = 16
+        wave_per_game: int = 4
+        max_plies: int = 128
+        # training
+        batch_size: int = 256
+        train_steps_per_ep: int = 4
+        max_buffer: int = 150_000
+        lr_peak: float = 2e-3
+        lr_warmup_eps: int = 50
+        lr_decay_eps: int = 4000
+        lr_min_factor: float = 0.1
+        weight_decay: float = 1e-4
+        grad_clip: float = 1.0
+        # (state KL, action KL, state NLL, played-action NLL)
+        loss_weights: tuple = (1.0, 1.0, 1.0, 1.0)
+        # evals
+        quick_eval_every: int = 250
+        quick_eval_games: int = 30
+        deep_eval_every: int = 1000
+        eval_sims: int = 64
+        eval_games_per_pair: int = 4
+        eval_last_n: int = 3
+        eval_refresh_pairs: int = 10
+        eval_opening_plies: int = 2
+        eval_max_plies: int = 128
+        eval_device: str = 'cpu'
+        start_elo: float = 1000.0
+
+    def _worker_cfg(cfg):
+        return dict(fast_sims=cfg.fast_sims, full_sims=cfg.full_sims,
+                    fast_prob=cfg.fast_prob, n_parallel=cfg.n_parallel_games,
+                    wave_per_game=cfg.wave_per_game, temp=cfg.temp,
+                    temp_threshold=cfg.temp_threshold, max_plies=cfg.max_plies)
+
+    # ── Checkpoints ───────────────────────────────────────────────────────────
+    def build_network(cfg, device):
+        sig = (cfg.channels, cfg.num_blocks, cfg.head_ch)
+        return GaussianNet(*sig).to(device), sig
+
+    def cpu_clone(net, sig):
+        c = GaussianNet(*sig)
+        c.load_state_dict(c4._cpu_sd(net))
+        c.eval()
+        return c
+
+    def save_benchmark_net(d, label, net):
+        import os
+        os.makedirs(d, exist_ok=True)
+        sd = c4._cpu_sd(net)
+        c4._assert_finite_sd(sd, f'bench_{label}.pt')
+        torch.save(sd, os.path.join(d, f'bench_{label}.pt'))
+
+    def load_benchmark_net(d, label, sig):
+        import os
+        net = GaussianNet(*sig)
+        net.load_state_dict(torch.load(os.path.join(d, f'bench_{label}.pt'),
+                                       map_location='cpu', weights_only=True))
+        net.eval()
+        return net
+
+    def save_checkpoint(d, ep, net, optimizer, scheduler, hist, cfg=None,
+                        elo_pool=None):
+        import os
+        os.makedirs(d, exist_ok=True)
+        c4._assert_finite_sd(c4._cpu_sd(net), f'latest.pt at ep {ep}')
+        blob = {'ep': ep, 'model': c4._cpu_sd(net),
+                'optim': optimizer.state_dict(),
+                'sched': scheduler.state_dict() if scheduler else None,
+                'hist': hist, 'cfg': asdict(cfg) if cfg is not None else None,
+                'elo': elo_pool.elo if elo_pool else {},
+                'order': elo_pool.order if elo_pool else [],
+                'pair_games': ({tuple(sorted(k)): v for k, v
+                                in elo_pool.pair_games.items()}
+                               if elo_pool else {})}
+        tmp = os.path.join(d, 'latest.pt.tmp')
+        torch.save(blob, tmp)
+        os.replace(tmp, os.path.join(d, 'latest.pt'))
+
+    def load_checkpoint(d):
+        import os
+        p = os.path.join(d, 'latest.pt')
+        if not os.path.exists(p):
+            return None
+        blob = torch.load(p, map_location='cpu', weights_only=False)
+        if isinstance(blob, dict) and 'model' not in blob:
+            raise ValueError(f'{p} is a bare state_dict (a bench_N.pt), not a '
+                             f'resumable checkpoint.')
+        return blob
+
+    def _elo_bot(game, net, device, sims, batch_size, rng, temp):
+        return GMCTSBot(game, net, device, sims, batch_size=batch_size,
+                        temp=temp, random_state=rng)
+
+    def _elo_pick(root, rng):
+        return root_pick(root, rng, thompson=False)
+
+    # ── Training driver ───────────────────────────────────────────────────────
+    def run_training(cfg, game=None, log=print):
+        """Self-play + training, logging in the same shape as the ThompsonZero
+        and AlphaZero drivers so the three runs read alike."""
+        import random
+        from collections import defaultdict
+        game = game or c4.load_game(cfg.game_name)
+        c4.set_game(game)
+        device, backend = c4.pick_device(cfg.device_preference)
+        c4.set_backend(backend, device)
+        base_network, sig = build_network(cfg, device)
+        optimizer = c4.LerpFreeAdamW(base_network.parameters(),
+                                     lr=cfg.lr_peak,
+                                     weight_decay=cfg.weight_decay)
+
+        def lr_at(ep):
+            if ep <= cfg.lr_warmup_eps:
+                return ep / max(cfg.lr_warmup_eps, 1)
+            t = min(1.0, (ep - cfg.lr_warmup_eps)
+                    / max(cfg.lr_decay_eps - cfg.lr_warmup_eps, 1))
+            return cfg.lr_min_factor + (1 - cfg.lr_min_factor) * 0.5 * (
+                1 + math.cos(math.pi * t))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_at)
+        hist = {k: [] for k in (
+            'ep', 'loss', 'klv', 'kla', 'nllv', 'nlla', 'v_mu', 'v_sd',
+            'a_sd_pred', 'a_sd_tgt', 'lv_lo', 'lv_hi', 'draw_pct', 'plies',
+            'buf', 'aux', 'elo', 'quick_ep', 'q_w', 'q_d', 'q_l')}
+        elo_pool = c4.EloPool(
+            game, cfg.eval_device, eval_sims=cfg.eval_sims,
+            games_per_pair=cfg.eval_games_per_pair, last_n=cfg.eval_last_n,
+            refresh_pairs=cfg.eval_refresh_pairs,
+            opening_plies=cfg.eval_opening_plies,
+            max_eval_plies=cfg.eval_max_plies, start_elo=cfg.start_elo,
+            seed=cfg.seed, bot_factory=_elo_bot, pick=_elo_pick)
+        replay, start_ep, aux_total = [], 1, 0
+
+        ckpt = load_checkpoint(cfg.checkpoint_dir) if cfg.resume else None
+        if ckpt is not None:
+            base_network.load_state_dict(ckpt['model'])
+            if ckpt.get('optim'):
+                optimizer.load_state_dict(ckpt['optim'])
+            if ckpt.get('sched'):
+                scheduler.load_state_dict(ckpt['sched'])
+            elo_pool.elo = dict(ckpt.get('elo') or {})
+            elo_pool.elo.setdefault('random', cfg.start_elo)
+            elo_pool.order = list(ckpt.get('order') or [])
+            elo_pool.pair_games = {frozenset(k): v for k, v
+                                   in (ckpt.get('pair_games') or {}).items()}
+            kept = []
+            for lb in list(elo_pool.order):
+                try:
+                    elo_pool.nets[lb] = load_benchmark_net(cfg.checkpoint_dir,
+                                                           lb, sig)
+                    kept.append(lb)
+                except FileNotFoundError:
+                    elo_pool.elo.pop(lb, None)
+            elo_pool.order = kept
+            elo_pool.players = ['random'] + list(kept)
+            old = ckpt.get('hist') or {}
+            for k in hist:
+                if k in old:
+                    hist[k] = old[k]
+            start_ep = ckpt['ep'] + 1
+            log(f'resumed at ep {ckpt["ep"]}')
+
+        n_params = sum(p.numel() for p in base_network.parameters())
+        log(f'device={device} backend={backend} | params={n_params:,} | '
+            f'GAUSSIAN value-dist | start_ep={start_ep}')
+        if not elo_pool.order:
+            init = cpu_clone(base_network, sig)
+            save_benchmark_net(cfg.checkpoint_dir, '0', init)
+            elo_pool.add_checkpoint('0', init)
+
+        self_play = ParallelSelfPlay(game, base_network, device,
+                                     _worker_cfg(cfg), seed=cfg.seed)
+        gen = self_play.episodes()
+        prev = dict(self_play.stats)
+        bar = c4.Progress(cfg.quick_eval_every, label='ep ')
+        step_rng = random.Random(cfg.seed)
+        ref = cpu_clone(base_network, sig)
+        try:
+            for ep in range(start_ep, cfg.num_episodes + 1):
+                samples = next(gen)
+                aux_total += self_play.last_aux
+                replay.extend(samples)
+                if len(replay) > cfg.max_buffer:
+                    del replay[:-cfg.max_buffer]
+
+                base_network.train()
+                accs = defaultdict(list)
+                if len(replay) >= cfg.batch_size:
+                    for _ in range(cfg.train_steps_per_ep):
+                        b = step_rng.sample(replay, cfg.batch_size)
+                        try:
+                            _lv, parts = train_step(
+                                base_network, optimizer, b, device,
+                                cfg.loss_weights, cfg.grad_clip)
+                        except RuntimeError as e:
+                            log(f'  ! train step failed, skipped ({e})')
+                            continue
+                        for k, v in parts.items():
+                            accs[k].append(v)
+                    scheduler.step()
+                base_network.eval()
+
+                done = ep - (ep - 1) // cfg.quick_eval_every * cfg.quick_eval_every
+                if ep % cfg.quick_eval_every != 0:
+                    bar.update(done)
+                    continue
+                bar.close()
+
+                st = self_play.stats
+                dg = max(st['games'] - prev['games'], 1)
+                draw_pct = 100 * (st['draw'] - prev['draw']) / dg
+                plies = (st['plies'] - prev['plies']) / dg
+                prev = dict(st)
+                ml = lambda k: (float(np.mean(accs[k])) if accs[k]
+                                else float('nan'))
+                hist['ep'].append(ep)
+                for k in ('loss', 'klv', 'kla', 'nllv', 'nlla', 'v_mu', 'v_sd',
+                          'a_sd_pred', 'a_sd_tgt', 'lv_lo', 'lv_hi'):
+                    hist[k].append(ml(k))
+                hist['draw_pct'].append(draw_pct); hist['plies'].append(plies)
+                hist['buf'].append(len(replay)); hist['aux'].append(aux_total)
+                nf = float(np.sum(accs['nonfinite'])) if accs['nonfinite'] else 0.0
+                if nf:
+                    log(f'  ! {nf:.0f} non-finite train steps SKIPPED — weights '
+                        f'intact, but the log-variance is deliberately uncapped '
+                        f'so check lv_hi below.')
+                diag = (f'loss {ml("loss"):.3f} (klv {ml("klv"):.3f} '
+                        f'kla {ml("kla"):.3f} nllv {ml("nllv"):.3f} '
+                        f'nlla {ml("nlla"):.3f}) | discs: mu {ml("v_mu"):+.1f} '
+                        f'sd {ml("v_sd"):.1f} a_sd {ml("a_sd_pred"):.1f}/'
+                        f'{ml("a_sd_tgt"):.1f} | logvar [{ml("lv_lo"):.1f}, '
+                        f'{ml("lv_hi"):.1f}] | dr {draw_pct:.0f}% ply {plies:.0f} '
+                        f'buf {len(replay)//1000}k aux {aux_total}')
+
+                if ep % cfg.deep_eval_every == 0:
+                    snap = cpu_clone(base_network, sig)
+                    save_benchmark_net(cfg.checkpoint_dir, str(ep), snap)
+                    ref = snap
+                    elo = elo_pool.add_checkpoint(str(ep), snap)
+                    hist['elo'].append(dict(elo))
+                    ladder = '  '.join(f'{k}={v:.0f}' for k, v in
+                                       sorted(elo.items(),
+                                              key=lambda kv: -kv[1])[:6])
+                    log(f'ep {ep:6d} | {diag}')
+                    log(f'         DEEP Elo@{cfg.eval_sims}: {ladder}')
+                else:
+                    w, d, l = quick_match(cpu_clone(base_network, sig), ref,
+                                          game, cfg.quick_eval_games,
+                                          cfg.eval_device,
+                                          opening_plies=cfg.eval_opening_plies,
+                                          max_plies=cfg.eval_max_plies)
+                    hist['quick_ep'].append(ep); hist['q_w'].append(w)
+                    hist['q_d'].append(d); hist['q_l'].append(l)
+                    log(f'ep {ep:6d} | {diag} | vs last ckpt (no-MCTS) '
+                        f'W{w} D{d} L{l}')
+                save_checkpoint(cfg.checkpoint_dir, ep, base_network, optimizer,
+                                scheduler, hist, cfg, elo_pool)
+                bar.reset()
+        finally:
+            bar.close()
+            self_play.shutdown()
+        return hist
