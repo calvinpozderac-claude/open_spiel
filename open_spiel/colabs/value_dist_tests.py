@@ -341,6 +341,127 @@ def test_network_and_loss():
               - vd.INIT_SD ** 2) < 1e-6)
 
 
+def test_halving_schedule():
+    print('\nSequential halving: budget allocation')
+    for n, m, want_phases in ((100, 8, 3), (300, 8, 3), (100, 4, 2), (16, 2, 1)):
+        sch = vd.halving_schedule(n, m)
+        check(f'log2({m}) phases at budget {n}', len(sch) == want_phases,
+              f'{sch}')
+        check(f'survivors halve each phase (n={n}, m={m})',
+              [p[0] for p in sch] == [max(1, m >> i) for i in range(len(sch))],
+              f'{[p[0] for p in sch]}')
+        used = sum(a * b for a, b in sch)
+        check(f'stays within budget (n={n}, m={m})', used <= n, f'{used} > {n}')
+        check(f'uses most of it (n={n}, m={m})', used >= 0.85 * n, f'{used}/{n}')
+    check('a single action needs no halving',
+          vd.halving_schedule(50, 1) == [(1, 50)])
+    check('every phase gives at least one simulation',
+          all(b >= 1 for a, b in vd.halving_schedule(4, 16)))
+
+
+def test_halving_search():
+    if not vd._HAS_TORCH:
+        return
+    import torch
+    print('\nSequential halving: search behaviour')
+    try:
+        g = game()
+    except Exception:
+        print('  (pyspiel missing — skipped)')
+        return
+    c4.set_backend('cpu', device='cpu')
+    torch.manual_seed(0)
+    net = vd.GaussianNet(16, 1, 4)
+    rng = np.random.default_rng(0)
+    st = g.new_initial_state()
+    root, idx = vd.halving_search(net, 'cpu', st, rng, 100, max_considered=16)
+    v = root.visits()
+    check('the budget is respected', v.sum() <= 100, f'{v.sum()}')
+    check('every candidate is simulated at least once', (v > 0).all(), f'{v}')
+    check('the chosen index is legal', 0 <= idx < len(root.legal))
+    check('survivors got strictly more simulations than the eliminated',
+          v[idx] > v.min(), f'{v.tolist()} idx {idx}')
+    # Two rounds of halving over 4 actions: 2 survive the first cut.
+    top = sorted(v.tolist(), reverse=True)
+    check('the visit profile is a halving profile, not a flat one',
+          top[0] > top[-1], f'{top}')
+
+    # A single legal action needs no search at all.
+    forced = g.new_initial_state()
+    root1 = vd.GNode(0, [3], np.zeros(1), np.full(1, 0.04), 0.0, 0.04)
+    r, i = vd.halving_search(net, 'cpu', forced, rng, 50, root=root1)
+    check('a forced move short-circuits', i == 0 and r.visits().sum() == 0)
+
+    # Re-drawing from updated beliefs is what makes the randomness decay: an
+    # action with many simulations has a narrow belief, so its draw sits near
+    # its mean.  A dominant, well-visited action must survive essentially always.
+    k = 4
+    node = vd.GNode(0, [0, 1, 2, 3], np.array([0.9, -0.5, -0.5, -0.5]),
+                    np.full(k, 1e-6), 0.0, 0.01)
+    kept = [vd.halving_survivors(node, rng, list(range(k)))[0]
+            for _ in range(200)]
+    check('a dominant action survives the cut', kept.count(0) > 195,
+          f'{kept.count(0)}/200')
+    # With wide beliefs the cut is genuinely random, which is the point of
+    # using the draw rather than the mean.
+    wide = vd.GNode(0, [0, 1, 2, 3], np.zeros(k), np.full(k, 1.0), 0.0, 1.0)
+    kept2 = {vd.halving_survivors(wide, rng, list(range(k)))[0]
+             for _ in range(200)}
+    check('but a genuinely uncertain one is not decided by noise alone',
+          len(kept2) == k, f'{kept2}')
+
+    check('a proven win overrides the survivor',
+          vd.halving_pick(
+              _proven_root(), 1, rng, False) == 2)
+
+
+def _proven_root():
+    r = vd.GNode(0, [0, 1, 2], np.array([0.9, 0.9, -0.9]),
+                 np.full(3, 1e-9), 0.0, 0.01)
+    r.term[2] = 0.95                      # proven, and better than any belief
+    return r
+
+
+def test_halving_selfplay():
+    if not vd._HAS_TORCH:
+        return
+    import torch
+    print('\nSequential halving: self-play and targets')
+    try:
+        g = game()
+    except Exception:
+        print('  (pyspiel missing — skipped)')
+        return
+    c4.set_backend('cpu', device='cpu')
+    torch.manual_seed(0)
+    net = vd.GaussianNet(16, 1, 4)
+    out = {}
+    for mode in ('thompson', 'halving'):
+        cfg = dict(fast_sims=16, full_sims=16, fast_prob=1.0, n_parallel=4,
+                   wave_per_game=4, temp=1.0, temp_threshold=30,
+                   max_plies=128, root_select=mode, max_considered=16)
+        sp = vd.ParallelSelfPlay(g, net, 'cpu', cfg, seed=0)
+        gen = sp.episodes()
+        flat = [s for _ in range(2) for s in next(gen)]
+        out[mode] = (flat, sp)
+        check(f'{mode}: episodes produced samples', len(flat) > 0)
+        check(f'{mode}: every sample has an observation',
+              all(s['obs'] is not None for s in flat))
+        check(f'{mode}: outcomes stamped', all(s['z_w'] == 1.0 for s in flat))
+        check(f'{mode}: games run to the end',
+              sp.stats['plies'] / sp.stats['games'] > 40)
+        check(f'{mode}: leaf evaluation is still batched',
+              sp.fwd_rows / max(sp.fwd_calls, 1) > 3.0,
+              f'{sp.fwd_rows / max(sp.fwd_calls, 1):.1f} rows/call')
+    # Halving guarantees every candidate is simulated, so more actions end up
+    # with a real backed-up target instead of just the prior.
+    ev = {m: np.mean([len(s['ev_idx']) for s in f if not s['solved']])
+          for m, (f, _) in out.items()}
+    check('halving leaves more actions with a searched target',
+          ev['halving'] >= ev['thompson'],
+          f"halving {ev['halving']:.1f} vs thompson {ev['thompson']:.1f}")
+
+
 def main():
     test_primitives()
     test_accumulator()
@@ -349,6 +470,9 @@ def main():
     test_solver()
     test_targets()
     test_network_and_loss()
+    test_halving_schedule()
+    test_halving_search()
+    test_halving_selfplay()
     print()
     if _fails:
         print(f'{len(_fails)} FAILURES: {_fails}')

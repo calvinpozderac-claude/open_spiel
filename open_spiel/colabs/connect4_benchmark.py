@@ -58,8 +58,10 @@ ARMS = {
             'search additive_mle · target additive_mle'),
     'AZ':  ('alphazero', None, None,
             'AlphaZero control (policy + scalar value, PUCT)'),
-    'GA':  ('gauss', None, None,
-           'Gaussian value distribution over the final score differential'),
+    'GA':  ('gauss', 'thompson', None,
+            'Gaussian value dist · Thompson root'),
+    'GH':  ('gauss_halving', 'halving', None,
+            'Gaussian value dist · sequential-halving root (Gumbel-AZ style)'),
 }
 
 
@@ -79,13 +81,16 @@ def arms_of(shared, arms=None):
     return list(arms or shared.get('arms') or ARMS)
 
 
-def gauss_config(shared):
-    """The Gaussian value-distribution arm.  Matched to the others on trunk,
-    self-play shape, optimiser, schedule, batch and evals."""
+def gauss_config(shared, name='GA'):
+    """A Gaussian value-distribution arm.  Matched to the others on trunk,
+    self-play shape, optimiser, schedule, batch and evals; GA and GH differ only
+    in how the ROOT spends its simulations."""
     _ch, _bl, _hd = tz_sig(shared)
     return vd.Config(
         game_name=shared['game'],
-        checkpoint_dir=arm_dir(shared['root'], 'GA'),
+        root_select=ARMS[name][1] or 'thompson',
+        max_considered=shared.get('max_considered', 16),
+        checkpoint_dir=arm_dir(shared['root'], name),
         num_episodes=shared['num_episodes'],
         channels=_ch, num_blocks=_bl, head_ch=_hd, seed=shared['seed'],
         device_preference=shared['device'],
@@ -252,6 +257,7 @@ def default_shared(**over):
         # engine) needs a game with a natural score and is therefore not in the
         # Connect 4 default; othello_benchmark adds it.
         arms=('AA', 'AM', 'MA', 'MM', 'AZ'),
+        max_considered=16,
         # Generations the round robins rate, and where the pairwise results are
         # cached so re-running tops up instead of replaying.
         gens=(1000, 2000),
@@ -354,8 +360,8 @@ def train_arm(name, shared, log=print):
     game = c4.load_game(shared['game'])
     t0 = time.time()
     log(f'\n{"=" * 78}\n=== ARM {name}: {ARMS[name][3]}\n{"=" * 78}')
-    if ARMS[name][0] == 'gauss':
-        hist = vd.run_training(gauss_config(shared), game=game, log=log)
+    if ARMS[name][0] in ('gauss', 'gauss_halving'):
+        hist = vd.run_training(gauss_config(shared, name), game=game, log=log)
     elif ARMS[name][0] == 'alphazero':
         hist = az.run_training(alphazero_config(shared), game=game, log=log)
     else:
@@ -400,7 +406,8 @@ def load_players(shared, gens=None, arms=None, include_random=True):
         for g in gens:
             if not os.path.exists(os.path.join(d, f'bench_{g}.pt')):
                 continue
-            net = (vd.load_benchmark_net(d, str(g), tsig) if engine == 'gauss'
+            net = (vd.load_benchmark_net(d, str(g), tsig)
+                   if engine in ('gauss', 'gauss_halving')
                    else az.load_benchmark_net(d, str(g), asig)
                    if engine == 'alphazero'
                    else c4.load_benchmark_net(d, str(g), tsig))
@@ -414,14 +421,21 @@ def _move(engine, net, state, sims, rng, bots, eval_temp=6.0):
     if engine == 'random' or net is None:
         leg = state.legal_actions()
         return int(leg[rng.integers(len(leg))])
-    if engine == 'gauss':
+    if engine in ('gauss', 'gauss_halving'):
         if sims <= 0:
             return vd.value_lookahead_move(net, state, 'cpu')
         b = bots.get(id(net))
         if b is None:
-            b = bots[id(net)] = vd.GMCTSBot(GAME_REF[0], net, 'cpu', sims,
-                                            batch_size=8, random_state=rng)
-        return vd.root_pick(b.mcts_search(state), rng, thompson=False)
+            b = bots[id(net)] = (
+                vd.HalvingBot(GAME_REF[0], net, 'cpu', sims, batch_size=8,
+                              random_state=rng)
+                if engine == 'gauss_halving' else
+                vd.GMCTSBot(GAME_REF[0], net, 'cpu', sims, batch_size=8,
+                            random_state=rng))
+        root = b.mcts_search(state)
+        if engine == 'gauss_halving':
+            return vd.halving_pick(root, b.last_choice, rng, False)
+        return vd.root_pick(root, rng, thompson=False)
     if engine == 'alphazero':
         if sims <= 0:
             return az.value_greedy_move(net, state, 'cpu')

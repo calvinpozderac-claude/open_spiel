@@ -706,7 +706,36 @@ if _HAS_TORCH:
         return {'state': game.new_initial_state(), 'hist': [], 'aux': [],
                 'move': 0, 'root': None, 'n': 0,
                 'sims': (cfg['fast_sims'] if rng.random() < cfg['fast_prob']
-                         else cfg['full_sims'])}
+                         else cfg['full_sims']),
+                # sequential-halving state, unused when root_select='thompson'
+                'cand': None, 'sched': None, 'phase': 0, 'done_in_phase': 0}
+
+    def _halving_begin(slot, rng, cfg):
+        """Draw the candidate set and lay out the budget for one move."""
+        root = slot['root']
+        k = len(root.legal)
+        m = min(int(cfg['max_considered']), k)
+        draw = sample_edges(root, rng, cfg['temp'])
+        slot['cand'] = sorted(range(k), key=lambda i: -draw[i])[:m]
+        slot['sched'] = halving_schedule(slot['sims'], m)
+        slot['phase'] = 0
+        slot['done_in_phase'] = 0
+        slot['cand'] = slot['cand'][:slot['sched'][0][0]]
+
+    def _halving_step(slot, rng, cfg):
+        """Called once per wave: close out the phase if its quota is met.
+        Returns True when the move's search is finished."""
+        sched = slot['sched']
+        slot['done_in_phase'] += 1
+        if slot['done_in_phase'] < sched[slot['phase']][1]:
+            return False
+        slot['phase'] += 1
+        slot['done_in_phase'] = 0
+        if slot['phase'] >= len(sched) or len(slot['cand']) <= 1:
+            return True
+        slot['cand'] = halving_survivors(slot['root'], rng, slot['cand'],
+                                         cfg['temp'])[:sched[slot['phase']][0]]
+        return False
 
     class ParallelSelfPlay:
         """`n_parallel` games advanced in lockstep so every leaf wave is one
@@ -759,14 +788,26 @@ if _HAS_TORCH:
                             st.current_player(), leg, am[j][leg], av[j][leg],
                             vm[j], vv[j], obs=ob[j])
                 # 2. one wave of leaves across all slots
+                halving = cfg.get('root_select') == 'halving'
                 pending, uniq = [], {}
                 for i in idxs:
                     s = self.slots[i]
                     if node_solved(s['root']) is not None:
                         continue
-                    for _ in range(cfg['wave_per_game']):
-                        path, st, val, edge = select_leaf(
-                            s['root'], s['state'], self.rng, cfg['temp'])
+                    if halving and s['cand'] is None:
+                        _halving_begin(s, self.rng, cfg)
+                    # One leaf per surviving candidate under halving, or
+                    # wave_per_game free Thompson descents otherwise.
+                    starts = (list(s['cand']) if halving
+                              else [None] * cfg['wave_per_game'])
+                    for first in starts:
+                        if first is None:
+                            path, st, val, edge = select_leaf(
+                                s['root'], s['state'], self.rng, cfg['temp'])
+                        else:
+                            path, st, val, edge = select_leaf_forced(
+                                s['root'], s['state'], first, self.rng,
+                                cfg['temp'])
                         if st is None:
                             backup_terminal(path, val[0], val[1], s['aux'])
                             s['n'] += 1
@@ -795,18 +836,26 @@ if _HAS_TORCH:
                     root = s['root']
                     if root is None:
                         continue
-                    if s['n'] < s['sims'] and node_solved(root) is None:
+                    solved = node_solved(root) is not None
+                    if halving and not solved:
+                        if not _halving_step(s, self.rng, cfg):
+                            continue
+                    elif s['n'] < s['sims'] and not solved:
                         continue
                     t = make_target(root)
-                    a = root_pick(root, self.rng,
-                                  thompson=s['move'] < cfg['temp_threshold'],
-                                  temp=cfg['temp'])
+                    if halving and not solved and s['cand']:
+                        a = halving_pick(root, s['cand'][0], self.rng, True)
+                    else:
+                        a = root_pick(root, self.rng,
+                                      thompson=s['move'] < cfg['temp_threshold'],
+                                      temp=cfg['temp'])
                     pidx = int(np.nonzero(root.legal == a)[0][0])
                     t['played'] = pidx
                     s['hist'].append(t)
                     s['state'].apply_action(a)
                     s['move'] += 1
                     s['n'] = 0
+                    s['cand'] = None            # next move draws a fresh set
                     s['root'] = root.children[pidx]
                     if (s['state'].is_terminal()
                             or s['move'] >= cfg['max_plies']):
@@ -847,6 +896,91 @@ if _HAS_TORCH:
             wa += r > 0; wb += r < 0; d += r == 0
         return int(wa), int(d), int(wb)
 
+    # ── Sequential-halving root search ────────────────────────────────────────
+    def halving_search(network, device, state, rng, n_sims, root=None,
+                       max_considered=16, temp=1.0, batch_size=8):
+        """Sequential halving over the root's actions, Thompson below.
+
+        Returns (root, chosen_action_index).  The survivor of the last round IS
+        the move, which is the property Gumbel AlphaZero's halving buys: the
+        choice is a sample from an improved policy even at a small budget,
+        rather than an argmax over noisy visit counts."""
+        if root is None:
+            root = expand_node(network, device, state)
+        k = len(root.legal)
+        if k == 1:
+            return root, 0
+        # Candidates: the top of ONE Thompson draw, in place of Gumbel top-k.
+        m = min(int(max_considered), k)
+        draw = sample_edges(root, rng, temp)
+        cand = sorted(range(k), key=lambda i: -draw[i])[:m]
+
+        for survivors, each in halving_schedule(n_sims, m):
+            cand = cand[:survivors]
+            if node_solved(root) is not None:
+                break
+            for _ in range(each):
+                pend, uniq = [], {}
+                for i in cand:                      # one wave across survivors
+                    path, st, val, edge = select_leaf_forced(root, state, i,
+                                                             rng, temp)
+                    if st is None:
+                        backup_terminal(path, val[0], val[1])
+                    else:
+                        node, idx = edge
+                        pend.append((path, node, idx))
+                        uniq.setdefault((id(node), idx), (node, idx, st))
+                if uniq:
+                    items = list(uniq.values())
+                    vm, vv, am, av, ob = nn_eval_states(
+                        network, device, [e[2] for e in items])
+                    for (node, idx, st), mu, v, a_m, a_v, o in zip(
+                            items, vm, vv, am, av, ob):
+                        leg = st.legal_actions()
+                        node.children[idx] = GNode(st.current_player(), leg,
+                                                   a_m[leg], a_v[leg], mu, v,
+                                                   obs=o)
+                for path, node, idx in pend:
+                    ch = node.children[idx]
+                    backup(path, -ch.mu, ch.var)
+            if len(cand) > 1:
+                cand = halving_survivors(root, rng, cand, temp)
+        return root, cand[0]
+
+    class HalvingBot:
+        """Same interface as GMCTSBot, so the tournament and the Elo ladder can
+        hold the two side by side."""
+
+        def __init__(self, game, network, device, max_simulations, batch_size=8,
+                     temp=1.0, random_state=None, max_considered=16):
+            self.game, self.network, self.device = game, network, device
+            self.max_simulations = max_simulations
+            self.batch_size = batch_size
+            self.temp = temp
+            self.max_considered = max_considered
+            self._rng = random_state or np.random.default_rng()
+            self.last_choice = None
+
+        def mcts_search(self, state, root=None):
+            root, idx = halving_search(
+                self.network, self.device, state, self._rng,
+                self.max_simulations, root=root,
+                max_considered=self.max_considered, temp=self.temp,
+                batch_size=self.batch_size)
+            self.last_choice = idx
+            return root
+
+    def halving_pick(root, idx, rng, thompson):
+        """The survivor is the move.  A proven win still overrides it — the
+        solver knows more than any amount of sampling."""
+        pr = root.term > _TERM_NONE
+        if pr.any():
+            mu, _v = root.belief()
+            mu = np.where(pr, root.term, mu)
+            if float(np.max(root.term[pr])) >= float(mu[idx]):
+                return int(root.legal[int(mu.argmax())])
+        return int(root.legal[int(idx)])
+
     # ── Config ────────────────────────────────────────────────────────────────
     from dataclasses import dataclass, asdict
 
@@ -870,6 +1004,11 @@ if _HAS_TORCH:
         fast_prob: float = 0.75
         temp: float = 1.0
         temp_threshold: int = 30
+        # 'thompson' samples the root like every other node; 'halving' runs
+        # Gumbel-AlphaZero-style sequential halving over the root's actions,
+        # using Thompson draws in place of Gumbel noise.
+        root_select: str = 'thompson'
+        max_considered: int = 16
         n_parallel_games: int = 16
         wave_per_game: int = 4
         max_plies: int = 128
@@ -902,7 +1041,9 @@ if _HAS_TORCH:
         return dict(fast_sims=cfg.fast_sims, full_sims=cfg.full_sims,
                     fast_prob=cfg.fast_prob, n_parallel=cfg.n_parallel_games,
                     wave_per_game=cfg.wave_per_game, temp=cfg.temp,
-                    temp_threshold=cfg.temp_threshold, max_plies=cfg.max_plies)
+                    temp_threshold=cfg.temp_threshold, max_plies=cfg.max_plies,
+                    root_select=cfg.root_select,
+                    max_considered=cfg.max_considered)
 
     # ── Checkpoints ───────────────────────────────────────────────────────────
     def build_network(cfg, device):
@@ -1132,3 +1273,87 @@ if _HAS_TORCH:
             bar.close()
             self_play.shutdown()
         return hist
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Sequential halving at the root (Gumbel AlphaZero, without the Gumbel)
+#
+#  Gumbel AlphaZero (Danihelka et al., ICLR 2022) does two things at the root:
+#  pick k candidate actions by adding Gumbel noise to the POLICY LOGITS and
+#  taking the top k, then spend the simulation budget on those k by sequential
+#  halving instead of by UCT.  The halving is what buys the policy-improvement
+#  guarantee at small budgets; the Gumbel is only how you draw k actions without
+#  replacement from a categorical policy.
+#
+#  This engine has no policy head to add Gumbel to — it has a posterior per
+#  action.  A Thompson draw from those posteriors is already a randomised
+#  ranking, and a better-founded one: its spread is the actual uncertainty about
+#  each action's value rather than a fixed-scale noise, so it shrinks on its own
+#  as evidence arrives.  So the top-m of one Thompson draw replaces Gumbel top-k,
+#  and each halving round re-draws from the UPDATED beliefs.  Gumbel AlphaZero
+#  has to bolt a growing sigma(Q) term onto a fixed g(a) to get that decay; here
+#  it falls out of the representation.
+#
+#  Root only.  Below the root the tree keeps plain Thompson sampling, exactly as
+#  Gumbel AlphaZero keeps its own interior rule.
+#
+#  One thing this does NOT inherit: Gumbel AlphaZero needs a completed-Q policy
+#  target because visit counts stop being a valid improved policy once the budget
+#  is allocated by a schedule rather than by value.  Our targets are the
+#  backed-up distributions per action, which do not care how the visits were
+#  allocated — only how precise they ended up.  So the training side is unchanged.
+# ══════════════════════════════════════════════════════════════════════════════
+def halving_schedule(n_sims, m, phases=None):
+    """[(survivors, sims_each), …] for a budget of `n_sims` over `m` actions.
+
+    Every phase gives each surviving action the same number of simulations and
+    then keeps the better half, so the budget is spread over log2(m) rounds
+    rather than concentrated by value the way Thompson sampling would."""
+    m = max(int(m), 1)
+    if m == 1:
+        return [(1, max(int(n_sims), 0))]
+    phases = phases or max(1, int(math.ceil(math.log2(m))))
+    out, cur = [], m
+    for _ in range(phases):
+        each = max(1, int(n_sims // (phases * cur)))
+        out.append((cur, each))
+        if cur == 1:
+            break
+        cur = max(1, cur // 2)
+    return out
+
+
+def select_leaf_forced(root, root_state, first_idx, rng, temp=1.0):
+    """One descent that takes `first_idx` at the root and Thompson-samples
+    below it.  Sequential halving decides the root action; the rest of the tree
+    is unchanged."""
+    node, state, path = root, root_state.clone(), []
+    idx = first_idx
+    while True:
+        node.vloss[idx] += 1
+        path.append((node, idx))
+        if node.term[idx] > _TERM_NONE:
+            return path, None, (float(node.term[idx]), TERMINAL_VAR), None
+        state.apply_action(int(node.legal[idx]))
+        if state.is_terminal():
+            s = othello_score(state, node.player)
+            node.term[idx] = s
+            return path, None, (s, TERMINAL_VAR), None
+        child = node.children[idx]
+        if child is None:
+            return path, state, None, (node, idx)
+        node = child
+        idx = int(sample_edges(node, rng, temp).argmax())
+
+
+def halving_survivors(root, rng, cand, temp=1.0):
+    """Keep the better half of `cand` by a FRESH Thompson draw from the updated
+    beliefs.  Re-drawing rather than carrying a fixed noise offset is what makes
+    the randomness decay automatically: an action that has collected simulations
+    has a narrow belief, so its draw sits close to its mean."""
+    if len(cand) <= 1:
+        return list(cand)
+    x = sample_edges(root, rng, temp)
+    keep = max(1, len(cand) // 2)
+    order = sorted(cand, key=lambda i: -x[i])
+    return order[:keep]

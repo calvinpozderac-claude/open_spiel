@@ -350,6 +350,16 @@ def test_gauss_arm():
     import value_dist_utils as vd
     s = ob.default_shared()
     check('GA is in the Othello arm list', 'GA' in s['arms'])
+    check('GH (sequential halving) is too', 'GH' in s['arms'])
+    check('GA and GH differ ONLY in the root rule',
+          ob.gauss_config(s, 'GA').root_select == 'thompson'
+          and ob.gauss_config(s, 'GH').root_select == 'halving')
+    ga, gh = ob.gauss_config(s, 'GA'), ob.gauss_config(s, 'GH')
+    import dataclasses as _dc
+    diff = {f.name for f in _dc.fields(ga)
+            if getattr(ga, f.name) != getattr(gh, f.name)}
+    check('and in nothing else', diff == {'root_select', 'checkpoint_dir'},
+          f'{diff}')
     check('but NOT in the Connect 4 default (it needs a scored game)',
           'GA' not in cb.default_shared()['arms'])
     check('GA is a known arm', ob.ARMS['GA'][0] == 'gauss')
