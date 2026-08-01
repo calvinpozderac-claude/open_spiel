@@ -400,6 +400,64 @@ def test_solved_dir_plumbing():
           == os.path.dirname(s['solved_dir']))
 
 
+def test_search_free_is_like_for_like():
+    """At sims=0 both engines must expand the SAME one ply.
+
+    AlphaZero has no per-action value head, so its search-free move applies each
+    legal action and scores the child.  Reading ThompsonZero's action heads
+    instead expands nothing, so the comparison would measure the lookahead
+    rather than the networks -- which is exactly what it did until this test
+    existed."""
+    if not c4._HAS_TORCH:
+        return
+    import torch
+    print('\nsearch-free comparison is like-for-like')
+    game = c4.load_game()
+    c4.set_game(game)
+    c4.set_backend('cpu', device='cpu')
+    c4.set_search(c4.AGG_ADDITIVE, c4.AGG_ADDITIVE, 'dirichlet', 1.0)
+    B.GAME_REF[0] = game
+    torch.manual_seed(0)
+    tz = c4.C4DirichletNet(16, 1, 4)
+    with torch.no_grad():                 # non-uniform heads, as after training
+        tz.v_out.weight.normal_(0, 0.15)
+        tz.a_out.weight.normal_(0, 0.15)
+    tz.eval()
+    st = game.new_initial_state()
+    st.apply_action(3)
+
+    # The benchmark's sims=0 move for ThompsonZero must be the LOOKAHEAD one.
+    rng = np.random.default_rng(0)
+    got = B._move('thompson', tz, st, 0, rng, {})
+    check('sims=0 uses the one-ply lookahead, not the action-head read',
+          got == c4.value_lookahead_move(tz, st, 'cpu'))
+
+    # And the two really are different functions, or the test proves nothing.
+    diff = 0
+    s2 = game.new_initial_state()
+    for _ in range(120):
+        if s2.is_terminal():
+            s2 = game.new_initial_state()
+        if len(s2.legal_actions()) > 1:
+            diff += (c4.value_greedy_move(tz, s2, 'cpu')
+                     != c4.value_lookahead_move(tz, s2, 'cpu'))
+        la = s2.legal_actions()
+        s2.apply_action(int(la[rng.integers(len(la))]))
+    check('the action-head read and the lookahead differ often enough to matter',
+          diff > 5, f'{diff} disagreements')
+
+    # Both engines' sims=0 path expands one ply and uses true terminal outcomes.
+    az_net = az.AlphaZeroNet(16, 1, 4)
+    az_net.eval()
+    win = game.new_initial_state()
+    for a in (0, 1, 0, 1, 0, 1):
+        win.apply_action(a)
+    check('ThompsonZero lookahead takes an immediate win',
+          c4.value_lookahead_move(tz, win, 'cpu') == 0)
+    check('AlphaZero lookahead takes it too',
+          az.value_greedy_move(az_net, win, 'cpu') == 0)
+
+
 def main():
     test_puct()
     test_backup_signs()
@@ -411,6 +469,7 @@ def main():
     test_loss()
     test_selfplay_and_strength()
     test_tournament()
+    test_search_free_is_like_for_like()
     test_matched_settings()
     test_solved_dir_plumbing()
     print()

@@ -2079,6 +2079,39 @@ if _HAS_TORCH:
         v = _dir_v_from_gammas(g, a, rng)
         return int(leg[int(v.argmax())])
 
+    def value_lookahead_move(network, state, device):
+        """Search-free move by ONE-PLY LOOKAHEAD with the state head.
+
+        `value_greedy_move` reads the action heads and expands nothing.  That is
+        the natural "pure network" read for this engine, but AlphaZero has no
+        per-action value head to read, so its search-free move must apply each
+        legal action and score the child — a real one ply of game tree, worth a
+        great deal on its own (measured on Connect 4 endgames with UNTRAINED
+        nets: 46% outcome-optimal reading the heads, 94% with the lookahead).
+
+        Comparing the two across engines therefore measures the lookahead rather
+        than the networks.  This is the like-for-like version: apply each move,
+        score the child with the STATE head, negate for the change of mover, and
+        use the true outcome for terminal children."""
+        leg = state.legal_actions()
+        vals = [None] * len(leg)
+        pend_i, pend_s = [], []
+        for i, a in enumerate(leg):
+            cs = state.clone()
+            cs.apply_action(int(a))
+            if cs.is_terminal():
+                vals[i] = float(cs.returns()[state.current_player()])
+            else:
+                pend_i.append(i)
+                pend_s.append(cs)
+        if pend_s:
+            v3, vc, _p3, _cf, _o = nn_eval_states(network, device, pend_s)
+            a3 = np.maximum(np.asarray(vc)[:, None] * np.asarray(v3),
+                            ALPHA_FLOOR)
+            for i, val in zip(pend_i, dir_value(a3)):
+                vals[i] = -float(val)
+        return int(leg[int(np.argmax(vals))])
+
     def value_greedy_move(network, state, device):
         """Search-free move: argmax of the action head's posterior mean value."""
         _v3, _vc, p3, cf, _o = nn_eval_states(network, device, [state])

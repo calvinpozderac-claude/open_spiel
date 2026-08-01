@@ -367,7 +367,10 @@ def _move(engine, net, state, sims, rng, bots, eval_temp=6.0):
                                              batch_size=8, random_state=rng)
         return az.root_pick(b.mcts_search(state), rng, sample=False)
     if sims <= 0:
-        return c4.value_greedy_move(net, state, 'cpu')
+        # The SAME one ply of lookahead AlphaZero gets above.  Reading this
+        # engine's action heads instead would pit a bare network against a
+        # network plus a ply of search.
+        return c4.value_lookahead_move(net, state, 'cpu')
     b = bots.get(id(net))
     if b is None:
         b = bots[id(net)] = c4.C4MCTSBot(GAME_REF[0], net, 'cpu', sims,

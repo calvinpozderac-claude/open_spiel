@@ -615,24 +615,7 @@ def thompson_player(net, device='cpu', sims=0, batch=256, eval_temp=6.0,
     import connect4_dirichlet_utils as c4
 
     def _lookahead_move(s):
-        leg = s.legal_actions()
-        vals = [None] * len(leg)
-        pend_i, pend_s = [], []
-        for i, a in enumerate(leg):
-            cs = s.clone()
-            cs.apply_action(int(a))
-            if cs.is_terminal():
-                vals[i] = float(cs.returns()[s.current_player()])
-            else:
-                pend_i.append(i)
-                pend_s.append(cs)
-        if pend_s:
-            v3, vc, _p3, _cf, _o = c4.nn_eval_states(net, device, pend_s)
-            a3 = np.maximum(np.asarray(vc)[:, None] * np.asarray(v3),
-                            c4.ALPHA_FLOOR)
-            for i, val in zip(pend_i, c4.dir_value(a3)):
-                vals[i] = -float(val)      # child is the opponent's turn
-        return int(leg[int(np.argmax(vals))])
+        return c4.value_lookahead_move(net, s, device)
 
     def chooser(states):
         if sims == 0 and lookahead:
