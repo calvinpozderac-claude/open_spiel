@@ -437,7 +437,7 @@ def test_halving_selfplay():
     net = vd.GaussianNet(16, 1, 4)
     out = {}
     for mode in ('thompson', 'halving'):
-        cfg = dict(fast_sims=16, full_sims=16, fast_prob=1.0, n_parallel=4,
+        cfg = dict(fast_sims=100, full_sims=100, fast_prob=1.0, n_parallel=4,
                    wave_per_game=4, temp=1.0, temp_threshold=30,
                    max_plies=128, root_select=mode, max_considered=16)
         sp = vd.ParallelSelfPlay(g, net, 'cpu', cfg, seed=0)
@@ -453,13 +453,106 @@ def test_halving_selfplay():
         check(f'{mode}: leaf evaluation is still batched',
               sp.fwd_rows / max(sp.fwd_calls, 1) > 3.0,
               f'{sp.fwd_rows / max(sp.fwd_calls, 1):.1f} rows/call')
-    # Halving guarantees every candidate is simulated, so more actions end up
-    # with a real backed-up target instead of just the prior.
+    # The guarantee is per-candidate coverage, not a raw edge count: at a small
+    # budget choose_considered deliberately narrows the candidate set, so
+    # halving can search FEWER edges than Thompson and still be doing its job.
+    # What must hold is that every edge it did consider carries real evidence.
     ev = {m: np.mean([len(s['ev_idx']) for s in f if not s['solved']])
           for m, (f, _) in out.items()}
-    check('halving leaves more actions with a searched target',
-          ev['halving'] >= ev['thompson'],
-          f"halving {ev['halving']:.1f} vs thompson {ev['thompson']:.1f}")
+    print(f'     searched edges/position: '
+          f"halving {ev['halving']:.1f}  thompson {ev['thompson']:.1f}")
+    for mode, (f, _) in out.items():
+        ns = np.concatenate([s['ev_n'] for s in f if len(s['ev_idx'])])
+        check(f'{mode}: every searched edge has at least one backup',
+              ns.min() >= 2.0, f'{ns.min()}')
+    hn = np.concatenate([s['ev_n'] for s in out['halving'][0]
+                         if len(s['ev_idx'])])
+    tn = np.concatenate([s['ev_n'] for s in out['thompson'][0]
+                         if len(s['ev_idx'])])
+    # Halving CONCENTRATES evidence rather than spreading it: eliminated
+    # candidates keep their phase-1 simulations while survivors collect every
+    # later phase, so the profile is far more unequal than Thompson's roughly
+    # value-proportional one.  That is the halving signature, and it is exactly
+    # why the action KL has an evidence-weighted option.
+    check('halving concentrates evidence more than Thompson does',
+          hn.std() / hn.mean() > tn.std() / tn.mean(),
+          f'halving cv {hn.std() / hn.mean():.2f} vs '
+          f'thompson cv {tn.std() / tn.mean():.2f}')
+    # Note it concentrates differently, not harder: the phase quota caps any
+    # single edge, so Thompson's most-visited edge can exceed halving's while
+    # halving's overall profile is the more unequal one.
+
+
+def test_choose_considered():
+    """Gumbel AlphaZero's max_num_considered_actions: at a small budget,
+    considering every action means the first cut is decided by the prior draw
+    rather than by evidence."""
+    print('\nbudget-aware candidate count')
+    check('a forced move considers one action',
+          vd.choose_considered(100, 1) == 1)
+    check('never more than are legal', vd.choose_considered(100, 3) == 3)
+    check('never more than the cap',
+          vd.choose_considered(10_000, 40, max_considered=16) == 16)
+    prev = 0
+    for n in (8, 16, 32, 64, 100, 300):
+        m = vd.choose_considered(n, 8)
+        check(f'budget {n} considers {m}, never fewer than a smaller budget',
+              m >= prev, f'{m} < {prev}')
+        prev = m
+        sch = vd.halving_schedule(n, m)
+        check(f'…and phase 1 still gives each candidate >= 2 sims (n={n})',
+              sch[0][1] >= 2, f'{sch}')
+    check('it is inert at the benchmark budget',
+          vd.choose_considered(100, 8) == 8 and vd.choose_considered(300, 8) == 8)
+    check('but bites at a small one', vd.choose_considered(16, 8) < 8)
+
+
+def test_evidence_weighting():
+    if not vd._HAS_TORCH:
+        return
+    import torch
+    print('\nevidence weighting of the action KL')
+    try:
+        g = game()
+    except Exception:
+        print('  (pyspiel missing — skipped)')
+        return
+    c4.set_backend('cpu', device='cpu')
+    torch.manual_seed(0)
+    net = vd.GaussianNet(16, 1, 4)
+    cfg = dict(fast_sims=32, full_sims=32, fast_prob=1.0, n_parallel=4,
+               wave_per_game=4, temp=1.0, temp_threshold=30, max_plies=128,
+               root_select='halving', max_considered=16)
+    sp = vd.ParallelSelfPlay(g, net, 'cpu', cfg, seed=0)
+    gen = sp.episodes()
+    flat = [s for _ in range(2) for s in next(gen)]
+    ns = np.concatenate([s['ev_n'] for s in flat if len(s['ev_idx'])])
+    check('targets record how much evidence stands behind them',
+          ns.min() >= 1.0 and ns.max() > ns.min(),
+          f'{ns.min()}..{ns.max()}')
+    check('halving really does search edges very unequally',
+          ns.max() / ns.min() > 3.0, f'{ns.max() / ns.min():.1f}x')
+
+    opt = torch.optim.AdamW(net.parameters(), lr=0.0)   # measure, do not move
+    _lv, pu = vd.train_step(net, opt, flat[:64], 'cpu', (1., 1., 1., 1.),
+                            ev_weight='uniform')
+    _lv, pe = vd.train_step(net, opt, flat[:64], 'cpu', (1., 1., 1., 1.),
+                            ev_weight='evidence')
+    check('the two weightings give different action KLs',
+          abs(pu['kla'] - pe['kla']) > 1e-6, f"{pu['kla']} vs {pe['kla']}")
+    check('both are finite', np.isfinite(pu['kla']) and np.isfinite(pe['kla']))
+    check('uniform is the default', vd.Config().ev_weight == 'uniform')
+
+    # With every edge equally evidenced the two must agree exactly.
+    for s_ in flat:
+        if len(s_['ev_idx']):
+            s_['ev_n'] = np.full(len(s_['ev_idx']), 5.0, np.float32)
+    _lv, qu = vd.train_step(net, opt, flat[:64], 'cpu', (1., 1., 1., 1.),
+                            ev_weight='uniform')
+    _lv, qe = vd.train_step(net, opt, flat[:64], 'cpu', (1., 1., 1., 1.),
+                            ev_weight='evidence')
+    check('with equal evidence the weighting is a no-op',
+          abs(qu['kla'] - qe['kla']) < 1e-5, f"{qu['kla']} vs {qe['kla']}")
 
 
 def main():
@@ -473,6 +566,8 @@ def main():
     test_halving_schedule()
     test_halving_search()
     test_halving_selfplay()
+    test_choose_considered()
+    test_evidence_weighting()
     print()
     if _fails:
         print(f'{len(_fails)} FAILURES: {_fails}')

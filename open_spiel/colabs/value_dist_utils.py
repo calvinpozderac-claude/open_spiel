@@ -366,6 +366,10 @@ def make_target(root, solved_value=None):
         'ev_idx': searched.astype(np.int32),
         'ev_mu': mu[searched].astype(np.float32),
         'ev_var': var[searched].astype(np.float32),
+        # Observations behind each edge target (prediction + backups).  Under
+        # sequential halving these differ by an order of magnitude across edges,
+        # so the loss can weight a 25-simulation target above a 1-simulation one.
+        'ev_n': root.acc[0][searched].astype(np.float32),
         'played': -1,
         'z': np.float32(z), 'z_w': np.float32(z_w),
         'solved': solved_value is not None,
@@ -477,7 +481,7 @@ if _HAS_TORCH:
         return GNode(state.current_player(), leg, am[0][leg], av[0][leg],
                      vm[0], vv[0], obs=ob[0])
 
-    def full_loss(out, meta, weights):
+    def full_loss(out, meta, weights, ev_weight='uniform'):
         """The four terms the design calls for.
 
         (1) KL of the state's backed-up distribution against the state head
@@ -497,7 +501,16 @@ if _HAS_TORCH:
 
         L_klv = kl_t(meta['v_mu'], meta['v_var'], v_mu, v_var).mean()
 
+        # Edge targets differ enormously in how much evidence stands behind
+        # them -- under sequential halving by design, since eliminated actions
+        # keep only a couple of simulations.  'evidence' weights each edge by
+        # its observation count so a 25-simulation target is not averaged in
+        # alongside a 1-simulation one as though they were equally trustworthy.
+        # Default stays 'uniform' so this is an explicit experiment rather than
+        # a silent change to what the existing arm optimises.
         evm = meta['ev_mask'].float()
+        if ev_weight == 'evidence':
+            evm = evm * meta['ev_n']
         kla = kl_t(meta['ev_mu'], meta['ev_var'], q_mu, q_var)
         L_kla = (kla * evm).sum() / evm.sum().clamp_min(1.0)
 
@@ -548,6 +561,7 @@ if _HAS_TORCH:
         ev_mask = np.zeros((B, K), bool)
         ev_mu = np.zeros((B, K), np.float32)
         ev_var = np.ones((B, K), np.float32)
+        ev_n = np.ones((B, K), np.float32)
         v_mu = np.zeros(B, np.float32)
         v_var = np.ones(B, np.float32)
         z = np.zeros(B, np.float32)
@@ -564,6 +578,7 @@ if _HAS_TORCH:
                 ev_mask[i, idx] = True
                 ev_mu[i, idx] = s['ev_mu']
                 ev_var[i, idx] = s['ev_var']
+                ev_n[i, idx] = s.get('ev_n', np.ones(len(idx), np.float32))
             v_mu[i] = s['v_mu']
             v_var[i] = s['v_var']
             z[i] = s['z']
@@ -574,8 +589,8 @@ if _HAS_TORCH:
                 played_w[i] = 1.0
         ti = torch.from_numpy(np.concatenate([act.reshape(-1), played])).to(device)
         tf = torch.from_numpy(np.concatenate([
-            ev_mu.reshape(-1), ev_var.reshape(-1), v_mu, v_var, z, z_w,
-            played_w])).to(device)
+            ev_mu.reshape(-1), ev_var.reshape(-1), ev_n.reshape(-1),
+            v_mu, v_var, z, z_w, played_w])).to(device)
         tb = torch.from_numpy(np.concatenate([
             mask.reshape(-1), ev_mask.reshape(-1)])).to(device)
         BK = B * K
@@ -592,12 +607,13 @@ if _HAS_TORCH:
             'pad_mask': tb[:BK].view(B, K),
             'ev_mask': tb[BK:BK + BK].view(B, K),
             'ev_mu': nxt(BK, (B, K)), 'ev_var': nxt(BK, (B, K)),
+            'ev_n': nxt(BK, (B, K)),
             'v_mu': nxt(B), 'v_var': nxt(B), 'z': nxt(B), 'z_w': nxt(B),
             'played_w': nxt(B),
         }
 
     def train_step(network, optimizer, batch, device, weights, grad_clip=1.0,
-                   model_lock=None):
+                   model_lock=None, ev_weight='uniform'):
         """One optimiser step.  A non-finite loss or gradient is SKIPPED, never
         applied: clip_grad_norm_ turns a NaN norm into a NaN scale and the
         optimiser then poisons every weight and moment.  With the log-variance
@@ -612,7 +628,7 @@ if _HAS_TORCH:
             with lock:
                 out = network(x)
                 optimizer.zero_grad()
-                loss, parts = full_loss(out, meta, weights)
+                loss, parts = full_loss(out, meta, weights, ev_weight)
                 loss.backward()
                 gnorm = torch.nn.utils.clip_grad_norm_(network.parameters(),
                                                        grad_clip)
@@ -714,7 +730,7 @@ if _HAS_TORCH:
         """Draw the candidate set and lay out the budget for one move."""
         root = slot['root']
         k = len(root.legal)
-        m = min(int(cfg['max_considered']), k)
+        m = choose_considered(slot['sims'], k, cfg['max_considered'])
         draw = sample_edges(root, rng, cfg['temp'])
         slot['cand'] = sorted(range(k), key=lambda i: -draw[i])[:m]
         slot['sched'] = halving_schedule(slot['sims'], m)
@@ -911,7 +927,7 @@ if _HAS_TORCH:
         if k == 1:
             return root, 0
         # Candidates: the top of ONE Thompson draw, in place of Gumbel top-k.
-        m = min(int(max_considered), k)
+        m = choose_considered(n_sims, k, max_considered)
         draw = sample_edges(root, rng, temp)
         cand = sorted(range(k), key=lambda i: -draw[i])[:m]
 
@@ -1009,6 +1025,9 @@ if _HAS_TORCH:
         # using Thompson draws in place of Gumbel noise.
         root_select: str = 'thompson'
         max_considered: int = 16
+        # 'uniform' or 'evidence' -- how the action KL weights edge targets that
+        # were searched very unequally.  See full_loss.
+        ev_weight: str = 'uniform'
         n_parallel_games: int = 16
         wave_per_game: int = 4
         max_plies: int = 128
@@ -1204,7 +1223,8 @@ if _HAS_TORCH:
                         try:
                             _lv, parts = train_step(
                                 base_network, optimizer, b, device,
-                                cfg.loss_weights, cfg.grad_clip)
+                                cfg.loss_weights, cfg.grad_clip,
+                                ev_weight=cfg.ev_weight)
                         except RuntimeError as e:
                             log(f'  ! train step failed, skipped ({e})')
                             continue
@@ -1321,6 +1341,30 @@ def halving_schedule(n_sims, m, phases=None):
             break
         cur = max(1, cur // 2)
     return out
+
+
+def choose_considered(n_sims, k, max_considered=16, min_visits=2):
+    """How many actions the halving should consider, given the budget.
+
+    Gumbel AlphaZero's max_num_considered_actions exists because considering
+    every action at a small budget is self-defeating: with 16 simulations over 8
+    candidates each gets ONE before half are cut, so the first cut is decided by
+    the prior draw rather than by evidence.  Pick the largest candidate set whose
+    FIRST phase still gives each action `min_visits` simulations.
+
+    At the benchmark's budgets this is inert (100 sims over 8 actions already
+    gives 4 each); it only bites in the low-simulation regime the method is
+    actually designed for."""
+    k = int(k)
+    if k <= 1:
+        return k
+    cap = min(k, int(max_considered))
+    best = 2
+    for m in range(2, cap + 1):
+        phases = max(1, int(math.ceil(math.log2(m))))
+        if n_sims // (phases * m) >= min_visits:
+            best = m
+    return min(best, cap)
 
 
 def select_leaf_forced(root, root_state, first_idx, rng, temp=1.0):
