@@ -59,6 +59,16 @@ GAME = 'othello'
 OTHELLO_DEFAULTS = dict(
     game=GAME,
     root='othello_benchmark',
+    # The five original arms plus GA, the Gaussian value-distribution engine,
+    # which needs a game with a natural score and so only appears here.
+    arms=('AA', 'AM', 'MA', 'MM', 'AZ', 'GA'),
+    num_episodes=20_000,
+    # NOTE lr_decay_eps is deliberately left at the shared default (2000) rather
+    # than raised to match num_episodes.  The cosine therefore completes at
+    # episode 2000 and the remaining 90% of the run trains at the 10% floor.
+    # That is a real cost, but the already-trained arms were run that way and
+    # changing it for one arm would make the comparison a comparison of LR
+    # schedules.  Raise it for ALL arms together, on a fresh set of runs.
     max_plies=128,          # the game's own max_game_length; 42 would truncate
     eval_max_plies=128,
     temp_threshold=30,      # ~half of a ~60-ply game, as 12 was for Connect 4
@@ -66,6 +76,9 @@ OTHELLO_DEFAULTS = dict(
     full_sims=300,
     root_noise_alpha=0.6,   # ~10 legal moves vs Connect 4's ~6
     eval_sims=64,
+    # Checkpoints land every deep_eval_every (1000), so these are the round-robin
+    # generations worth rating on a 20000-episode run.
+    gens=(5000, 10000, 15000, 20000),
     # No solved-position metric: there is no Othello equivalent of Pons' exact
     # test sets, so the absolute-strength eval is off and the ladder is the
     # relative one.

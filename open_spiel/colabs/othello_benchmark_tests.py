@@ -343,6 +343,122 @@ def test_sims_scaling():
                               log=lambda *a: None)) == 1)
 
 
+def test_gauss_arm():
+    """GA has to be a first-class arm: trainable, loadable, and playable in the
+    same tournament as the other five."""
+    print('\nthe Gaussian arm is wired in')
+    import value_dist_utils as vd
+    s = ob.default_shared()
+    check('GA is in the Othello arm list', 'GA' in s['arms'])
+    check('but NOT in the Connect 4 default (it needs a scored game)',
+          'GA' not in cb.default_shared()['arms'])
+    check('GA is a known arm', ob.ARMS['GA'][0] == 'gauss')
+    cfg = ob.gauss_config(s)
+    check('its config carries the game', cfg.game_name == 'othello')
+    check('and the shared trunk', (cfg.channels, cfg.num_blocks, cfg.head_ch)
+          == ob.tz_sig(s))
+    check('and the shared self-play shape',
+          (cfg.fast_sims, cfg.full_sims, cfg.max_plies, cfg.temp_threshold)
+          == (s['fast_sims'], s['full_sims'], s['max_plies'],
+              s['temp_threshold']))
+    check('and its own checkpoint directory',
+          cfg.checkpoint_dir == ob.arm_dir(s['root'], 'GA'))
+
+    game = c4.load_game('othello')
+    c4.set_game(game)
+    tiny_s = tiny(arms=('GA',))
+    h = ob.train_arm('GA', tiny_s, log=lambda *a: None)
+    check('it trains', bool(h.get('ep')))
+    check('it produces an Elo ladder like the others', len(h['elo']) >= 1)
+    check('it plays full-length games', h['plies'] and max(h['plies']) > 20)
+    check('its diagnostics are in discs',
+          h['v_sd'] and 1.0 < h['v_sd'][0] < 64.0, f"{h.get('v_sd')}")
+
+    players = ob.load_players(tiny_s, gens=(2,), arms=('GA',))
+    check('its checkpoint loads', any(k.startswith('GA') for k in players))
+    net = [v for k, v in players.items() if k.startswith('GA')][0][1]
+    check('as a GaussianNet', isinstance(net, vd.GaussianNet))
+    st = game.new_initial_state()
+    rng = np.random.default_rng(0)
+    check('the tournament can move it search-free',
+          cb._move('gauss', net, st, 0, rng, {}) in st.legal_actions())
+    check('and with search',
+          cb._move('gauss', net, st, 4, rng, {}) in st.legal_actions())
+
+
+def test_round_robin_cache():
+    """Adding an arm must cost that arm's pairs, not the whole table."""
+    print('\nround-robin results accumulate instead of replaying')
+    import tempfile
+    import torch
+    import value_dist_utils as vd
+    game = c4.load_game('othello')
+    c4.set_game(game)
+    ob.GAME_REF[0] = game
+    torch.manual_seed(0)
+    players = {'A': ('thompson', c4.C4DirichletNet(8, 1, 2)),
+               'B': ('alphazero', az.AlphaZeroNet(8, 1, 2)),
+               'random': ('random', None)}
+    path = os.path.join(tempfile.mkdtemp(), 'rr.json')
+    n1, W1, _ = ob.round_robin(players, sims=0, games_per_pair=4, cache=path,
+                               log=lambda *a: None)
+    check('a first run plays every pair', (W1 + W1.T).sum() / 2 == 3 * 4)
+    n2, W2, _ = ob.round_robin(players, sims=0, games_per_pair=4, cache=path,
+                               log=lambda *a: None)
+    check('re-running reuses everything', np.allclose(W1, W2))
+
+    players['GA'] = ('gauss', vd.GaussianNet(8, 1, 2))
+    lines = []
+    n3, W3, _ = ob.round_robin(players, sims=0, games_per_pair=4, cache=path,
+                               log=lines.append)
+    check('adding an arm reuses the old pairs',
+          any('reusing 3/6' in ln for ln in lines), f'{lines}')
+    sub = [n3.index(x) for x in n1]
+    check('and leaves their results untouched',
+          np.allclose(W3[np.ix_(sub, sub)], W1))
+    check('the new arm is rated', 'GA' in n3)
+
+    n4, W4, _ = ob.round_robin(players, sims=0, games_per_pair=6, cache=path,
+                               log=lambda *a: None)
+    check('raising games_per_pair tops up rather than restarting',
+          (W4 + W4.T).sum() / 2 == 6 * 6, f'{(W4 + W4.T).sum() / 2}')
+    check('search-free and MCTS results do not collide in the cache',
+          cb._cache_key(0, 'A', 'B') != cb._cache_key(128, 'A', 'B'))
+    check('the key is order-independent',
+          cb._cache_key(0, 'A', 'B') == cb._cache_key(0, 'B', 'A'))
+
+
+def test_long_run_settings():
+    """A 20000-episode run needs its LR horizon to match, or 90% of it happens
+    at the floor."""
+    print('\nlong-run settings')
+    s = ob.default_shared()
+    check('20000 episodes', s['num_episodes'] == 20_000)
+    # Deliberately NOT raised to match num_episodes: the arms already trained
+    # used the shared default, and changing it for one arm would turn the
+    # benchmark into a comparison of LR schedules.
+    check('the LR horizon is the shared default, not tailored to this arm',
+          s['lr_decay_eps'] == cb.default_shared()['lr_decay_eps'],
+          f"{s['lr_decay_eps']}")
+    check('every arm gets the SAME horizon',
+          len({ob.thompson_config('MA', s).lr_decay_eps,
+               ob.alphazero_config(s).lr_decay_eps,
+               ob.gauss_config(s).lr_decay_eps}) == 1)
+    check('generations to rate are inside the run',
+          max(s['gens']) <= s['num_episodes'] and min(s['gens']) > 0,
+          f"{s['gens']}")
+    check('every generation is a real checkpoint',
+          all(g % s['deep_eval_every'] == 0 for g in s['gens']),
+          f"{s['gens']} vs deep_eval_every {s['deep_eval_every']}")
+    for name, cfg in (('thompson', ob.thompson_config('MA', s)),
+                      ('alphazero', ob.alphazero_config(s)),
+                      ('gauss', ob.gauss_config(s))):
+        check(f'{name} gets the full episode count',
+              cfg.num_episodes == 20_000)
+        check(f'{name} gets the shared LR horizon',
+              cfg.lr_decay_eps == cb.default_shared()['lr_decay_eps'])
+
+
 def main():
     test_game_shape()
     test_game_contrast()
@@ -355,6 +471,9 @@ def main():
     test_alphazero_has_both_evals()
     test_end_to_end_arms()
     test_end_to_end_matched_capacity()
+    test_gauss_arm()
+    test_round_robin_cache()
+    test_long_run_settings()
     test_sims_scaling()
     print()
     if _fails:

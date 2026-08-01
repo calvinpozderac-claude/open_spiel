@@ -32,6 +32,7 @@ noise.
 """
 
 import itertools
+import json
 import os
 import time
 
@@ -39,6 +40,7 @@ import numpy as np
 
 import connect4_dirichlet_utils as c4
 import connect4_alphazero_utils as az
+import value_dist_utils as vd
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -56,6 +58,8 @@ ARMS = {
             'search additive_mle · target additive_mle'),
     'AZ':  ('alphazero', None, None,
             'AlphaZero control (policy + scalar value, PUCT)'),
+    'GA':  ('gauss', None, None,
+           'Gaussian value distribution over the final score differential'),
 }
 
 
@@ -68,6 +72,39 @@ SOLVED_SUBDIR = 'solved_tests'
 def tz_sig(shared):
     """(channels, num_blocks, head_ch) for the ThompsonZero arms."""
     return (shared['channels'], shared['num_blocks'], shared['head_ch'])
+
+
+def arms_of(shared, arms=None):
+    """Explicit `arms` wins, else the benchmark's own list, else everything."""
+    return list(arms or shared.get('arms') or ARMS)
+
+
+def gauss_config(shared):
+    """The Gaussian value-distribution arm.  Matched to the others on trunk,
+    self-play shape, optimiser, schedule, batch and evals."""
+    _ch, _bl, _hd = tz_sig(shared)
+    return vd.Config(
+        game_name=shared['game'],
+        checkpoint_dir=arm_dir(shared['root'], 'GA'),
+        num_episodes=shared['num_episodes'],
+        channels=_ch, num_blocks=_bl, head_ch=_hd, seed=shared['seed'],
+        device_preference=shared['device'],
+        fast_sims=shared['fast_sims'], full_sims=shared['full_sims'],
+        fast_prob=shared['fast_prob'], temp_threshold=shared['temp_threshold'],
+        max_plies=shared['max_plies'], eval_max_plies=shared['eval_max_plies'],
+        n_parallel_games=shared['n_parallel_games'],
+        wave_per_game=shared['wave_per_game'],
+        batch_size=shared['batch_size'],
+        train_steps_per_ep=shared['train_steps_per_ep'],
+        max_buffer=shared['max_buffer'],
+        lr_peak=shared['lr_peak'], lr_decay_eps=shared['lr_decay_eps'],
+        weight_decay=shared['weight_decay'], grad_clip=shared['grad_clip'],
+        quick_eval_every=shared['quick_eval_every'],
+        quick_eval_games=shared['quick_eval_games'],
+        deep_eval_every=shared['deep_eval_every'],
+        eval_sims=shared['eval_sims'],
+        eval_games_per_pair=shared.get('eval_games_per_pair', 4),
+        resume=shared['resume'])
 
 
 def az_sig(shared):
@@ -211,6 +248,14 @@ def default_shared(**over):
     """Everything the five arms hold in common.  Override any of it by keyword."""
     s = dict(
         game='connect_four', root='c4_benchmark',
+        # Which arms this benchmark runs.  GA (the Gaussian value-distribution
+        # engine) needs a game with a natural score and is therefore not in the
+        # Connect 4 default; othello_benchmark adds it.
+        arms=('AA', 'AM', 'MA', 'MM', 'AZ'),
+        # Generations the round robins rate, and where the pairwise results are
+        # cached so re-running tops up instead of replaying.
+        gens=(1000, 2000),
+        rr_cache='round_robin.json',
         # AlphaZero network size.  None = identical to the ThompsonZero trunk.
         # bench.match_capacity(shared) sets az_channels to equalise total
         # parameters instead; see its docstring for the trade-off.
@@ -309,7 +354,9 @@ def train_arm(name, shared, log=print):
     game = c4.load_game(shared['game'])
     t0 = time.time()
     log(f'\n{"=" * 78}\n=== ARM {name}: {ARMS[name][3]}\n{"=" * 78}')
-    if ARMS[name][0] == 'alphazero':
+    if ARMS[name][0] == 'gauss':
+        hist = vd.run_training(gauss_config(shared), game=game, log=log)
+    elif ARMS[name][0] == 'alphazero':
         hist = az.run_training(alphazero_config(shared), game=game, log=log)
     else:
         hist = c4.run_training(thompson_config(name, shared), game=game, log=log)
@@ -322,7 +369,7 @@ def train_all(shared, arms=None, log=print):
     arms would contend for the GPU and distort the perf numbers, and each arm
     already saturates the device through its own batched inference server."""
     out = {}
-    for name in (arms or list(ARMS)):
+    for name in arms_of(shared, arms):
         out[name] = train_arm(name, shared, log=log)
     return out
 
@@ -330,22 +377,31 @@ def train_all(shared, arms=None, log=print):
 # ══════════════════════════════════════════════════════════════════════════════
 #  Round-robin tournament
 # ══════════════════════════════════════════════════════════════════════════════
-def load_players(shared, gens=(1000, 2000), arms=None, include_random=True):
+def rr_cache_path(shared):
+    """Where pairwise tournament results accumulate, inside the benchmark root
+    so it travels with the checkpoints."""
+    name = shared.get('rr_cache') or 'round_robin.json'
+    return name if os.path.isabs(name) else os.path.join(shared['root'], name)
+
+
+def load_players(shared, gens=None, arms=None, include_random=True):
     """{label: (engine, net)} for every arm × generation that exists on disk.
 
     Also pins the tournament's game from `shared`, so round_robin and the
     diagnostics below inherit it."""
     GAME_REF[0] = c4.load_game(shared['game'])
     c4.set_game(GAME_REF[0])
+    gens = gens or shared.get('gens') or (1000, 2000)
     tsig, asig = tz_sig(shared), az_sig(shared)
     players = {}
-    for name in (arms or list(ARMS)):
+    for name in arms_of(shared, arms):
         engine = ARMS[name][0]
         d = arm_dir(shared['root'], name)
         for g in gens:
             if not os.path.exists(os.path.join(d, f'bench_{g}.pt')):
                 continue
-            net = (az.load_benchmark_net(d, str(g), asig)
+            net = (vd.load_benchmark_net(d, str(g), tsig) if engine == 'gauss'
+                   else az.load_benchmark_net(d, str(g), asig)
                    if engine == 'alphazero'
                    else c4.load_benchmark_net(d, str(g), tsig))
             players[f'{name}@{g}'] = (engine, net)
@@ -358,6 +414,14 @@ def _move(engine, net, state, sims, rng, bots, eval_temp=6.0):
     if engine == 'random' or net is None:
         leg = state.legal_actions()
         return int(leg[rng.integers(len(leg))])
+    if engine == 'gauss':
+        if sims <= 0:
+            return vd.value_lookahead_move(net, state, 'cpu')
+        b = bots.get(id(net))
+        if b is None:
+            b = bots[id(net)] = vd.GMCTSBot(GAME_REF[0], net, 'cpu', sims,
+                                            batch_size=8, random_state=rng)
+        return vd.root_pick(b.mcts_search(state), rng, thompson=False)
     if engine == 'alphazero':
         if sims <= 0:
             return az.value_greedy_move(net, state, 'cpu')
@@ -418,15 +482,42 @@ def bradley_terry(W, iters=4000, lr=0.5, anchor_idx=None):
     return r
 
 
+def _cache_key(sims, a, b):
+    x, y = sorted((a, b))
+    return f'{sims}|{x}|{y}'
+
+
+def _load_rr_cache(path):
+    if path and os.path.exists(path):
+        with open(path) as fh:
+            return json.load(fh)
+    return {}
+
+
+def _save_rr_cache(path, cache):
+    if not path:
+        return
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as fh:
+        json.dump(cache, fh)
+    os.replace(tmp, path)
+
+
 def round_robin(players, sims, games_per_pair, seed=12345, log=print,
-                opening_plies=2, game=None):
+                opening_plies=2, game=None, cache=None):
     """Every pair plays `games_per_pair` games, colours alternating.  Returns
     (names, W, elo).
 
     The game comes from load_players (which reads it from `shared`); pass
     `game` only when calling this without load_players.  It is deliberately not
     defaulted to Connect 4 -- silently rating Othello networks on the wrong
-    board is exactly the kind of thing that produces a confident wrong table."""
+    board is exactly the kind of thing that produces a confident wrong table.
+
+    `cache` is a path to a JSON file of already-played pairs, keyed by
+    (sims, the two labels).  Only the shortfall is played, so adding one arm to
+    a finished tournament costs its own pairs rather than the whole table, and
+    raising games_per_pair tops up rather than restarting.  Results accumulate,
+    so the games already played are never thrown away."""
     if game is not None:
         GAME_REF[0] = c4.load_game(game) if isinstance(game, str) else game
         c4.set_game(GAME_REF[0])
@@ -441,17 +532,39 @@ def round_robin(players, sims, games_per_pair, seed=12345, log=print,
     idx = {k: i for i, k in enumerate(names)}
     W = np.zeros((len(names), len(names)))
     rng = np.random.default_rng(seed)
+    store = _load_rr_cache(cache)
     pairs = list(itertools.combinations(names, 2))
+    todo = []
+    for a, b in pairs:
+        rec = store.get(_cache_key(sims, a, b))
+        played = int(rec[2]) if rec else 0
+        if played < games_per_pair:
+            todo.append((a, b, played))
+    reused = len(pairs) - len(todo)
+    if reused:
+        log(f'  reusing {reused}/{len(pairs)} pairs from {cache}')
     t0 = time.time()
-    for k, (a, b) in enumerate(pairs, 1):
-        for g in range(games_per_pair):
+    for k, (a, b, played) in enumerate(todo, 1):
+        key = _cache_key(sims, a, b)
+        rec = store.get(key)
+        x, y = sorted((a, b))
+        sx = float(rec[0]) if rec else 0.0        # points for x
+        for g in range(played, games_per_pair):
             first, second = (a, b) if g % 2 == 0 else (b, a)
-            s = play_game(players[first], players[second], sims, rng,
-                          opening_plies)
-            W[idx[first], idx[second]] += s
-            W[idx[second], idx[first]] += 1.0 - s
-        if k % 5 == 0 or k == len(pairs):
-            log(f'  … {k}/{len(pairs)} pairs  ({time.time() - t0:.0f}s)')
+            sc = play_game(players[first], players[second], sims, rng,
+                           opening_plies)
+            sx += sc if first == x else 1.0 - sc
+        store[key] = [sx, games_per_pair - sx, games_per_pair]
+        if k % 5 == 0 or k == len(todo):
+            log(f'  … {k}/{len(todo)} new pairs  ({time.time() - t0:.0f}s)')
+    _save_rr_cache(cache, store)
+    for a, b in pairs:
+        rec = store.get(_cache_key(sims, a, b))
+        if not rec:
+            continue
+        x, y = sorted((a, b))
+        W[idx[x], idx[y]] += float(rec[0])
+        W[idx[y], idx[x]] += float(rec[1])
     anchor = idx.get('random')
     return names, W, bradley_terry(W, anchor_idx=anchor)
 
