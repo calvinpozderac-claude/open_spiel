@@ -341,6 +341,57 @@ def test_network_and_loss():
               - vd.INIT_SD ** 2) < 1e-6)
 
 
+def test_inference_shares_the_training_net():
+    """Self-play inference and training run on the SAME network object here.
+
+    This engine has no worker path — `run_training` always builds a
+    `ParallelSelfPlay` around the live network, so the forward pass that picks
+    moves and the forward pass that gets back-propagated touch one object in one
+    process.  Tensors created under `torch.inference_mode()` carry a flag that
+    permanently bars them from autograd, and on some builds that surfaces from
+    inside an unrelated later forward as "Cannot set version_counter for
+    inference tensor".  `no_grad` gives the same savings without the flag, so
+    this test both pins the choice and exercises the interleaving that broke."""
+    if not vd._HAS_TORCH:
+        print('\n(torch missing — interleave test skipped)')
+        return
+    import inspect
+    import torch
+    print('\nInference and training share one network object')
+    src = inspect.getsource(vd.nn_eval_states)
+    body = '\n'.join(l for l in src.splitlines() if not l.strip().startswith('#'))
+    check('nn_eval_states uses no_grad, not inference_mode',
+          'inference_mode' not in body and 'no_grad' in body)
+
+    try:
+        g = game()
+    except Exception:
+        print('  (pyspiel missing — skipped)')
+        return
+    c4.set_backend('cpu', device='cpu')
+    torch.manual_seed(0)
+    net = vd.GaussianNet(16, 1, 4)
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+
+    st = g.new_initial_state()
+    # Inference first, exactly as self-play does it...
+    vd.nn_eval_states(net, 'cpu', [st])
+    # ...then a real gradient step through the same parameters.  Under
+    # inference_mode this is where the flag bites.
+    x = torch.randn(4, *c4._OBS_SHAPE)
+    vm, vlv, am, alv = net(x)
+    loss = vm.pow(2).mean() + vlv.pow(2).mean() + am.pow(2).mean()
+    opt.zero_grad(); loss.backward(); opt.step()
+    check('a gradient step follows a self-play forward', True)
+    # ...and inference again on the now-updated weights, which is the order the
+    # training loop actually runs in.
+    out = vd.nn_eval_states(net, 'cpu', [st])
+    check('and inference runs again on the updated weights',
+          all(np.isfinite(np.asarray(o)).all() for o in out[:4]))
+    check('nothing returned from inference is a torch tensor',
+          not any(isinstance(o, torch.Tensor) for o in out))
+
+
 def main():
     test_primitives()
     test_accumulator()
@@ -349,6 +400,7 @@ def main():
     test_solver()
     test_targets()
     test_network_and_loss()
+    test_inference_shares_the_training_net()
     print()
     if _fails:
         print(f'{len(_fails)} FAILURES: {_fails}')
