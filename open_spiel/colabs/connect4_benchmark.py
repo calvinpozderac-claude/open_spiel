@@ -90,6 +90,8 @@ def gauss_config(shared, name='GA'):
         game_name=shared['game'],
         root_select=ARMS[name][1] or 'thompson',
         max_considered=shared.get('max_considered', 16),
+        head=shared.get('gauss_head', 'spatial'),
+        ev_weight=shared.get('ev_weight', 'uniform'),
         checkpoint_dir=arm_dir(shared['root'], name),
         num_episodes=shared['num_episodes'],
         channels=_ch, num_blocks=_bl, head_ch=_hd, seed=shared['seed'],
@@ -258,6 +260,8 @@ def default_shared(**over):
         # Connect 4 default; othello_benchmark adds it.
         arms=('AA', 'AM', 'MA', 'MM', 'AZ'),
         max_considered=16,
+        gauss_head='spatial',
+        ev_weight='uniform',
         # Generations the round robins rate, and where the pairwise results are
         # cached so re-running tops up instead of replaying.
         gens=(1000, 2000),
@@ -406,7 +410,8 @@ def load_players(shared, gens=None, arms=None, include_random=True):
         for g in gens:
             if not os.path.exists(os.path.join(d, f'bench_{g}.pt')):
                 continue
-            net = (vd.load_benchmark_net(d, str(g), tsig)
+            gsig = tsig + (shared.get('gauss_head', 'spatial'),)
+            net = (vd.load_benchmark_net(d, str(g), gsig)
                    if engine in ('gauss', 'gauss_halving')
                    else az.load_benchmark_net(d, str(g), asig)
                    if engine == 'alphazero'

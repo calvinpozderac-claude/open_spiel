@@ -188,3 +188,75 @@ def sizing_table(shared=None, sizes=SIZES, games_per_arm=4000, n_arms=5,
         'action count while the trunk scales, so a size suited to Othello is '
         'much closer to matched than 32/3/8 is.')
     return rows
+
+
+#  Everything this project established, in one configuration.
+#
+#  Split deliberately into what is MEASURED and what is a HYPOTHESIS, because
+#  only the first group is safe to adopt without an A/B.
+#
+#  Measured, and strictly better:
+#    lr_decay_eps = num_episodes   at the old default of 2000 a 20000-episode
+#                                  run finishes its cosine at episode 2000 and
+#                                  spends 90% of its life at the 10% floor
+#    head='spatial'                64x fewer action-head parameters at identical
+#                                  self-play wall clock, and the action->cell
+#                                  mapping is exact for Othello
+#    64/5/16 trunk                 TZ/AZ parameter ratio 1.24 against 2.09 at
+#                                  32/3/8, and ~62h for five arms rather than 46
+#                                  (sizing_table)
+#  Hypotheses, exposed as flags so they can be A/B'd rather than assumed:
+#    root_select='halving'         Gumbel-AZ sequential halving with Thompson
+#                                  draws.  Its gains are largest at SMALL
+#                                  budgets; at 100-300 sims over ~8.5 legal
+#                                  moves it may be a wash
+#    ev_weight='evidence'          halving makes edge evidence 14x unequal, so
+#                                  weighting the action KL by observation count
+#                                  stops a 1-simulation target counting as much
+#                                  as a 25-simulation one
+BEST = dict(
+    arms=('GH',),
+    channels=64, num_blocks=5, head_ch=16,
+    lr_decay_eps=None,              # filled from num_episodes below
+    gauss_head='spatial',
+    ev_weight='evidence',
+    max_considered=16,
+)
+
+
+def best_shared(**over):
+    """The recommended configuration.  `bench.best_shared(num_episodes=20_000)`.
+
+    Deliberately NOT the default for the existing benchmark: several of these
+    change learning dynamics, and the arms already trained were not run this
+    way.  Use it for a fresh set of runs, not to extend an old one."""
+    s = default_shared(**{**BEST, **over})
+    if s.get('lr_decay_eps') is None:
+        s['lr_decay_eps'] = s['num_episodes']
+    return s
+
+
+def best_report(shared=None, log=print):
+    """What the configuration is and why, with the measured numbers."""
+    import connect4_dirichlet_utils as _c4
+    shared = shared or best_shared()
+    _c4.set_game(_c4.load_game(shared['game']))
+    log('measured, strictly better:')
+    log(f'  LR horizon        {shared["lr_decay_eps"]} = num_episodes '
+        f'(at 2000 a 20000-episode run spends 90% at the 10% floor)')
+    import value_dist_utils as _vd
+    sig = (shared['channels'], shared['num_blocks'], shared['head_ch'])
+    hp = {h: sum(p.numel() for n, p in _vd.make_net(*sig, head=h)
+                 .named_parameters()
+                 if n.split('.')[0] in ('v_out', 'a_out', 'a_head', 'a_pass'))
+          for h in ('dense', 'spatial')}
+    log(f'  action+value head {hp["spatial"]:,} spatial vs {hp["dense"]:,} '
+        f'dense ({hp["dense"] / hp["spatial"]:.0f}x smaller, same wall clock)')
+    log(f'  trunk             {shared["channels"]}/{shared["num_blocks"]}/'
+        f'{shared["head_ch"]}')
+    log('hypotheses, flip to compare:')
+    log(f'  root_select       {_b.gauss_config(shared, "GH").root_select} '
+        f'(GA is the Thompson-root control)')
+    log(f'  ev_weight         {shared["ev_weight"]} '
+        f"('uniform' is the control)")
+    return shared

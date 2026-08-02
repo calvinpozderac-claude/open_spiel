@@ -387,7 +387,10 @@ def test_gauss_arm():
     players = ob.load_players(tiny_s, gens=(2,), arms=('GA',))
     check('its checkpoint loads', any(k.startswith('GA') for k in players))
     net = [v for k, v in players.items() if k.startswith('GA')][0][1]
-    check('as a GaussianNet', isinstance(net, vd.GaussianNet))
+    check('as the configured head type',
+          isinstance(net, vd.SpatialGaussianNet
+                     if tiny_s.get('gauss_head', 'spatial') == 'spatial'
+                     else vd.GaussianNet), type(net).__name__)
     st = game.new_initial_state()
     rng = np.random.default_rng(0)
     check('the tournament can move it search-free',
@@ -469,6 +472,32 @@ def test_long_run_settings():
               cfg.lr_decay_eps == cb.default_shared()['lr_decay_eps'])
 
 
+def test_best_shared():
+    """The recommended configuration must be opt-in and internally consistent."""
+    print('\nbest_shared')
+    b = ob.best_shared(num_episodes=20_000)
+    check('the LR horizon follows the run', b['lr_decay_eps'] == 20_000)
+    check('and follows an override too',
+          ob.best_shared(num_episodes=5000)['lr_decay_eps'] == 5000)
+    check('an explicit horizon still wins',
+          ob.best_shared(num_episodes=5000, lr_decay_eps=999)['lr_decay_eps']
+          == 999)
+    check('spatial head', b['gauss_head'] == 'spatial')
+    check('trunk sized for Othello', (b['channels'], b['num_blocks']) == (64, 5))
+    check('it does NOT change the plain default',
+          ob.default_shared()['gauss_head'] == 'spatial'
+          and ob.default_shared()['ev_weight'] == 'uniform'
+          and ob.default_shared()['channels'] == 32,
+          'best_shared must be opt-in for the hypotheses')
+    cfg = ob.gauss_config(b, 'GH')
+    check('the flags reach the engine',
+          (cfg.head, cfg.root_select, cfg.ev_weight)
+          == ('spatial', 'halving', 'evidence'))
+    check('and so does the trunk',
+          (cfg.channels, cfg.num_blocks, cfg.head_ch) == (64, 5, 16))
+    check('best_report runs', ob.best_report(b, log=lambda *a: None) is b)
+
+
 def main():
     test_game_shape()
     test_game_contrast()
@@ -484,6 +513,7 @@ def main():
     test_gauss_arm()
     test_round_robin_cache()
     test_long_run_settings()
+    test_best_shared()
     test_sims_scaling()
     print()
     if _fails:

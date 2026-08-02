@@ -555,6 +555,132 @@ def test_evidence_weighting():
           abs(qu['kla'] - qe['kla']) < 1e-5, f"{qu['kla']} vs {qe['kla']}")
 
 
+def test_spatial_head():
+    if not vd._HAS_TORCH:
+        return
+    import torch
+    print('\nspatial action head')
+    try:
+        g = game()
+    except Exception:
+        print('  (pyspiel missing — skipped)')
+        return
+    c4.set_backend('cpu', device='cpu')
+    torch.manual_seed(0)
+    dense = vd.make_net(32, 3, 8, head='dense')
+    spat = vd.make_net(32, 3, 8, head='spatial')
+
+    def heads(n):
+        return sum(p.numel() for nm, p in n.named_parameters()
+                   if nm.split('.')[0] in ('v_out', 'a_out', 'a_head', 'a_pass'))
+
+    check('the spatial head is far smaller', heads(spat) * 20 < heads(dense),
+          f'{heads(spat)} vs {heads(dense)}')
+    check('the trunk is unchanged',
+          sum(p.numel() for n, p in dense.named_parameters()
+              if n.startswith(('stem', 'body')))
+          == sum(p.numel() for n, p in spat.named_parameters()
+                 if n.startswith(('stem', 'body'))))
+
+    x = torch.randn(4, *c4._OBS_SHAPE)
+    for name, net in (('dense', dense), ('spatial', spat)):
+        net.eval()
+        with torch.inference_mode():
+            vm, vlv, am, alv = net(x)
+        check(f'{name}: emits one distribution per action',
+              am.shape == (4, c4._NUM_ACTIONS) and alv.shape == am.shape,
+              f'{am.shape}')
+        check(f'{name}: initialises to an even game', float(vm.abs().max()) < 1e-6)
+        check(f'{name}: at INIT_SD',
+              abs(float(vd._var(alv).mean()) - vd.INIT_SD ** 2) < 1e-6)
+
+    # The mapping must be the real one: action a < 64 IS cell (a//8, a%8).
+    # Perturb one cell's features and check only that action's output moves.
+    st = g.new_initial_state()
+    obs = c4.make_obs(st)
+    xx = c4.batch_to_tensor([obs], 'cpu')
+    with torch.no_grad():
+        spat.a_head.weight.normal_(0, 0.5)
+        h = spat.proj(spat.body(spat.stem(xx)))
+        a = spat.a_head(h)
+        flat = a.reshape(1, 2, 64).transpose(1, 2)[0, :, 0]
+    check('cell order matches action order',
+          torch.allclose(flat, a[0, 0].reshape(-1), atol=1e-6))
+
+    # Weight sharing is the whole point: every legal cell trains the same
+    # weights, so a gradient from ONE position reaches the head used by all.
+    spat.zero_grad()
+    h = spat.proj(spat.body(spat.stem(xx)))
+    spat.a_head(h)[0, 0, 2, 3].backward()
+    gw = spat.a_head.weight.grad
+    check('one cell\'s gradient updates the shared action weights',
+          gw is not None and float(gw.abs().sum()) > 0)
+    dense.zero_grad()
+    dv, dl, da, dal = dense(xx)
+    da[0, 19].backward()
+    rows = dense.a_out.weight.grad.abs().sum(1)
+    touched = int((rows > 0).sum())
+    check('the dense head only updates that action\'s own rows',
+          touched <= 2, f'{touched} rows')
+    check('…which is exactly the sparsity the spatial head removes', True)
+
+    # Both round-trip through disk at their own head type.
+    import tempfile
+    d = tempfile.mkdtemp()
+    vd.save_benchmark_net(d, 's', spat)
+    back = vd.load_benchmark_net(d, 's', (32, 3, 8, 'spatial'))
+    check('spatial round-trips', isinstance(back, vd.SpatialGaussianNet))
+    vd.save_benchmark_net(d, 'd', dense)
+    check('dense round-trips',
+          isinstance(vd.load_benchmark_net(d, 'd', (32, 3, 8, 'dense')),
+                     vd.GaussianNet))
+    check('a 3-tuple signature still works, defaulting to spatial',
+          isinstance(vd.load_benchmark_net(d, 's', (32, 3, 8)),
+                     vd.SpatialGaussianNet))
+
+
+def test_sample_edges_fast_path():
+    """sample_edges profiled at 24% of self-play time, so it was rewritten
+    around counters and in-place numpy.  It must still be the same function."""
+    print('\nsample_edges after optimisation')
+    rng = np.random.default_rng(0)
+    k = 6
+    node = vd.GNode(0, list(range(k)), np.linspace(-0.5, 0.5, k),
+                    np.full(k, 1e-8), 0.0, 0.01)
+    x = vd.sample_edges(node, rng)
+    check('with near-zero variance the draw is the mean',
+          np.allclose(x, np.linspace(-0.5, 0.5, k), atol=1e-3), f'{x}')
+    check('and the argmax is the best action', int(x.argmax()) == k - 1)
+
+    # Empirically the draw must match N(belief_mu, belief_var).
+    node2 = vd.GNode(0, [0], np.array([0.3]), np.array([0.09]), 0.0, 0.09)
+    for _ in range(3):
+        node2.add(0, 0.3, 0.09)
+    mu, var = (float(v[0]) for v in node2.belief())
+    draws = np.array([vd.sample_edges(node2, rng)[0] for _ in range(20_000)])
+    check('draws match the belief mean',
+          abs(float(draws.mean()) - mu) < 0.02,
+          f'{float(draws.mean()):.4f} vs {mu:.4f}')
+    check('draws match the belief sd',
+          abs(float(draws.std()) - math.sqrt(var)) < 0.02,
+          f'{float(draws.std()):.4f} vs {math.sqrt(var):.4f}')
+
+    # Counters must track the arrays they replace, or the fast path skips work
+    # it should have done.
+    n3 = vd.GNode(0, [0, 1, 2], np.zeros(3), np.full(3, 1e-9), 0.0, 0.01)
+    check('no proven edges initially', n3.n_term == 0)
+    n3.prove(1, 0.9)
+    check('prove() bumps the counter', n3.n_term == 1)
+    n3.prove(1, 0.9)
+    check('proving the same edge twice does not double-count', n3.n_term == 1)
+    check('the proven value is used in the draw',
+          abs(vd.sample_edges(n3, rng)[1] - 0.9) < 1e-9)
+    n3.vloss[2] = 1
+    n3.n_vloss = 1
+    check('virtual loss pushes an in-flight edge down',
+          vd.sample_edges(n3, rng)[2] < -100)
+
+
 def main():
     test_primitives()
     test_accumulator()
@@ -563,6 +689,8 @@ def main():
     test_solver()
     test_targets()
     test_network_and_loss()
+    test_spatial_head()
+    test_sample_edges_fast_path()
     test_halving_schedule()
     test_halving_search()
     test_halving_selfplay()

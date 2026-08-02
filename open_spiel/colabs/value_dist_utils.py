@@ -189,25 +189,31 @@ class GNode:
                  _TERM_NONE
     """
 
+    # `n_term` / `n_vloss` are counts of proven and in-flight edges.  They exist
+    # so the hot path can skip two whole-array scans: sample_edges runs once per
+    # simulation per node and profiled at 24% of self-play time, where numpy's
+    # per-call overhead on 8-element arrays dominates the arithmetic.
     __slots__ = ('player', 'legal', 'acc', 'term', 'vloss', 'children', 'obs',
-                 'mu', 'var', 'n_pred')
+                 'mu', 'var', 'n_term', 'n_vloss')
 
     def __init__(self, player, legal, a_mu, a_var, mu, var, obs=None):
         self.player = player
         self.legal = np.asarray(legal, dtype=np.int32)
         k = len(self.legal)
-        a_mu = np.asarray(a_mu, dtype=np.float64).reshape(k)
-        a_var = np.maximum(np.asarray(a_var, dtype=np.float64).reshape(k),
-                           VAR_FLOOR)
-        # n, sum_mu, sum_var per action, vectorised.
-        self.acc = np.stack([np.ones(k), a_mu, a_var])       # (3, k)
+        # One allocation for the accumulator instead of three plus a stack.
+        acc = np.empty((3, k))
+        acc[0] = 1.0
+        acc[1] = a_mu
+        np.maximum(a_var, VAR_FLOOR, out=acc[2])
+        self.acc = acc
         self.term = np.full(k, _TERM_NONE)
         self.vloss = np.zeros(k, dtype=np.int32)
         self.children = [None] * k
         self.obs = obs
         self.mu = float(mu)          # the STATE's predicted distribution
         self.var = float(max(var, VAR_FLOOR))
-        self.n_pred = 1.0
+        self.n_term = 0
+        self.n_vloss = 0
 
     def belief(self):
         """(mu, var) per action — what Thompson sampling draws from."""
@@ -218,6 +224,11 @@ class GNode:
         """(mu, var) per action — the aleatoric target for the action head."""
         n = self.acc[0]
         return self.acc[1] / n, np.maximum(self.acc[2] / n, VAR_FLOOR)
+
+    def prove(self, idx, value):
+        if self.term[idx] <= _TERM_NONE:
+            self.n_term += 1
+        self.term[idx] = value
 
     def add(self, idx, mu, var):
         self.acc[0, idx] += 1.0
@@ -258,6 +269,8 @@ def select_leaf(root, root_state, rng, temp=1.0):
         state.apply_action(int(node.legal[idx]))
         if state.is_terminal():
             s = othello_score(state, node.player)
+            if node.term[idx] <= _TERM_NONE:
+                node.n_term += 1
             node.term[idx] = s
             return path, None, (s, TERMINAL_VAR), None
         child = node.children[idx]
@@ -272,6 +285,7 @@ def backup(path, mu, var):
     the spread of the same outcome seen from the other side."""
     for node, idx in reversed(path):
         node.vloss[idx] -= 1
+        node.n_vloss -= 1
         node.add(idx, mu, var)
         mu = -mu
 
@@ -306,6 +320,7 @@ def propagate_solved(path, aux=None):
         parent, pidx = path[k - 1]
         if parent.term[pidx] > _TERM_NONE:
             break
+        parent.n_term += 1
         parent.term[pidx] = -out
         if aux is not None and node.obs is not None:
             aux.append(make_target(node, solved_value=out))
@@ -443,6 +458,76 @@ if _HAS_TORCH:
             v = self.v_out(h)
             a = self.a_out(h).view(-1, c4._NUM_ACTIONS, 2)
             return v[:, 0], v[:, 1], a[..., 0], a[..., 1]
+
+    class SpatialGaussianNet(nn.Module):
+        """Trunk → state head + a SPATIAL action head.
+
+        The dense action head is a Linear(flat, A*2).  At Othello's 65 actions
+        that is ~67k parameters, and each action's row is only updated when that
+        square happens to be legal -- measured at 12.9% of positions, against
+        96.8% on Connect 4.  So the widest part of the network learns from the
+        thinnest signal.
+
+        Othello's actions ARE board cells: action a < 64 is exactly cell
+        (a//8, a%8), verified against the engine.  So emit them with a 1x1
+        convolution instead.  The same weights apply at all 64 cells, so every
+        legal move at every position trains them -- the sparsity disappears, not
+        by inventing targets for dead slots but by not having per-slot weights
+        at all.  It is also the right prior: Othello value is strongly
+        translation-structured (corners, edges, X-squares), and this is how
+        AlphaGo Zero emits its policy over board points.
+
+        Action 64 (pass) is not a cell, and is always the ONLY legal action when
+        it appears, so it never competes for selection.  It gets its own tiny
+        head off the pooled trunk purely so its target has somewhere to go."""
+
+        def __init__(self, channels=64, num_blocks=5, head_ch=16):
+            super().__init__()
+            self._sig = (channels, num_blocks, head_ch)
+            in_ch = c4._OBS_SHAPE[0]
+            self.stem = nn.Sequential(
+                nn.Conv2d(in_ch, channels, 3, padding=1, bias=False),
+                c4._norm(channels), nn.ReLU(inplace=True))
+            self.body = nn.Sequential(*[c4.ResBlock(channels)
+                                        for _ in range(num_blocks)])
+            # ONE 1x1 projection shared by both heads.  Giving the action head
+            # its own cost ~11% of self-play wall clock for no benefit: the two
+            # heads want the same per-cell features, one flattened and one kept
+            # spatial.
+            self.proj = nn.Sequential(
+                nn.Conv2d(channels, head_ch, 1, bias=False),
+                c4._norm(head_ch), nn.ReLU(inplace=True))
+            flat = head_ch * c4._OBS_SHAPE[1] * c4._OBS_SHAPE[2]
+            self.v_out = nn.Linear(flat, 2)
+            self.a_head = nn.Conv2d(head_ch, 2, 1)
+            self.a_pass = nn.Linear(head_ch, 2)
+            self._cells = c4._OBS_SHAPE[1] * c4._OBS_SHAPE[2]
+            self._extra = c4._NUM_ACTIONS - self._cells
+            lv0 = math.log(INIT_SD ** 2)
+            nn.init.zeros_(self.v_out.weight)
+            nn.init.zeros_(self.a_head.weight)
+            nn.init.zeros_(self.a_pass.weight)
+            with torch.no_grad():
+                self.v_out.bias.zero_(); self.v_out.bias[1] = lv0
+                self.a_head.bias.zero_(); self.a_head.bias[1] = lv0
+                self.a_pass.bias.zero_(); self.a_pass.bias[1] = lv0
+
+        def forward(self, x):
+            h = self.proj(self.body(self.stem(x)))   # (B, head_ch, H, W)
+            v = self.v_out(h.flatten(1))
+            a = self.a_head(h)                       # (B, 2, H, W)
+            B = a.shape[0]
+            a = a.reshape(B, 2, self._cells).transpose(1, 2)      # (B, cells, 2)
+            if self._extra > 0:                      # pass, and anything like it
+                p = self.a_pass(h.mean(dim=(2, 3)))  # (B, 2)
+                a = torch.cat([a, p.unsqueeze(1).expand(B, self._extra, 2)], 1)
+            return v[:, 0], v[:, 1], a[..., 0], a[..., 1]
+
+    def make_net(channels, num_blocks, head_ch, head='spatial'):
+        """`head='spatial'` shares action weights across board cells;
+        `'dense'` is the original Linear(flat, A*2)."""
+        cls = SpatialGaussianNet if head == 'spatial' else GaussianNet
+        return cls(channels, num_blocks, head_ch)
 
     def _var(logvar):
         """log-variance → variance.  Deliberately unclamped: see the note on
@@ -1014,6 +1099,11 @@ if _HAS_TORCH:
         channels: int = 32
         num_blocks: int = 3
         head_ch: int = 8
+        # 'spatial' shares the action head's weights across board cells, which
+        # is exact for Othello (action a<64 IS cell (a//8, a%8)) and removes the
+        # 12.9%-supervision problem the dense head has.  Same speed, 64x fewer
+        # head parameters.  'dense' is the original Linear(flat, A*2).
+        head: str = 'spatial'
         # search
         fast_sims: int = 100
         full_sims: int = 300
@@ -1066,14 +1156,19 @@ if _HAS_TORCH:
 
     # ── Checkpoints ───────────────────────────────────────────────────────────
     def build_network(cfg, device):
-        sig = (cfg.channels, cfg.num_blocks, cfg.head_ch)
-        return GaussianNet(*sig).to(device), sig
+        sig = (cfg.channels, cfg.num_blocks, cfg.head_ch, cfg.head)
+        return make_net(*sig).to(device), sig
 
     def cpu_clone(net, sig):
-        c = GaussianNet(*sig)
+        c = make_net(*_sig4(sig))
         c.load_state_dict(c4._cpu_sd(net))
         c.eval()
         return c
+
+    def _sig4(sig):
+        """Accept a 3-tuple (channels, blocks, head_ch) from callers that
+        predate the head option, defaulting to the spatial head."""
+        return tuple(sig) if len(sig) == 4 else (tuple(sig) + ('spatial',))
 
     def save_benchmark_net(d, label, net):
         import os
@@ -1084,7 +1179,7 @@ if _HAS_TORCH:
 
     def load_benchmark_net(d, label, sig):
         import os
-        net = GaussianNet(*sig)
+        net = make_net(*_sig4(sig))
         net.load_state_dict(torch.load(os.path.join(d, f'bench_{label}.pt'),
                                        map_location='cpu', weights_only=True))
         net.eval()
@@ -1375,13 +1470,14 @@ def select_leaf_forced(root, root_state, first_idx, rng, temp=1.0):
     idx = first_idx
     while True:
         node.vloss[idx] += 1
+        node.n_vloss += 1
         path.append((node, idx))
         if node.term[idx] > _TERM_NONE:
             return path, None, (float(node.term[idx]), TERMINAL_VAR), None
         state.apply_action(int(node.legal[idx]))
         if state.is_terminal():
             s = othello_score(state, node.player)
-            node.term[idx] = s
+            node.prove(idx, s)
             return path, None, (s, TERMINAL_VAR), None
         child = node.children[idx]
         if child is None:
