@@ -592,7 +592,17 @@ if _HAS_TORCH:
         """States → (v_mu, v_var, a_mu, a_var, obs16), all numpy."""
         obs16 = np.asarray([c4.make_obs(s) for s in states], dtype=np.float16)
         x = c4.batch_to_tensor(obs16, device)
-        with torch.inference_mode():
+        # no_grad, NOT inference_mode.  This engine has no worker path, so
+        # ParallelSelfPlay runs self-play inference on the very network object
+        # train_step back-propagates through, in the same process.  Tensors made
+        # under inference_mode carry a flag that permanently bars them from
+        # autograd, and on some torch builds that surfaces mid-forward as
+        # "RuntimeError: Cannot set version_counter for inference tensor".  The
+        # ThompsonZero and AlphaZero engines default to use_workers=True, so
+        # their self-play runs in another process and never meets the training
+        # graph -- which is why only this engine hit it.  no_grad gives the same
+        # savings without the flag.
+        with torch.no_grad():
             vm, vlv, am, alv = network(x)
             vv, av = _var(vlv), _var(alv)
         return (vm.cpu().numpy(), vv.cpu().numpy(),
