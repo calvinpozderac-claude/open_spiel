@@ -102,11 +102,17 @@ def test_accumulator():
     check('belief mean is the average of all observations, prediction included',
           abs(vd.belief(a)[0] - (0.0 + 0.4 - 0.2 + 0.1) / 4) < 1e-12)
 
-    # A confident observation pulls the belief harder than a vague one only
-    # through the mean; the variance term averages.
-    a1 = vd.new_acc(0.0, 1.0); vd.acc_add(a1, 1.0, 1e-6)
-    check('a near-certain observation collapses the belief spread',
-          vd.belief(a1)[1] < 0.26, f'{vd.belief(a1)}')
+    # A near-certain observation collapses the belief only if it AGREES with
+    # what is already there.  One that contradicts the prior is evidence that
+    # something is unresolved, not evidence of certainty -- the law of total
+    # variance adds the spread of the means, so the belief stays wide.
+    agree = vd.new_acc(1.0, 1.0); vd.acc_add(agree, 1.0, 1e-6)
+    clash = vd.new_acc(0.0, 1.0); vd.acc_add(clash, 1.0, 1e-6)
+    check('a near-certain AGREEING observation collapses the belief spread',
+          vd.belief(agree)[1] < 0.26, f'{vd.belief(agree)}')
+    check('a near-certain CONTRADICTING one does not',
+          vd.belief(clash)[1] > vd.belief(agree)[1] * 1.4,
+          f'{vd.belief(clash)[1]:.4f} vs {vd.belief(agree)[1]:.4f}')
     check('VAR_FLOOR applies to accumulated variance',
           vd.belief(vd.new_acc(0.0, 0.0))[1] >= vd.VAR_FLOOR)
 
@@ -681,14 +687,116 @@ def test_sample_edges_fast_path():
           vd.sample_edges(n3, rng)[2] < -100)
 
 
+def test_variance_cannot_collapse():
+    """The action head's KL target is built from variances the network itself
+    predicted, so that loop is self-consistent at ANY level including zero.
+    The law of total variance breaks it: the spread of the observed MEANS comes
+    from actually searching different continuations, not from the head, so a
+    confident head cannot wish it away."""
+    print('\nvariance cannot collapse to zero')
+    # Five observations the network is maximally confident about, but which
+    # disagree with each other.  The old rule returned the mean variance and so
+    # reported near-certainty; the correct one reports the disagreement.
+    tiny = 1e-9
+    agree = vd.new_acc(0.3, tiny)
+    clash = vd.new_acc(-0.5, tiny)
+    for m in (0.3, 0.3, 0.3, 0.3):
+        vd.acc_add(agree, m, tiny)
+    for m in (0.5, -0.4, 0.45, 0.0):
+        vd.acc_add(clash, m, tiny)
+    _am, av = vd.outcome_spread(agree)
+    _cm, cv = vd.outcome_spread(clash)
+    check('agreeing near-certain observations DO give a tiny spread',
+          av <= vd.VAR_FLOOR + 1e-12, f'{av}')      # floored, as designed
+    check('disagreeing ones cannot be collapsed by a confident head',
+          cv > 0.1, f'{cv}')
+    # Each observation's variance is floored at VAR_FLOOR, so the mean-variance
+    # term is exactly that; everything above it is the spread of the means.
+    check('the inflation is exactly the variance of the means',
+          abs(cv - (np.var([-0.5, 0.5, -0.4, 0.45, 0.0]) + vd.VAR_FLOOR)) < 1e-9,
+          f'{cv}')
+
+    # It is the law of total variance, so it must match the two-stage identity.
+    rng = np.random.default_rng(0)
+    mus = rng.normal(0, 0.3, 40)
+    vars_ = rng.uniform(0.001, 0.05, 40)
+    acc = vd.new_acc(mus[0], vars_[0])
+    for m, v in zip(mus[1:], vars_[1:]):
+        vd.acc_add(acc, m, v)
+    _m, tv = vd.outcome_spread(acc)
+    check('total variance = E[var] + Var[mean]',
+          abs(tv - (vars_.mean() + mus.var())) < 1e-9,
+          f'{tv} vs {vars_.mean() + mus.var()}')
+    check('the belief is that over n, not the raw spread',
+          abs(vd.belief(acc)[1] - tv / len(mus)) < 1e-12)
+
+    # And the node-level accumulator must agree with the module-level one.
+    node = vd.GNode(0, [0], np.array([mus[0]]), np.array([vars_[0]]), 0.0, 0.04)
+    for m, v in zip(mus[1:], vars_[1:]):
+        node.add(0, m, v)
+    check('GNode agrees with the standalone accumulator',
+          abs(float(node.spread()[1][0]) - tv) < 1e-9)
+    check('and so does its belief',
+          abs(float(node.belief()[1][0]) - tv / len(mus)) < 1e-9)
+
+
+def test_calibration_metric():
+    if not vd._HAS_TORCH:
+        return
+    import torch
+    print('\ncalibration diagnostic')
+    try:
+        game()
+    except Exception:
+        print('  (pyspiel missing — skipped)')
+        return
+    c4.set_backend('cpu', device='cpu')
+    torch.manual_seed(0)
+    net = vd.GaussianNet(16, 1, 4)          # predicts sd = INIT_SD everywhere
+    B, K = 512, 6
+
+    def run(z):
+        meta = {'pad_act': torch.zeros(B, K, dtype=torch.long),
+                'pad_mask': torch.ones(B, K, dtype=torch.bool),
+                'v_mu': torch.zeros(B), 'v_var': torch.full((B,), 0.05),
+                'ev_mu': torch.zeros(B, K), 'ev_var': torch.full((B, K), 0.05),
+                'ev_n': torch.ones(B, K),
+                'ev_mask': torch.ones(B, K, dtype=torch.bool),
+                'z': z, 'z_w': torch.ones(B),
+                'played': torch.zeros(B, dtype=torch.long),
+                'played_w': torch.ones(B)}
+        x = torch.randn(B, *c4._OBS_SHAPE)
+        return vd.full_loss(net(x), meta, (1., 1., 1., 1.))[1]
+
+    ok = run(torch.randn(B) * vd.INIT_SD)
+    over = run(torch.randn(B) * vd.INIT_SD * 2)
+    under = run(torch.randn(B) * vd.INIT_SD * 0.25)
+    check('a calibrated net reads calib ~ 1', abs(ok['calib'] - 1.0) < 0.15,
+          f"{ok['calib']:.2f}")
+    check('an OVERCONFIDENT net reads calib > 1', over['calib'] > 2.0,
+          f"{over['calib']:.2f}")
+    check('a hedging net reads calib < 1', under['calib'] < 0.5,
+          f"{under['calib']:.2f}")
+    check('cov68 is ~0.68 when calibrated', abs(ok['cov68'] - 0.683) < 0.08,
+          f"{ok['cov68']:.2f}")
+    check('cov68 falls when overconfident', over['cov68'] < 0.5,
+          f"{over['cov68']:.2f}")
+    check('cov68 rises when hedging', under['cov68'] > 0.9,
+          f"{under['cov68']:.2f}")
+    check('rmse is reported in discs',
+          abs(ok['rmse'] - vd.INIT_SD * vd.SCORE_SCALE) < 4.0, f"{ok['rmse']:.1f}")
+
+
 def main():
     test_primitives()
     test_accumulator()
+    test_variance_cannot_collapse()
     test_score()
     test_tree()
     test_solver()
     test_targets()
     test_network_and_loss()
+    test_calibration_metric()
     test_spatial_head()
     test_sample_edges_fast_path()
     test_halving_schedule()

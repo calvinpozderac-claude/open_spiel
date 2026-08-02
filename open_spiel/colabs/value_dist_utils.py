@@ -153,27 +153,54 @@ def _erf(x):
 #  is the standard error of the mean: n copies of N(m, v) give N(m, v/n).
 # ══════════════════════════════════════════════════════════════════════════════
 def new_acc(mu_pred, var_pred):
-    return [1.0, float(mu_pred), float(max(var_pred, VAR_FLOOR))]
+    mu = float(mu_pred)
+    return [1.0, mu, float(max(var_pred, VAR_FLOOR)), mu * mu]
 
 
 def acc_add(acc, mu, var):
+    mu = float(mu)
     acc[0] += 1.0
-    acc[1] += float(mu)
+    acc[1] += mu
     acc[2] += float(max(var, VAR_FLOOR))
+    acc[3] += mu * mu
+
+
+def total_var(acc):
+    """Variance of ONE outcome through this edge, by the law of total variance:
+
+        Var(X) = E[Var(X | observation)] + Var(E[X | observation])
+               = mean of the observed variances + spread of their means
+
+    The second term is what stops the variance collapsing.  Every observation's
+    variance is a number the NETWORK predicted, so training the head toward the
+    mean of those is self-referential -- predicted variance becomes the target
+    becomes the predicted variance, and the loop is consistent at any level
+    including zero, with only the NLL against real outcomes anchoring it.  The
+    disagreement between the observed MEANS is not self-referential: it comes
+    from actually searching different continuations.  If the search finds the
+    children disagree, the target variance goes up and the head cannot shrink it
+    however confident it would like to be."""
+    n = acc[0]
+    mu = acc[1] / n
+    between = acc[3] / n - mu * mu
+    if hasattr(between, 'clip'):
+        between = between.clip(0.0)             # float error can go slightly <0
+    else:
+        between = max(between, 0.0)
+    return acc[2] / n + between
 
 
 def belief(acc):
     """(mu, var) of the belief about the MEAN final differential."""
     n = acc[0]
-    return acc[1] / n, max(acc[2] / (n * n), VAR_FLOOR)
+    return acc[1] / n, max(total_var(acc) / n, VAR_FLOOR)
 
 
 def outcome_spread(acc):
-    """(mu, var) of the predicted OUTCOME, i.e. the aleatoric distribution: the
-    same mean, but the average spread rather than the standard error.  This is
-    what the network is trained toward; `belief` is what search samples."""
-    n = acc[0]
-    return acc[1] / n, max(acc[2] / n, VAR_FLOOR)
+    """(mu, var) of the predicted OUTCOME -- the aleatoric distribution the
+    network is trained toward.  `belief` is the standard error of its mean, which
+    is what search samples."""
+    return acc[1] / acc[0], max(total_var(acc), VAR_FLOOR)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -201,10 +228,11 @@ class GNode:
         self.legal = np.asarray(legal, dtype=np.int32)
         k = len(self.legal)
         # One allocation for the accumulator instead of three plus a stack.
-        acc = np.empty((3, k))
+        acc = np.empty((4, k))
         acc[0] = 1.0
         acc[1] = a_mu
         np.maximum(a_var, VAR_FLOOR, out=acc[2])
+        acc[3] = np.square(a_mu)                # for the law of total variance
         self.acc = acc
         self.term = np.full(k, _TERM_NONE)
         self.vloss = np.zeros(k, dtype=np.int32)
@@ -215,15 +243,24 @@ class GNode:
         self.n_term = 0
         self.n_vloss = 0
 
+    def total_var(self):
+        """Per action: mean observed variance PLUS the spread of the observed
+        means.  See the module-level total_var for why the second term is what
+        keeps the head honest."""
+        a = self.acc
+        n = a[0]
+        mu = a[1] / n
+        return a[2] / n + (a[3] / n - mu * mu).clip(0.0)
+
     def belief(self):
         """(mu, var) per action — what Thompson sampling draws from."""
-        n = self.acc[0]
-        return self.acc[1] / n, np.maximum(self.acc[2] / (n * n), VAR_FLOOR)
+        a = self.acc
+        n = a[0]
+        return a[1] / n, np.maximum(self.total_var() / n, VAR_FLOOR)
 
     def spread(self):
         """(mu, var) per action — the aleatoric target for the action head."""
-        n = self.acc[0]
-        return self.acc[1] / n, np.maximum(self.acc[2] / n, VAR_FLOOR)
+        return self.acc[1] / self.acc[0], np.maximum(self.total_var(), VAR_FLOOR)
 
     def prove(self, idx, value):
         if self.term[idx] <= _TERM_NONE:
@@ -234,6 +271,7 @@ class GNode:
         self.acc[0, idx] += 1.0
         self.acc[1, idx] += mu
         self.acc[2, idx] += max(var, VAR_FLOOR)
+        self.acc[3, idx] += mu * mu
 
     def visits(self):
         """Observations minus the seeded prediction — the true visit count."""
@@ -613,6 +651,22 @@ if _HAS_TORCH:
                  + w_nllv * L_nllv + w_nlla * L_nlla)
         with torch.no_grad():
             evc = evm.sum().clamp_min(1.0)
+            # CALIBRATION.  The only direct check that the network is not
+            # quietly confident about everything.  Under a correct Gaussian the
+            # squared error equals the predicted variance in expectation, so
+            #     calib = E[(z-mu)^2] / E[sigma^2]
+            # sits at 1.0; above 1 the spread is too NARROW for the errors it is
+            # actually making, which is overconfidence, and below 1 it is hedging.
+            # cov68 is the same question without the squaring: the share of
+            # outcomes landing inside one predicted standard deviation, which a
+            # calibrated Gaussian puts at 0.683.
+            zw_ = meta['z_w']
+            wsum = zw_.sum().clamp_min(1.0)
+            err2 = ((meta['z'] - v_mu) ** 2 * zw_).sum() / wsum
+            pvar = (v_var * zw_).sum() / wsum
+            calib = err2 / pvar.clamp_min(VAR_FLOOR)
+            inside = (((meta['z'] - v_mu).abs() <= v_var.sqrt()).float()
+                      * zw_).sum() / wsum
             lv = torch.cat([v_lv.reshape(-1),
                             a_lv.gather(1, act)[mask].reshape(-1)])
             # Means and spreads are reported in DISCS, not in the internal
@@ -625,11 +679,12 @@ if _HAS_TORCH:
                 v_mu.mean() * S, v_var.sqrt().mean() * S,
                 (q_var.sqrt() * evm).sum() / evc * S,
                 (meta['ev_var'].sqrt() * evm).sum() / evc * S,
-                lv.min(), lv.max(),
+                lv.min(), lv.max(), calib, inside,
+                err2.sqrt() * S,
             ]).to('cpu', copy=False).tolist()
         parts = dict(zip(('loss', 'klv', 'kla', 'nllv', 'nlla',
                           'v_mu', 'v_sd', 'a_sd_pred', 'a_sd_tgt',
-                          'lv_lo', 'lv_hi'), diag))
+                          'lv_lo', 'lv_hi', 'calib', 'cov68', 'rmse'), diag))
         return total, parts
 
     # ── Batching ──────────────────────────────────────────────────────────────
@@ -1247,7 +1302,8 @@ if _HAS_TORCH:
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_at)
         hist = {k: [] for k in (
             'ep', 'loss', 'klv', 'kla', 'nllv', 'nlla', 'v_mu', 'v_sd',
-            'a_sd_pred', 'a_sd_tgt', 'lv_lo', 'lv_hi', 'draw_pct', 'plies',
+            'a_sd_pred', 'a_sd_tgt', 'lv_lo', 'lv_hi', 'calib', 'cov68',
+            'rmse', 'draw_pct', 'plies',
             'buf', 'aux', 'elo', 'quick_ep', 'q_w', 'q_d', 'q_l')}
         elo_pool = c4.EloPool(
             game, cfg.eval_device, eval_sims=cfg.eval_sims,
@@ -1343,7 +1399,8 @@ if _HAS_TORCH:
                                 else float('nan'))
                 hist['ep'].append(ep)
                 for k in ('loss', 'klv', 'kla', 'nllv', 'nlla', 'v_mu', 'v_sd',
-                          'a_sd_pred', 'a_sd_tgt', 'lv_lo', 'lv_hi'):
+                          'a_sd_pred', 'a_sd_tgt', 'lv_lo', 'lv_hi',
+                          'calib', 'cov68', 'rmse'):
                     hist[k].append(ml(k))
                 hist['draw_pct'].append(draw_pct); hist['plies'].append(plies)
                 hist['buf'].append(len(replay)); hist['aux'].append(aux_total)
@@ -1356,7 +1413,9 @@ if _HAS_TORCH:
                         f'kla {ml("kla"):.3f} nllv {ml("nllv"):.3f} '
                         f'nlla {ml("nlla"):.3f}) | discs: mu {ml("v_mu"):+.1f} '
                         f'sd {ml("v_sd"):.1f} a_sd {ml("a_sd_pred"):.1f}/'
-                        f'{ml("a_sd_tgt"):.1f} | logvar [{ml("lv_lo"):.1f}, '
+                        f'{ml("a_sd_tgt"):.1f} rmse {ml("rmse"):.1f} | '
+                        f'calib {ml("calib"):.2f} cov68 {ml("cov68"):.2f} | '
+                        f'logvar [{ml("lv_lo"):.1f}, '
                         f'{ml("lv_hi"):.1f}] | dr {draw_pct:.0f}% ply {plies:.0f} '
                         f'buf {len(replay)//1000}k aux {aux_total}')
 
