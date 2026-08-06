@@ -840,6 +840,76 @@ def test_inference_shares_the_training_net():
           not any(isinstance(o, torch.Tensor) for o in out))
 
 
+def test_head_mismatch_on_resume():
+    """A dense checkpoint must not be resumed into a spatial net, or the reverse.
+
+    The two heads are different parameterisations — the spatial one shares a 1x1
+    conv across cells (`a_head`, `a_pass`), the dense one is a
+    Linear(flat, A*2) (`a_out`) — so the weights genuinely do not transfer.
+    What matters is that the run says that, instead of emitting a list of
+    missing tensor names that never mentions the head."""
+    if not vd._HAS_TORCH:
+        print('\n(torch missing — head mismatch test skipped)')
+        return
+    import os
+    import tempfile
+    import torch
+    print('\nResuming across a head change')
+    try:
+        g = game()
+    except Exception:
+        print('  (pyspiel missing — skipped)')
+        return
+    c4.set_backend('cpu', device='cpu')
+    dense = vd.make_net(16, 1, 4, head='dense')
+    spatial = vd.make_net(16, 1, 4, head='spatial')
+    check('the head is readable off a dense state_dict',
+          vd.head_of_state_dict(dense.state_dict()) == 'dense')
+    check('…and off a spatial one',
+          vd.head_of_state_dict(spatial.state_dict()) == 'spatial')
+    check('an unrelated state_dict reads as neither',
+          vd.head_of_state_dict({'foo': 1}) is None)
+
+    with tempfile.TemporaryDirectory() as d:
+        opt = torch.optim.Adam(dense.parameters(), lr=1e-3)
+        sch = torch.optim.lr_scheduler.LambdaLR(opt, lambda e: 1.0)
+        cfg_d = vd.Config(head='dense', channels=16, num_blocks=1, head_ch=4,
+                          checkpoint_dir=d, num_episodes=1,
+                          device_preference='cpu')
+        vd.save_checkpoint(d, 10, dense, opt, sch, {}, cfg_d)
+
+        cfg_s = vd.Config(head='spatial', channels=16, num_blocks=1, head_ch=4,
+                          checkpoint_dir=d, num_episodes=1,
+                          device_preference='cpu')
+        try:
+            vd.run_training(cfg_s, game=g, log=lambda *a, **k: None)
+            check('a head change is refused', False, 'no error raised')
+        except ValueError as e:
+            msg = str(e)
+            check('a head change is refused', True)
+            check('the message names both heads',
+                  "'dense'" in msg and "'spatial'" in msg, msg)
+            check('and says how to fix it either way',
+                  'gauss_head' in msg and 'fresh' in msg, msg)
+        except RuntimeError as e:
+            check('a head change is refused with a legible error', False, str(e))
+
+        # A frozen generation is only ever an opponent, so it loads under its
+        # OWN head whatever the live config asks for.  That keeps the Elo
+        # history of a run that switched heads playable.
+        vd.save_benchmark_net(d, '10', dense)
+        back = vd.load_benchmark_net(d, '10', (16, 1, 4, 'spatial'))
+        check('a dense benchmark net still loads for a spatial run',
+              isinstance(back, vd.GaussianNet)
+              and not isinstance(back, vd.SpatialGaussianNet))
+        x = torch.randn(2, *c4._OBS_SHAPE)
+        with torch.no_grad():
+            out = back(x)
+        check('and it still plays', all(torch.isfinite(o).all() for o in out))
+        check('the file it came from is untouched',
+              os.path.exists(os.path.join(d, 'bench_10.pt')))
+
+
 def main():
     test_primitives()
     test_accumulator()
@@ -857,6 +927,7 @@ def main():
     test_halving_selfplay()
     test_choose_considered()
     test_evidence_weighting()
+    test_head_mismatch_on_resume()
     test_inference_shares_the_training_net()
     print()
     if _fails:

@@ -1235,6 +1235,19 @@ if _HAS_TORCH:
         predate the head option, defaulting to the spatial head."""
         return tuple(sig) if len(sig) == 4 else (tuple(sig) + ('spatial',))
 
+    def head_of_state_dict(sd):
+        """Which action head wrote these weights: 'spatial', 'dense' or None.
+
+        The two heads are different parameterisations, not different shapes of
+        the same one, so a checkpoint can only be loaded back into its own kind.
+        The keys say which unambiguously — `a_head` is the shared 1x1 conv,
+        `a_out` the original Linear(flat, A*2)."""
+        if 'a_head.weight' in sd:
+            return 'spatial'
+        if 'a_out.weight' in sd:
+            return 'dense'
+        return None
+
     def save_benchmark_net(d, label, net):
         import os
         os.makedirs(d, exist_ok=True)
@@ -1243,10 +1256,18 @@ if _HAS_TORCH:
         torch.save(sd, os.path.join(d, f'bench_{label}.pt'))
 
     def load_benchmark_net(d, label, sig):
+        """A frozen generation, for the Elo pool.
+
+        The head is taken from the FILE, not from `sig`: a benchmark net is only
+        ever an opponent, so a run that switched heads part-way keeps its whole
+        Elo history playable instead of throwing it away."""
         import os
-        net = make_net(*_sig4(sig))
-        net.load_state_dict(torch.load(os.path.join(d, f'bench_{label}.pt'),
-                                       map_location='cpu', weights_only=True))
+        sd = torch.load(os.path.join(d, f'bench_{label}.pt'),
+                        map_location='cpu', weights_only=True)
+        sig = list(_sig4(sig))
+        sig[3] = head_of_state_dict(sd) or sig[3]
+        net = make_net(*sig)
+        net.load_state_dict(sd)
         net.eval()
         return net
 
@@ -1326,6 +1347,19 @@ if _HAS_TORCH:
 
         ckpt = load_checkpoint(cfg.checkpoint_dir) if cfg.resume else None
         if ckpt is not None:
+            # The two action heads are different parameterisations, so a dense
+            # checkpoint cannot be resumed into a spatial net or the reverse.
+            # Say so here rather than letting load_state_dict report a list of
+            # missing tensor names that does not name the actual problem.
+            was = head_of_state_dict(ckpt['model'])
+            if was is not None and was != cfg.head:
+                raise ValueError(
+                    f'{cfg.checkpoint_dir} holds a {was!r}-head run, but this '
+                    f'config asks for {cfg.head!r}.  The heads are different '
+                    f'parameterisations and the weights do not transfer.  '
+                    f'Either continue the existing run by setting '
+                    f'gauss_head={was!r} in shared, or start the {cfg.head!r} '
+                    f'run fresh by moving that directory aside.')
             base_network.load_state_dict(ckpt['model'])
             if ckpt.get('optim'):
                 optimizer.load_state_dict(ckpt['optim'])
