@@ -61,7 +61,7 @@ OTHELLO_DEFAULTS = dict(
     root='othello_benchmark',
     # The five original arms plus GA, the Gaussian value-distribution engine,
     # which needs a game with a natural score and so only appears here.
-    arms=('AA', 'AM', 'MA', 'MM', 'AZ', 'GA', 'GH'),
+    arms=('AA', 'AM', 'MA', 'MM', 'MS', 'AZ', 'GA', 'GH'),
     num_episodes=20_000,
     # NOTE lr_decay_eps is deliberately left at the shared default (2000) rather
     # than raised to match num_episodes.  The cosine therefore completes at

@@ -1134,6 +1134,130 @@ def test_connect4_selfplay():
     check('MCTS-64 beats random', wins >= 9, f'W{wins} D{draws} L{losses}')
 
 
+def test_sampled_backup():
+    """`backup='sample'` carries a DRAW from the leaf Dirichlet up the tree.
+
+    The point is what 'additive_mle' can then see.  That rule fits a Dirichlet
+    to the observations a node collected and reads its concentration off their
+    dispersion -- so with mean backups, a node whose leaves all say the same
+    thing looks CERTAIN no matter how unsure each of those leaves was.  Sampling
+    puts each leaf's own uncertainty into the dispersion, where the fit sees
+    it."""
+    print('\nSampled backup: the leaf concentration survives the trip')
+    rng = np.random.default_rng(11)
+    c4.set_search(search_agg=c4.AGG_ADDITIVE_MLE, target_agg=c4.AGG_ADDITIVE_MLE)
+
+    def fit(a, n, mode, seed):
+        c4.set_search(backup=mode)
+        r = np.random.default_rng(seed)
+        acc = c4._new_acc()
+        for _ in range(n):
+            c4._acc_add(acc, c4._payload(np.asarray(a, float), r)[0])
+        return c4.observed_alpha(acc, c4.AGG_ADDITIVE_MLE)
+
+    base = np.array([0.5, 0.25, 0.25])
+    # The SAME leaf, observed n times.  Under mean backup every observation is
+    # identical, so the fit cannot distinguish a shrug from a certainty.
+    m_lo = fit(base * 4, 400, c4.BACKUP_MEAN, 1).sum()
+    m_hi = fit(base * 400, 400, c4.BACKUP_MEAN, 2).sum()
+    check('mean backup fits the same concentration to a vague and a confident '
+          'leaf', abs(m_lo - m_hi) < 1e-6, f'{m_lo:.2f} vs {m_hi:.2f}')
+    check('…and that number is an artefact, unrelated to either leaf',
+          m_lo > 200.0, f'{m_lo:.2f} for leaves of 4 and 400')
+
+    # Under sampling the fit recovers the leaf it was drawn from.  Recovery is
+    # good in the range a value head actually occupies and saturates above ~200,
+    # which is the speed-tuned _inv_digamma, not the backup rule.
+    for a0, tol in ((4.0, 0.6), (40.0, 6.0)):
+        got = fit(base * a0, 400, c4.BACKUP_SAMPLE, int(a0)).sum()
+        check(f'sampled backup recovers a leaf of concentration {a0:g}',
+              abs(got - a0) < tol, f'{got:.2f}')
+    lo = fit(base * 4, 400, c4.BACKUP_SAMPLE, 7).sum()
+    hi = fit(base * 400, 400, c4.BACKUP_SAMPLE, 8).sum()
+    check('and it orders a confident leaf above a vague one', hi > 20 * lo,
+          f'{hi:.1f} vs {lo:.1f}')
+
+    # The draw is unbiased: averaging the observations gives the leaf's mean.
+    c4.set_search(backup=c4.BACKUP_SAMPLE)
+    a = np.array([6.0, 3.0, 1.0])
+    r = np.random.default_rng(5)
+    ms = np.array([c4._payload(a, r)[0][0] for _ in range(20000)])
+    check('a sampled observation is unbiased for the leaf mean',
+          close(ms.mean(0), a / a.sum(), 6e-3),
+          f'{ms.mean(0)} vs {a / a.sum()}')
+    check('…and it is dispersed, not a constant', ms.std(0).min() > 1e-3)
+
+    # 'additive' is unchanged in kind: a draw sums to 1 exactly as a mean does,
+    # so alpha0 is still the visit count.  Only the dispersion differs.
+    acc = c4._new_acc()
+    for _ in range(50):
+        c4._acc_add(acc, c4._payload(a, r)[0])
+    check('under sampling, additive still gives alpha0 == n exactly',
+          abs(c4.observed_alpha(acc, c4.AGG_ADDITIVE).sum() - 50.0) < 1e-9,
+          f'{c4.observed_alpha(acc, c4.AGG_ADDITIVE).sum()}')
+
+    # A point observation has no spread of its own, so 'mixture' reads the
+    # EMPIRICAL spread of the draws rather than an assumed one.
+    same, flip = c4._payload(a, np.random.default_rng(3))
+    check('a sampled payload carries zero self-variance', close(same[2], 0.0, 0))
+    check('its alpha field is the draw itself', close(same[3], same[0], 0))
+    check('flip reverses the sampled observation',
+          close(flip[0], same[0][::-1], 0) and close(flip[1], same[1][::-1], 0))
+
+    # Same seed, same draw: self-play stays reproducible per worker.
+    p1 = c4._payload(a, np.random.default_rng(99))[0][0]
+    p2 = c4._payload(a, np.random.default_rng(99))[0][0]
+    check('a seeded rng makes the backup reproducible', close(p1, p2, 0))
+
+    # Nothing is sampled without an rng, and nothing is sampled with the flag
+    # off -- which is how proven terminals and _seed_leaf stay noiseless.
+    mean_m = tuple(a / a.sum())
+    check('no rng means the mean, even with sampling on',
+          close(c4._payload(a)[0][0], mean_m, 1e-12))
+    c4.set_search(backup=c4.BACKUP_MEAN)
+    check('an rng means the mean when sampling is off',
+          close(c4._payload(a, np.random.default_rng(0))[0][0], mean_m, 1e-12))
+
+    try:
+        c4.set_search(backup='sometimes')
+        check('an unknown backup rule is rejected', False, 'accepted')
+    except ValueError:
+        check('an unknown backup rule is rejected', True)
+    c4.set_search(search_agg=c4.AGG_ADDITIVE, target_agg=c4.AGG_ADDITIVE,
+                  backup=c4.BACKUP_MEAN)
+
+
+def test_seed_and_terminals_are_not_sampled():
+    """The two payloads that must stay noiseless under `backup='sample'`.
+
+    A proven terminal is not an uncertain evaluation, and a leaf's seed is its
+    own prior rather than evidence a simulation carried up -- it is the only
+    value an unvisited node has, so a draw would put the most noise where there
+    is least evidence."""
+    print('\nSampling applies to backed-up evidence only')
+    c4.set_search(search_agg=c4.AGG_ADDITIVE_MLE, target_agg=c4.AGG_ADDITIVE_MLE,
+                  backup=c4.BACKUP_SAMPLE)
+    try:
+        spike = c4._SPIKE[c4._WIN]
+        got = c4._payload(c4.flip_alpha(spike))[0][0]
+        want = c4.flip_alpha(spike) / spike.sum()
+        check('a proven terminal backs up its exact spike',
+              close(got, want, 1e-12), f'{got} vs {want}')
+
+        # _seed_leaf touches only nacc and v_alpha, so a stub isolates it from
+        # the rest of a node.  The node's own accumulator must hold the
+        # prediction, not a draw.
+        v_alpha = np.array([3.0, 1.0, 2.0])
+        acc = c4._new_acc()
+        c4._seed_leaf(type('N', (), {'nacc': acc, 'v_alpha': v_alpha})())
+        m = np.array(acc[1]) / acc[0]
+        check('a leaf seeds itself with its mean, not a draw',
+              close(m, v_alpha / v_alpha.sum(), 1e-12), f'{m}')
+    finally:
+        c4.set_search(search_agg=c4.AGG_ADDITIVE, target_agg=c4.AGG_ADDITIVE,
+                      backup=c4.BACKUP_MEAN)
+
+
 def main():
     test_primitives()
     test_single_component_roundtrip()
@@ -1150,6 +1274,8 @@ def main():
     test_solver()
     test_targets()
     test_agg_toggles()
+    test_sampled_backup()
+    test_seed_and_terminals_are_not_sampled()
     test_selection_modes()
     test_degenerate_draws()
     test_torch()

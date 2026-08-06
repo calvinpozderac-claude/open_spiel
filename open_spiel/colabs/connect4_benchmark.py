@@ -47,21 +47,34 @@ import value_dist_utils as vd
 #  Arm definitions
 # ══════════════════════════════════════════════════════════════════════════════
 # name -> (engine, search_agg, target_agg, human-readable description)
+# (engine, search rule, target rule, description, backup rule).
+#
+# 'MS' is 'MM' with ONE thing changed: a simulation carries a DRAW from the leaf
+# Dirichlet rather than its mean.  MM is the arm this matters most for, because
+# 'additive_mle' fits a Dirichlet to the observations a node collects and reads
+# its concentration off their dispersion -- and with mean backups the only
+# dispersion available is disagreement BETWEEN leaves, so a node whose leaves
+# all shrug in the same direction is fitted as certain.  Sampling puts each
+# leaf's own uncertainty into that dispersion, where the fit can see it.
 ARMS = {
     'AA':  ('thompson', c4.AGG_ADDITIVE,     c4.AGG_ADDITIVE,
-            'search additive     · target additive'),
+            'search additive     · target additive', c4.BACKUP_MEAN),
     'AM':  ('thompson', c4.AGG_ADDITIVE,     c4.AGG_ADDITIVE_MLE,
-            'search additive     · target additive_mle'),
+            'search additive     · target additive_mle', c4.BACKUP_MEAN),
     'MA':  ('thompson', c4.AGG_ADDITIVE_MLE, c4.AGG_ADDITIVE,
-            'search additive_mle · target additive'),
+            'search additive_mle · target additive', c4.BACKUP_MEAN),
     'MM':  ('thompson', c4.AGG_ADDITIVE_MLE, c4.AGG_ADDITIVE_MLE,
-            'search additive_mle · target additive_mle'),
+            'search additive_mle · target additive_mle', c4.BACKUP_MEAN),
+    'MS':  ('thompson', c4.AGG_ADDITIVE_MLE, c4.AGG_ADDITIVE_MLE,
+            'search additive_mle · target additive_mle · SAMPLED backup',
+            c4.BACKUP_SAMPLE),
     'AZ':  ('alphazero', None, None,
-            'AlphaZero control (policy + scalar value, PUCT)'),
+            'AlphaZero control (policy + scalar value, PUCT)', None),
     'GA':  ('gauss', 'thompson', None,
-            'Gaussian value dist · Thompson root'),
+            'Gaussian value dist · Thompson root', None),
     'GH':  ('gauss_halving', 'halving', None,
-            'Gaussian value dist · sequential-halving root (Gumbel-AZ style)'),
+            'Gaussian value dist · sequential-halving root (Gumbel-AZ style)',
+            None),
 }
 
 
@@ -179,7 +192,7 @@ def solved_dir(root):
 
 def thompson_config(name, shared):
     """A ThompsonZero Config from the shared settings plus this arm's rules."""
-    _eng, sagg, tagg, _d = ARMS[name]
+    _eng, sagg, tagg, _d, bk = ARMS[name]
     return c4.Config(
         game_name=shared['game'],
         checkpoint_dir=arm_dir(shared['root'], name),
@@ -187,7 +200,7 @@ def thompson_config(name, shared):
         channels=shared['channels'], num_blocks=shared['num_blocks'],
         head_ch=shared['head_ch'], seed=shared['seed'],
         device_preference=shared['device'],
-        search_agg=sagg, target_agg=tagg, kl_normalize=False,
+        search_agg=sagg, target_agg=tagg, backup=bk, kl_normalize=False,
         cons_frac=shared['cons_frac'],
         selection='dirichlet',
         fast_sims=shared['fast_sims'], full_sims=shared['full_sims'],
@@ -546,7 +559,7 @@ def round_robin(players, sims, games_per_pair, seed=12345, log=print,
     # Search is identical for every player, so the tournament compares NETWORKS
     # rather than two different search procedures.
     c4.set_search(search_agg=c4.AGG_ADDITIVE, target_agg=c4.AGG_ADDITIVE,
-                  selection='dirichlet')
+                  selection='dirichlet', backup=c4.BACKUP_MEAN)
     names = list(players)
     idx = {k: i for i, k in enumerate(names)}
     W = np.zeros((len(names), len(names)))
@@ -880,7 +893,7 @@ def sims_scaling(shared, a='MA', b='AZ', gen=4000, sims=(32, 64, 128, 256),
         GAME_REF[0] = c4.load_game(shared['game'])
         c4.set_game(GAME_REF[0])
     c4.set_search(search_agg=c4.AGG_ADDITIVE, target_agg=c4.AGG_ADDITIVE,
-                  selection='dirichlet')
+                  selection='dirichlet', backup=c4.BACKUP_MEAN)
     pa, pb = None, None
     for name, slot in ((a, 'a'), (b, 'b')):
         engine = ARMS[name][0]

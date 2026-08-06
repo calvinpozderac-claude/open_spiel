@@ -167,6 +167,28 @@ AGG_ADDITIVE = 'additive'
 AGG_ADDITIVE_MLE = 'additive_mle'
 AGGREGATIONS = (AGG_MIXTURE, AGG_MEAN, AGG_SUM, AGG_ADDITIVE, AGG_ADDITIVE_MLE)
 
+# What a simulation actually carries up the tree, chosen via Config.backup.
+#
+#   'mean'    the leaf Dirichlet's MEAN probability vector.  Every simulation
+#             contributes one noiseless observation, and the leaf's own
+#             concentration is discarded -- a confident leaf and a pure guess
+#             back up the same kind of thing.
+#   'sample'  a DRAW from the leaf Dirichlet.  The observations a node collects
+#             are then dispersed in proportion to how unsure each leaf was, so
+#             a rule that reads dispersion recovers that uncertainty instead of
+#             throwing it away.
+#
+# 'additive' and 'additive_mle' are the rules this distinction bites on, because
+# they are the two that never look at the leaf's concentration directly.  Under
+# 'additive' nothing changes in expectation (alpha0 == n either way, since a
+# draw sums to 1 exactly as a mean does) -- the difference is the variance the
+# observations carry.  Under 'additive_mle' it changes the fit itself: the MLE
+# of n draws from Dir(a) recovers a0, where the MLE of n copies of ONE mean is
+# degenerate and reports certainty the search never established.
+BACKUP_MEAN = 'mean'
+BACKUP_SAMPLE = 'sample'
+BACKUPS = (BACKUP_MEAN, BACKUP_SAMPLE)
+
 # ── 'additive_mle' tuning.  Speed is preferred to exactness here: the estimate
 # is a search statistic, not a reported quantity, and it moves slowly.
 _MLE_FLOOR = 1e-9      # clamp on x before log().  A single zero component would
@@ -374,13 +396,48 @@ def _new_acc():
             [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0]
 
 
-def _payload(alpha):
+def _payload_point(x):
+    """A payload for a POINT observation on the simplex (see `_payload`).
+
+    A draw is a point, not a distribution, so its own variance is zero and its
+    'alpha' is itself: under 'additive' that keeps α₀ == n exactly, as the mean
+    does, and under 'sum' it makes a sampled backup collapse to 'additive' —
+    'sum' is the one rule for which sampling changes the meaning of the
+    accumulator rather than just its dispersion."""
+    mw, md, ml = x
+    m = (mw, md, ml)
+    q = (mw * mw, md * md, ml * ml)
+    v = (0.0, 0.0, 0.0)
+    fm = (ml, md, mw)
+    return ((m, q, v, m), (fm, (q[2], q[1], q[0]), v, fm))
+
+
+def _payload(alpha, rng=None):
     """Pre-compute one backed-up Dirichlet's contribution in BOTH perspectives.
 
     Returns (as_is, flipped); each is (m, m², v, α) as 3-tuples of Python floats.
     A simulation backs one Dirichlet up a whole path, alternating perspective at
     every ply, so both forms are built once per simulation and then just indexed
-    — no per-ply array flipping."""
+    — no per-ply array flipping.
+
+    With `backup='sample'` AND an rng, what goes up the tree is a draw from
+    Dir(α) instead of its mean — one exact Dirichlet sample, three gamma draws,
+    the same way selection samples an edge.  Callers that pass no rng always get
+    the mean: proven terminals and a leaf's own seed are not search evidence and
+    are deliberately left noiseless (see `_seed_leaf`)."""
+    if rng is not None and _BACKUP_SAMPLE:
+        # THREE SCALAR gamma draws, not one call on a 3-array: numpy's per-call
+        # dispatch dominates arithmetic this small, and measured here the array
+        # form costs 7.9us against 2.2us for the three scalars.  Same draw.
+        g0 = rng.standard_gamma(float(alpha[0]))
+        g1 = rng.standard_gamma(float(alpha[1]))
+        g2 = rng.standard_gamma(float(alpha[2]))
+        s = g0 + g1 + g2
+        # Underflow: every gamma draw rounded to zero, which happens only when
+        # the whole α is at the floor.  There is no draw to speak of, so fall
+        # through to the mean rather than invent one.
+        if s > 0.0:
+            return _payload_point((g0 / s, g1 / s, g2 / s))
     aw, ad, al = (float(alpha[0]), float(alpha[1]), float(alpha[2]))
     a0 = aw + ad + al
     inv = 1.0 / (a0 + 1.0)
@@ -428,13 +485,16 @@ _VIRTUAL_LOSS = 1.0            # penalty on v for an in-flight edge
 _MLE_ACTIVE = False            # maintain the 'additive_mle' log-sums in _acc_add
                                # (skipped entirely when no rule needs them, so
                                # the default backup pays nothing for this)
+_BACKUP_SAMPLE = False         # back up a DRAW from the leaf Dirichlet instead
+                               # of its mean (see BACKUP_SAMPLE)
 
 
 def set_search(search_agg=None, target_agg=None, selection=None,
-               virtual_loss=None):
+               virtual_loss=None, backup=None):
     """Configure the tree for this PROCESS.  Self-play workers call it themselves
     from their cfg so a spawned process matches the parent exactly."""
     global _SEARCH_AGG, _TARGET_AGG, _GAUSSIAN_SELECT, _VIRTUAL_LOSS, _MLE_ACTIVE
+    global _BACKUP_SAMPLE
     if search_agg is not None:
         if search_agg not in AGGREGATIONS:
             raise ValueError(f'search_agg must be one of {AGGREGATIONS}')
@@ -449,6 +509,10 @@ def set_search(search_agg=None, target_agg=None, selection=None,
         _GAUSSIAN_SELECT = (selection == 'gaussian')
     if virtual_loss is not None:
         _VIRTUAL_LOSS = float(virtual_loss)
+    if backup is not None:
+        if backup not in BACKUPS:
+            raise ValueError(f'backup must be one of {BACKUPS}')
+        _BACKUP_SAMPLE = (backup == BACKUP_SAMPLE)
     _MLE_ACTIVE = AGG_ADDITIVE_MLE in (_SEARCH_AGG, _TARGET_AGG)
 
 
@@ -634,7 +698,14 @@ def _backup(path, payloads):
 
 def _seed_leaf(leaf):
     """A freshly expanded node's first piece of evidence about itself is its own
-    network belief, in its own perspective."""
+    network belief, in its own perspective.
+
+    Deliberately the MEAN even under `backup='sample'`.  This is the node's
+    prior about itself, not an observation a simulation carried up from
+    somewhere else, and it is the only value an unvisited node has: replacing it
+    with a draw would put the most noise exactly where there is least evidence.
+    Sampling applies to what gets BACKED UP, which is what the leaf's
+    concentration was being discarded from."""
     _acc_add(leaf.nacc, _payload(leaf.v_alpha)[0])
 
 
@@ -944,6 +1015,8 @@ class Config:
     # 'mixture' | 'mean' | 'sum' | 'additive' | 'additive_mle'
     search_agg: str = AGG_ADDITIVE
     target_agg: str = AGG_ADDITIVE
+    # What a simulation carries up: 'mean' | 'sample'  (see BACKUP_MEAN).
+    backup: str = BACKUP_MEAN
     # THE DEFAULT IS 'additive' for both.
     #
     # SEARCH wants concentration to GROW with evidence, so Thompson exploration
@@ -1261,7 +1334,7 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
     game = _mp_load_game(cfg)
     set_game(game)
     set_search(cfg['search_agg'], cfg['target_agg'], cfg['selection'],
-               cfg['virtual_loss'])
+               cfg['virtual_loss'], cfg.get('backup'))
     rng = np.random.default_rng(cfg['seed'] + worker_id * 7919)
     eng = _SlotEngine(game, cfg, rng, cfg.get('checkpoint_dir'))
     curr_shared = cfg.get('curr_depth_shared')
@@ -1331,7 +1404,7 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                     a.children[b] = nd
         for i, path, node, idx in pending:
             child = node.children[idx]
-            _backup(path, _payload(child.v_alpha))
+            _backup(path, _payload(child.v_alpha, rng))
             slots[i]['n'] += 1
         for i in idxs:
             s = slots[i]
@@ -2065,7 +2138,8 @@ if _HAS_TORCH:
                         _seed_leaf(child)
                         node.children[idx] = child
                 for path, st, (node, idx) in pending:
-                    _backup(path, _payload(node.children[idx].v_alpha))
+                    _backup(path,
+                            _payload(node.children[idx].v_alpha, self._rng))
                     sims += 1
             return root
 
@@ -2256,7 +2330,8 @@ if _HAS_TORCH:
                     else:
                         a.children[b] = node
             for i, path, node, idx in pending:
-                _backup(path, _payload(node.children[idx].v_alpha))
+                _backup(path,
+                        _payload(node.children[idx].v_alpha, self.rng))
                 self.slots[i]['n'] += 1
             for i, s in enumerate(self.slots):
                 if s['root'] is None:
@@ -2753,7 +2828,8 @@ if _HAS_TORCH:
             curriculum=cfg.curriculum, curr_depth0=cfg.curr_depth0,
             curr_mcts_tail=cfg.curr_mcts_tail,
             search_agg=cfg.search_agg, target_agg=cfg.target_agg,
-            selection=cfg.selection, virtual_loss=cfg.virtual_loss)
+            selection=cfg.selection, virtual_loss=cfg.virtual_loss,
+            backup=cfg.backup)
 
     def build_network(cfg, device):
         sig = (cfg.channels, cfg.num_blocks, cfg.head_ch)
@@ -2789,7 +2865,7 @@ if _HAS_TORCH:
         device, backend = pick_device(cfg.device_preference)
         set_game(game)
         set_search(cfg.search_agg, cfg.target_agg, cfg.selection,
-                   cfg.virtual_loss)
+                   cfg.virtual_loss, cfg.backup)
         set_backend(backend, device)
         random.seed(cfg.seed); np.random.seed(cfg.seed)
         torch.manual_seed(cfg.seed)

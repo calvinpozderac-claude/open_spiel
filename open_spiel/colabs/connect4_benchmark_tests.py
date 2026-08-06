@@ -458,6 +458,50 @@ def test_search_free_is_like_for_like():
           az.value_greedy_move(az_net, win, 'cpu') == 0)
 
 
+def test_ms_arm():
+    """MS is MM with exactly one thing changed: the backup rule."""
+    print('\nMS: MM with a sampled backup')
+    import dataclasses
+    import connect4_dirichlet_utils as c4
+    shared = B.default_shared()
+    mm = B.thompson_config('MM', shared)
+    ms = B.thompson_config('MS', shared)
+    diff = {f.name for f in dataclasses.fields(mm)
+            if getattr(mm, f.name) != getattr(ms, f.name)}
+    check('MS differs from MM in the backup rule and its own directory',
+          diff == {'backup', 'checkpoint_dir'}, f'{diff}')
+    check('MM backs up the mean', mm.backup == c4.BACKUP_MEAN)
+    check('MS backs up a sample', ms.backup == c4.BACKUP_SAMPLE)
+    check('both keep additive_mle on search and target',
+          (ms.search_agg, ms.target_agg)
+          == (c4.AGG_ADDITIVE_MLE, c4.AGG_ADDITIVE_MLE))
+    check('every arm declares a backup rule',
+          all(len(v) == 5 for v in B.ARMS.values()))
+    check('only the Thompson arms have one',
+          {n for n, v in B.ARMS.items() if v[4] is not None}
+          == {'AA', 'AM', 'MA', 'MM', 'MS'})
+
+    # The worker cfg is the only channel to a spawned self-play process, so a
+    # field missing there is silently ignored in exactly the configuration the
+    # arm is meant to run in.
+    wcfg = c4._worker_cfg(ms, (shared['channels'], shared['num_blocks'],
+                               shared['head_ch']))
+    check('the backup rule reaches self-play workers',
+          wcfg.get('backup') == c4.BACKUP_SAMPLE, f'{wcfg.get("backup")}')
+
+    # The tournament compares NETWORKS, so it must pin the backup rule the same
+    # way it already pins the aggregation rules -- otherwise whichever arm
+    # trained last in this process leaks its rule into every game.
+    c4.set_search(backup=c4.BACKUP_SAMPLE)
+    try:
+        B.round_robin({}, sims=1, games_per_pair=0, game=shared['game'])
+    except Exception:
+        pass
+    check('the round robin pins the backup rule back to the mean',
+          c4._BACKUP_SAMPLE is False)
+    c4.set_search(backup=c4.BACKUP_MEAN)
+
+
 def main():
     test_puct()
     test_backup_signs()
@@ -471,6 +515,7 @@ def main():
     test_tournament()
     test_search_free_is_like_for_like()
     test_matched_settings()
+    test_ms_arm()
     test_solved_dir_plumbing()
     print()
     if _fails:
