@@ -330,6 +330,26 @@ def test_budget_pool_is_compute_matched():
     check('the realized mean tracks the fixed budget',
           abs(r.realized_mean() - 100) < 5.0, f'{r.realized_mean():.1f}')
 
+    # A mixed fast/full budget: the nominal is per POSITION, not per pool.
+    # With one pool-wide base, surplus banked by a 150-simulation game was spent
+    # by a 50-simulation one and the total stopped being bounded -- measured at
+    # 82.8 simulations per move against a fixed arm's 75.
+    m = ds.BudgetPool(150)
+    rng2 = np.random.default_rng(11)
+    tot = nom_tot = 0
+    for _ in range(3000):
+        nom = int(rng2.choice([50, 150], p=[0.75, 0.25]))
+        lo, hi, lent = m.reserve(nom)
+        used = int(rng2.integers(lo, hi + 1))
+        m.settle(used, lent, nom)
+        tot += used; nom_tot += nom
+    check('a mixed fast/full budget stays bounded by the fixed arm',
+          tot <= nom_tot, f'{tot} vs {nom_tot}')
+    check('and the summary reports the nominal it was matched against',
+          abs(m.nominal_mean() - nom_tot / m.moves) < 1e-9)
+    check('the floor and ceiling scale with the POSITION, not the pool',
+          ds.BudgetPool(150).reserve(50)[1] == 50
+          and ds.BudgetPool(150).reserve(50)[0] == 12)
     try:
         ds.BudgetPool(100, floor_frac=0.0)
         check('a zero floor is rejected', False)
@@ -372,17 +392,25 @@ def test_dynamic_search_end_to_end():
           abs(d.summary()['sims_mean'] - used) < 1e-9)
     check('and how the searches ended', d.summary()['stop_converged'] == 1.0)
 
-    # base_sims changes when a new game starts in the slot (fast vs full).
-    d2 = ds.DynamicSearch(100, enabled=True)
-    d2.begin(); d2.end(20)
+    # fast_sims vs full_sims are drawn per GAME, so a position's nominal budget
+    # changes under the SAME pool.  The pool no longer rebases -- each position
+    # is accounted against its own nominal, which is what keeps a mixed budget
+    # bounded by the fixed arm's spend.
+    d2 = ds.DynamicSearch(150, enabled=True)
+    d2.begin(50); d2.end(20)
     banked = d2.pool.pool
-    d2.begin(300)
-    # `begin` reserves, so the carried surplus is out on loan rather than
-    # sitting in the pool -- the books are pool + outstanding.
-    check('a new base carries the pool over',
-          d2.pool.pool + d2.pool.outstanding == banked and d2.pool.base == 300,
-          f'{d2.pool.pool}+{d2.pool.outstanding}/{d2.pool.base}')
-    check('and rescales the floor', d2.pool.floor == 75)
+    check('a cheap position banks against ITS nominal, not the pool base',
+          banked == 30, f'{banked}')
+    cap = d2.begin(150)
+    check('an expensive position may borrow that surplus', cap == 180, f'{cap}')
+    check('and the floor scales with the position',
+          d2.rule.min_sims == 38, f'{d2.rule.min_sims}')
+    d2.end(180)
+    check('the nominal the arm is matched against is what it drew',
+          abs(d2.summary()['sims_base'] - 100.0) < 1e-9,
+          f"{d2.summary()['sims_base']}")
+    check('and the realized mean is what it spent',
+          abs(d2.summary()['sims_mean'] - 100.0) < 1e-9)
 
 
 def test_config_kwargs():

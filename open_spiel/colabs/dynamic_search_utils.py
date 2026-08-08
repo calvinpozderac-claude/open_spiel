@@ -288,6 +288,7 @@ class StopRule(object):
         self._streak = 0
         self._drift = float('inf')
         self.lent = 0
+        self.nominal = 0
         self.reason = ''
         self.last = {}
 
@@ -374,39 +375,61 @@ class BudgetPool(object):
         if ceil_mult < 1.0:
             raise ValueError('ceil_mult must be at least 1')
         self.base = int(base)
+        self.floor_frac = float(floor_frac)
+        self.ceil_mult = float(ceil_mult)
         self.floor = max(1, int(round(base * floor_frac)))
         self.hard_ceiling = max(self.floor, int(round(base * ceil_mult)))
         self.cap = max(1, int(round(base * pool_mult)))
         self.pool = 0
         self.moves = 0
         self.spent = 0
+        self.nominal = 0
         self.outstanding = 0
 
-    def reserve(self):
+    def reserve(self, nominal=None):
         """(min_sims, max_sims, lent) for one position, debiting `lent` now.
 
-        The debit is the whole point — see the class docstring."""
-        lent = max(min(self.pool, self.hard_ceiling - self.base), 0)
+        `nominal` is what THIS position would have cost under a fixed budget.
+        It is a per-position argument rather than a property of the pool because
+        self-play draws fast_sims or full_sims per GAME: with one pool-wide base
+        the surplus banked by a 150-simulation game could be spent by a
+        50-simulation one, and the total stopped being bounded by the fixed
+        arm's.  Measured that way over 300 episodes, the adaptive arm spent 82.8
+        simulations per move against the fixed arm's 75 -- 10% MORE, from a
+        mechanism whose whole purpose is to not do that.
+
+        Accounting against each position's own nominal bounds the total at
+        SUM(nominal), which is exactly what the fixed arm spends.
+        """
+        nom = self.base if nominal is None else int(nominal)
+        ceiling = max(1, int(round(nom * self.ceil_mult)))
+        floor = max(1, min(int(round(nom * self.floor_frac)), ceiling))
+        lent = max(min(self.pool, ceiling - nom), 0)
         self.pool -= lent
         self.outstanding += lent
-        top = max(self.floor, min(self.base + lent, self.hard_ceiling))
-        return self.floor, int(top), int(lent)
+        top = max(floor, min(nom + lent, ceiling))
+        return floor, int(top), int(lent)
 
-    def settle(self, used, lent=0):
+    def settle(self, used, lent=0, nominal=None):
         used = int(used)
         lent = int(lent)
+        nom = self.base if nominal is None else int(nominal)
         self.moves += 1
         self.spent += used
+        self.nominal += nom
         self.outstanding -= lent
-        # Return the unspent part of what this position was allowed.  max(…, 0)
-        # is belt and braces: `reserve` already bounds `used` by base + lent.
-        self.pool = int(min(max(self.pool + self.base + lent - used, 0),
-                            self.cap))
+        # Return the unspent part of what this position was allowed.  max(., 0)
+        # is belt and braces: `reserve` already bounds `used` by nominal + lent.
+        self.pool = int(min(max(self.pool + nom + lent - used, 0), self.cap))
 
     def realized_mean(self):
         """Simulations per move actually spent.  Logged, so 'compute-matched'
         is a measurement rather than a claim."""
         return self.spent / self.moves if self.moves else 0.0
+
+    def nominal_mean(self):
+        """What a fixed budget would have spent over the same positions."""
+        return self.nominal / self.moves if self.moves else 0.0
 
 
 class DynamicSearch(object):
@@ -437,36 +460,22 @@ class DynamicSearch(object):
         convergence state, and they should all bank into and borrow from the
         same budget.  `begin`/`should_stop`/`end` below are the single-root
         form for the bots, which have exactly one search in flight."""
-        cap = self._rebase(base_sims)
+        nom = self.base if base_sims is None else int(base_sims)
         if not self.enabled:
-            return None, cap
-        lo, hi, lent = self.pool.reserve()
+            return None, nom
+        lo, hi, lent = self.pool.reserve(nom)
         rule = StopRule(lo, hi, **self.params)
-        rule.lent = lent
+        rule.lent, rule.nominal = lent, nom
         return rule, hi
 
     def close_position(self, rule, used):
         if not self.enabled or self.pool is None:
             return
-        self.pool.settle(used, getattr(rule, 'lent', 0))
+        self.pool.settle(used, getattr(rule, 'lent', 0),
+                         getattr(rule, 'nominal', None))
         r = rule.reason if rule is not None else ''
         if r:
             self.stops[r] = self.stops.get(r, 0) + 1
-
-    def _rebase(self, base_sims):
-        """Adopt a new base budget, carrying the pool's running state over."""
-        if base_sims is not None and int(base_sims) != self.base:
-            # fast_sims / full_sims are drawn per GAME, so the base can change
-            # between positions only when a new game starts in this slot.
-            self.base = int(base_sims)
-            if self.enabled:
-                p = self.pool
-                self.pool = BudgetPool(self.base, p.floor / max(p.base, 1),
-                                       p.hard_ceiling / max(p.base, 1),
-                                       p.cap / max(p.base, 1))
-                self.pool.pool, self.pool.moves = p.pool, p.moves
-                self.pool.spent, self.pool.outstanding = p.spent, p.outstanding
-        return self.base if not self.enabled else self.base + self.pool.pool
 
     # ── single-root form, for the bots ────────────────────────────────────────
     def begin(self, base_sims=None):
@@ -486,7 +495,7 @@ class DynamicSearch(object):
         if not self.enabled or self.pool is None:
             return {}
         out = {'sims_mean': self.pool.realized_mean(),
-               'sims_base': float(self.base),
+               'sims_base': self.pool.nominal_mean(),
                'pool': float(self.pool.pool)}
         tot = sum(self.stops.values()) or 1
         for k in ('solved', 'converged', 'ceiling'):
