@@ -197,15 +197,17 @@ def main(argv):
     gpp = int(argv[2]) if len(argv) > 2 else 24
     sims = int(argv[3]) if len(argv) > 3 else 64
     os.makedirs(ROOT, exist_ok=True)
-    print(f'training {len(ORDER)} arms x {episodes} episodes (Connect 4)')
+    todo = runs()
+    print(f'training {len(todo)} runs ({len(ORDER)} arms x {len(SEEDS)} seeds) '
+          f'x {episodes} episodes (Connect 4)')
     # Warm-up: the first run in a process pays for imports, the pyspiel game
     # load and torch's first kernels.  Timing it as if it were the arm's own
     # cost put 15.3s against 4s for identical work in the pilot.
     print('warm-up...')
     train_one(ORDER[0], SEEDS[0], 2, log=lambda *a, **k: None)
     rows = []
-    for name in ORDER:
-        rows.append(train_one(name, episodes))
+    for arm, sd in todo:
+        rows.append(train_one(arm, sd, episodes))
         with open(os.path.join(ROOT, 'rows.json'), 'w') as f:
             json.dump(rows, f, indent=1)
     print(f'\ntournament: {gpp} games per pair at {sims} simulations')
