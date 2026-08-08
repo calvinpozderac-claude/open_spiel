@@ -597,6 +597,32 @@ class _CNode:
         """Per-edge evidence counts (the analogue of MCTS visit counts)."""
         return np.array([a[0] for a in self.eacc])
 
+    def probe(self, n):
+        """Snapshot for the dynamic-search stop rule (see dynamic_search_utils).
+
+        `sd` is read off AGG_MIXTURE and not off the arm's own `search_agg`,
+        deliberately.  The mixture's concentration reflects DISAGREEMENT between
+        the backed-up evaluations and is independent of how many there were,
+        which is the whole reason a stop rule can use it: 'additive' would hand
+        back a spread of exactly 1/√n and turn the decision gate into a visit
+        counter.  An arm's own rule still decides the MOVE and the TARGET —
+        this is only how the search decides it has seen enough.
+        """
+        import dynamic_search_utils as _ds
+        k = len(self.legal)
+        q = np.empty(k); sd = np.empty(k)
+        for i in range(k):
+            if self.term[i] >= 0:
+                a = _SPIKE[self.term[i]]
+            else:
+                a = observed_alpha(self.eacc[i], AGG_MIXTURE)
+                if a is None:
+                    a = self.alpha_p[i]        # untouched: the prior is all we
+            ev, var = dir_value_mean_var(a)    # know about this edge
+            q[i] = ev; sd[i] = math.sqrt(max(var, 0.0))
+        return _ds.RootProbe(n, _node_solved_outcome(self) is not None,
+                             q, sd, dir_mean(self.state_target()))
+
 
 def _set_term(node, idx, outcome):
     """Mark edge idx proven and collapse its selection belief onto the proof."""
@@ -1017,6 +1043,17 @@ class Config:
     target_agg: str = AGG_ADDITIVE
     # What a simulation carries up: 'mean' | 'sample'  (see BACKUP_MEAN).
     backup: str = BACKUP_MEAN
+    # ── adaptive simulation counts (see dynamic_search_utils) ─────────────────
+    # Off by default: it changes how much search every training target got, so
+    # the arms already trained were not run this way.
+    dynamic_search: bool = False
+    ds_floor_frac: float = 0.25       # never search less than this x full_sims
+    ds_ceil_mult: float = 4.0         # never more than this x full_sims
+    ds_pool_mult: float = 8.0         # cap on banked simulations
+    ds_p_stop: float = 0.95           # P(best) that counts as decided
+    ds_eps_indiff: float = 0.02       # value gap below which the move is moot
+    ds_delta: float = 0.05            # target L1 movement that counts as still
+    ds_patience: int = 2              # consecutive checks before stopping
     # THE DEFAULT IS 'additive' for both.
     #
     # SEARCH wants concentration to GROW with evidence, so Thompson exploration
@@ -1243,10 +1280,31 @@ class _SlotEngine:
     """
 
     def __init__(self, game, cfg, rng, checkpoint_dir=None):
+        import dynamic_search_utils as _ds
         self.game, self.cfg, self.rng = game, cfg, rng
         self.checkpoint_dir = checkpoint_dir
         self.curr_depth = float(cfg['curr_depth0'])
         self._restart_pool = []
+        # One budget pool for the whole engine, so simulations saved on an easy
+        # position in one slot are lent to a hard one in another; the stop rule
+        # itself is per slot, since the slots hold unrelated positions.
+        self.ds = _ds.DynamicSearch(
+            **_ds.config_kwargs(cfg, cfg['full_sims']))
+
+    def _ds_open(self, s):
+        """Hand this position its stop rule and its simulation ceiling."""
+        s['ds_rule'], s['ds_cap'] = self.ds.open_position(s['sims'])
+
+    def _ds_stop(self, s):
+        """Has this position had enough search?  False whenever the toggle is
+        off, which is what keeps the fixed-budget arms bit-identical."""
+        r = s.get('ds_rule')
+        if r is None or s['root'] is None:
+            return False
+        return r.update(s['root'].probe(s['n']))
+
+    def _ds_close(self, s):
+        self.ds.close_position(s.get('ds_rule'), s['n'])
 
     def _push_seed(self, seq):
         if len(seq) >= 2:
@@ -1283,7 +1341,9 @@ class _SlotEngine:
                if cfg['curriculum'] else cfg['max_plies'])
         slot = {'state': state, 'hist': [], 'aux': [], 'actions': actions,
                 'move': resume, 'resume': resume, 'sims': sims, 'cap': cap,
-                'root': None, 'n': 0, 'pool': None}
+                'root': None, 'n': 0, 'pool': None,
+                'ds_rule': None, 'ds_cap': sims}
+        self._ds_open(slot)
         if cfg['pool_prob'] > 0 and rng.random() < cfg['pool_prob']:
             labels = self._pool_labels()
             label = ('random' if not labels or rng.random() < cfg['random_pool_frac']
@@ -1305,9 +1365,11 @@ class _SlotEngine:
         t['played'] = pidx
         s['hist'].append(t)
         s['actions'].append(int(a))
+        self._ds_close(s)
         s['root'] = root.children[pidx]
         s['state'].apply_action(a)
         s['move'] += 1; s['n'] = 0
+        self._ds_open(s)
         st = s['state']
         if st.is_terminal():
             # The consistency target is the value of HAVING PLAYED a*, i.e. in
@@ -1375,7 +1437,7 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                 continue
             if _node_solved_outcome(s['root']) is not None:
                 continue
-            wave = min(cfg['wave'], s['sims'] - s['n'])
+            wave = min(cfg['wave'], s['ds_cap'] - s['n'])
             for _ in range(max(wave, 0)):
                 path, st, payloads, edge = _select_leaf(
                     s['root'], st0, rng, eng._temp(s['move'] - s['resume']))
@@ -1410,7 +1472,9 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
             s = slots[i]
             if s['root'] is None:
                 continue
-            if s['n'] < s['sims'] and _node_solved_outcome(s['root']) is None:
+            if (s['n'] < s['ds_cap']
+                    and _node_solved_outcome(s['root']) is None
+                    and not self._ds_stop(s)):
                 continue
             eng._record_move(s, s['root'])
             if s['state'].is_terminal() or s['move'] >= s['cap']:
@@ -2301,7 +2365,7 @@ if _HAS_TORCH:
                     evals.append(('root', i, None, s['state'])); continue
                 if _node_solved_outcome(s['root']) is not None:
                     continue
-                wave = min(self.wave, s['sims'] - s['n'])
+                wave = min(self.wave, s['ds_cap'] - s['n'])
                 for _ in range(max(wave, 0)):
                     path, st, payloads, edge = _select_leaf(
                         s['root'], s['state'], self.rng,
@@ -2336,8 +2400,9 @@ if _HAS_TORCH:
             for i, s in enumerate(self.slots):
                 if s['root'] is None:
                     continue
-                if (s['n'] < s['sims']
-                        and _node_solved_outcome(s['root']) is None):
+                if (s['n'] < s['ds_cap']
+                        and _node_solved_outcome(s['root']) is None
+                        and not self._ds_stop(s)):
                     continue
                 self._record_move(s, s['root'])
                 if s['state'].is_terminal() or s['move'] >= s['cap']:
@@ -2829,7 +2894,12 @@ if _HAS_TORCH:
             curr_mcts_tail=cfg.curr_mcts_tail,
             search_agg=cfg.search_agg, target_agg=cfg.target_agg,
             selection=cfg.selection, virtual_loss=cfg.virtual_loss,
-            backup=cfg.backup)
+            backup=cfg.backup,
+            dynamic_search=cfg.dynamic_search,
+            ds_floor_frac=cfg.ds_floor_frac, ds_ceil_mult=cfg.ds_ceil_mult,
+            ds_pool_mult=cfg.ds_pool_mult, ds_p_stop=cfg.ds_p_stop,
+            ds_eps_indiff=cfg.ds_eps_indiff, ds_delta=cfg.ds_delta,
+            ds_patience=cfg.ds_patience)
 
     def build_network(cfg, device):
         sig = (cfg.channels, cfg.num_blocks, cfg.head_ch)

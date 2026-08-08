@@ -116,7 +116,7 @@ def test_the_pitfall():
 
     # The real rule reads the disagreement, which does not move with n.
     rule = ds.StopRule(min_sims=8, max_sims=10 ** 6, p_stop=0.95,
-                       eps_indiff=0.0, delta=1e9, patience=2)
+                       eps_indiff=0.0, delta=1e9, patience=2)  # gate 2 off
     stopped = None
     for n in (8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096):
         if rule.update(probe(n, q + np.array([0.005, 0.0]), spread)):
@@ -141,19 +141,50 @@ def test_indifference():
     print('\nIndifference: an unresolvable tie is still a reason to stop')
     rule = ds.StopRule(min_sims=4, max_sims=10 ** 6, eps_indiff=0.02,
                        delta=1e9, patience=1)
-    rule.update(probe(8, [0.4, 0.4], [0.3, 0.3]))          # drift snapshot
+    rule.update(probe(8, [0.4, 0.4], [0.003, 0.003]))      # drift snapshot
     check('a dead tie stops on indifference, not on confidence',
-          rule.update(probe(16, [0.4, 0.4], [0.3, 0.3])))
+          rule.update(probe(16, [0.4, 0.4], [0.003, 0.003])))
     check('and says so', rule.reason == 'converged')
+    # A gap above the band with tight beliefs also stops -- but for the OTHER
+    # reason, and the rule records which.
     rule2 = ds.StopRule(min_sims=4, max_sims=10 ** 6, eps_indiff=0.02,
                         delta=1e9, patience=1)
-    rule2.update(probe(8, [0.50, 0.40], [0.3, 0.3]))
-    check('a gap well above the indifference band does not',
-          not rule2.update(probe(16, [0.50, 0.40], [0.3, 0.3])))
-    check('top_gap on one action is infinite (nothing to choose)',
-          ds.top_gap([0.5]) == float('inf'))
+    rule2.update(probe(8, [0.50, 0.40], [0.003, 0.003]))
+    check('a gap above the band stops on confidence instead',
+          rule2.update(probe(16, [0.50, 0.40], [0.003, 0.003]))
+          and rule2.last['moot'] is False and rule2.last['p_best'] > 0.99,
+          f'{rule2.last}')
+    # Above the band AND unresolved: neither gate, so it keeps going.
+    rule3 = ds.StopRule(min_sims=4, max_sims=10 ** 6, eps_indiff=0.02,
+                        delta=1e9, patience=1)
+    rule3.update(probe(8, [0.50, 0.40], [0.4, 0.4]))
+    check('a gap above the band with wide beliefs keeps searching',
+          not rule3.update(probe(16, [0.50, 0.40], [0.4, 0.4])),
+          f'{rule3.last}')
+    check('one action has no gap at all', ds.top_gap([0.5]) == 0.0)
     check('top_gap ignores the also-rans',
           abs(ds.top_gap([0.1, 0.9, 0.5, -0.2]) - 0.4) < 1e-12)
+
+    # The equivalence test: a small gap is only indifference once it is SHOWN.
+    check('a tight tie is indifferent',
+          ds.indifferent([0.4, 0.4], [0.002, 0.002], 0.02))
+    check('the same gap with wide beliefs is NOT',
+          not ds.indifferent([0.4, 0.4], [0.3, 0.3], 0.02))
+    check('a wide gap is never indifferent',
+          not ds.indifferent([0.9, 0.0], [0.002, 0.002], 0.02))
+    check('one action is trivially indifferent',
+          ds.indifferent([0.4], [0.9], 0.02))
+    check('it reads the top TWO, not the extremes',
+          ds.indifferent([0.4, 0.4, -0.9], [0.002, 0.002, 0.002], 0.02))
+
+    # This is what collapsed the search to its floor on an untrained net: every
+    # action equal, nothing known, and a bare gap test firing on all of it.
+    flat_q = np.full(8, 0.01)
+    check('an untrained-looking root is not indifferent under the real test',
+          not ds.indifferent(flat_q, np.full(8, 0.35), 0.02))
+    check('…where a bare gap test would have fired',
+          ds.top_gap(flat_q) < 0.02)
+
 
 
 def test_drift_is_measured_across_a_doubling():
@@ -241,30 +272,52 @@ def test_budget_pool_is_compute_matched():
     """The pool must hold the MEAN at the fixed budget, not below it."""
     print('\nBudget pool')
     p = ds.BudgetPool(100, floor_frac=0.25, ceil_mult=4.0, pool_mult=8.0)
-    check('the floor is a fraction of the base', p.allot()[0] == 25)
-    check('with an empty pool the ceiling is the base', p.allot()[1] == 100)
-    p.settle(40)
+    lo, hi, lent = p.reserve()
+    check('the floor is a fraction of the base', lo == 25)
+    check('with an empty pool the ceiling is the base', hi == 100 and lent == 0)
+    p.settle(40, lent)
     check('an unspent position banks the difference', p.pool == 60)
-    check('and the next position may spend it', p.allot()[1] == 160)
+    lo, hi, lent = p.reserve()
+    check('and the next position may spend it', hi == 160 and lent == 60)
+    p.settle(lo, lent)
     for _ in range(50):
-        p.settle(p.allot()[0])
+        a, b, c = p.reserve()
+        p.settle(a, c)
     check('the surplus is capped', p.pool <= p.cap, f'{p.pool}')
-    check('the ceiling never exceeds ceil_mult x base', p.allot()[1] == 400)
+    check('the ceiling never exceeds ceil_mult x base', p.reserve()[1] == 400)
 
-    # Spending the whole allotment every time is exactly break-even: a position
-    # may spend at most base + pool, so the arm can never run a deficit against
-    # the fixed-budget baseline.  That one-sidedness is the point -- dynamic
-    # search cannot win by spending more.
+    # Reserving DEBITS.  Without that, concurrent positions each see the whole
+    # surplus and the arm outspends the baseline it is compared against --
+    # measured at +12% with four slots in flight before this was fixed.
+    c = ds.BudgetPool(64)
+    rng = np.random.default_rng(0)
+    flight, tot, moves = [], 0, 0
+    for _ in range(4000):
+        if len(flight) < 4:
+            flight.append(c.reserve())
+        else:
+            lo, hi, lent = flight.pop(0)
+            used = int(rng.integers(lo, hi + 1))
+            c.settle(used, lent)
+            tot += used; moves += 1
+    check('four concurrent positions cannot outspend the fixed budget',
+          tot <= moves * c.base, f'{tot / moves:.2f} vs {c.base}')
+    check('and the pool books stay balanced',
+          c.outstanding == sum(f[2] for f in flight), f'{c.outstanding}')
+
+    # Spending the whole allotment every time is exactly break-even.
     q = ds.BudgetPool(100, pool_mult=2.0)
     for _ in range(20):
-        q.settle(q.allot()[1])
+        a, b, l = q.reserve()
+        q.settle(b, l)
     check('spending the full allotment is break-even, never a deficit',
           q.pool == 0, f'{q.pool}')
     check('so the total never exceeds the fixed budget',
           q.spent <= q.base * q.moves, f'{q.spent} vs {q.base * q.moves}')
     r0 = ds.BudgetPool(100)
     for _ in range(30):
-        r0.settle(r0.allot()[1] + 10 ** 6)      # a caller ignoring its ceiling
+        a, b, l = r0.reserve()
+        r0.settle(b + 10 ** 6, l)          # a caller ignoring its ceiling
     check('and a caller that ignores its ceiling cannot corrupt the pool',
           r0.pool == 0, f'{r0.pool}')
 
@@ -272,9 +325,8 @@ def test_budget_pool_is_compute_matched():
     rng = np.random.default_rng(3)
     r = ds.BudgetPool(100)
     for _ in range(4000):
-        lo, hi = r.allot()
-        want = int(rng.choice([lo, 100, hi]))
-        r.settle(int(np.clip(want, lo, hi)))
+        lo, hi, lent = r.reserve()
+        r.settle(int(np.clip(rng.choice([lo, 100, hi]), lo, hi)), lent)
     check('the realized mean tracks the fixed budget',
           abs(r.realized_mean() - 100) < 5.0, f'{r.realized_mean():.1f}')
 
@@ -325,8 +377,11 @@ def test_dynamic_search_end_to_end():
     d2.begin(); d2.end(20)
     banked = d2.pool.pool
     d2.begin(300)
-    check('a new base carries the pool over', d2.pool.pool == banked
-          and d2.pool.base == 300, f'{d2.pool.pool}/{d2.pool.base}')
+    # `begin` reserves, so the carried surplus is out on loan rather than
+    # sitting in the pool -- the books are pool + outstanding.
+    check('a new base carries the pool over',
+          d2.pool.pool + d2.pool.outstanding == banked and d2.pool.base == 300,
+          f'{d2.pool.pool}+{d2.pool.outstanding}/{d2.pool.base}')
     check('and rescales the floor', d2.pool.floor == 75)
 
 
@@ -347,6 +402,37 @@ def test_config_kwargs():
           ds.DynamicSearch(**k2) is not None)
 
 
+
+def test_multi_slot_form():
+    """Per-root rules over one shared pool: what the self-play drivers need.
+
+    The drivers interleave many games in one engine, so each slot must keep its
+    own convergence state while all of them bank into and borrow from the same
+    budget."""
+    print('\nMulti-slot: per-root rules, one shared pool')
+    d = ds.DynamicSearch(100, enabled=True, patience=1, delta=0.05)
+    ra, capa = d.open_position()
+    rb, capb = d.open_position()
+    check('two positions get independent rules', ra is not rb)
+    check('and the same ceiling from the same pool', capa == capb == 100)
+    ra.update(probe(20, [0.9, 0.0], [0.02, 0.02], target=[1.0, 0.0]))
+    check('advancing one leaves the other untouched',
+          rb._snap is None and ra._snap is not None)
+    d.close_position(ra, 40)
+    check('the pool banks from whichever finishes first', d.pool.pool == 60)
+    _, capc = d.open_position()
+    check('and lends it to the next', capc == 160)
+    d.close_position(rb, 100)
+    check('both settle into the same pool', d.pool.moves == 2)
+
+    off = ds.DynamicSearch(100, enabled=False)
+    rule, cap = off.open_position()
+    check('disabled hands back no rule and the fixed budget',
+          rule is None and cap == 100)
+    off.close_position(None, 100)
+    check('and closing is a no-op', off.summary() == {})
+
+
 def main():
     test_p_best_against_monte_carlo()
     test_the_pitfall()
@@ -357,6 +443,7 @@ def main():
     test_budget_pool_is_compute_matched()
     test_disabled_is_a_passthrough()
     test_dynamic_search_end_to_end()
+    test_multi_slot_form()
     test_config_kwargs()
     print()
     if _fails:

@@ -56,8 +56,8 @@ THE THREE GATES
 Stop when the position is proven, or when ALL of:
 
   floor      n >= min_sims                     never judge on nothing
-  decision   P(best) >= p_stop  OR  gap < eps  more search will not change the
-                                               move, or will not change it in a
+  decision   P(best) >= p_stop, OR the gap    more search will not change the
+             is SHOWN to be under eps          move, or will not change it in a
                                                way worth having
   drift      target moved < delta since n/2    more search will not change the
                                                TARGET either
@@ -73,6 +73,13 @@ bounded ABOVE by the fixed-budget baseline — so if dynamic search wins, it did
 not win by using more compute.  It can still spend materially less, which would
 be a different experiment, so `realized_mean()` goes into the log every eval
 rather than being assumed to equal the nominal budget.
+
+The indifference half of the decision gate is an EQUIVALENCE test, not a bare
+`gap < eps` — see `indifferent`.  The bare form is the same trap from the other
+side: early in training every action looks equal because nothing is known yet,
+and a gap test fires everywhere, collapsing the search onto its floor exactly
+when bootstrapping needs it most.  Measured before the fix: 20 simulations
+against a nominal 64, on every position of an untrained run.
 
 A consequence of the drift gate worth knowing: the rule cannot stop before it
 has seen the target across one doubling, i.e. before the second probe.  That is
@@ -168,13 +175,43 @@ def p_best(q, sd, floor=1e-9):
 def top_gap(q):
     """Value distance between the best action and the runner-up, in v units.
 
-    Zero-or-one action means there is nothing to choose, which is the strongest
-    possible form of indifference — reported as +inf so the gate opens."""
+    Zero-or-one action means there is nothing to choose, so the gap is 0: the
+    strongest possible form of indifference."""
     q = np.asarray(q, dtype=np.float64)
     if q.size <= 1:
-        return float('inf')
+        return 0.0
     p = np.partition(q, -2)
     return float(p[-1] - p[-2])
+
+
+def indifferent(q, sd, eps, z=1.645, floor=1e-9):
+    """Is the best action provably no better than the runner-up by more than
+    `eps`?  An EQUIVALENCE test, not a failure to reject one.
+
+    The naive form — `top_gap(q) < eps` — is the same trap as the naive
+    confidence rule, from the other side.  Early in training every action looks
+    equal because NOTHING is known, so a bare gap test fires on every position
+    and the search collapses onto its floor exactly when bootstrapping needs it
+    most: measured at 20 simulations against a nominal 64 on an untrained net,
+    on every position played.
+
+    Requiring `gap + z·sd(gap) < eps` instead asks whether the gap has been
+    SHOWN to be small.  A wide belief cannot pass it, so an unsearched position
+    keeps searching, and only a position whose leaves agree that the moves are
+    close stops for this reason.
+
+    Note this uses the disagreement spread, which does not shrink with n — so
+    two moves whose leaves genuinely disagree a lot will never satisfy it and
+    will run to the ceiling.  That is the honest answer: nothing established
+    whether the choice matters."""
+    q = np.asarray(q, dtype=np.float64)
+    if q.size <= 1:
+        return True
+    sd = np.maximum(np.asarray(sd, dtype=np.float64), floor)
+    order = np.argsort(q)
+    i, k = int(order[-1]), int(order[-2])
+    sd_gap = math.sqrt(sd[i] ** 2 + sd[k] ** 2)
+    return bool((q[i] - q[k]) + z * sd_gap < eps)
 
 
 def drift(a, b):
@@ -219,17 +256,19 @@ class StopRule(object):
     has been shown, so a test can drive it without a tree."""
 
     def __init__(self, min_sims, max_sims, p_stop=0.95, eps_indiff=0.02,
-                 delta=0.05, patience=2):
+                 delta=0.05, patience=2, indiff_z=1.645):
         self.min_sims = int(min_sims)
         self.max_sims = int(max_sims)
         self.p_stop = float(p_stop)
         self.eps_indiff = float(eps_indiff)
         self.delta = float(delta)
         self.patience = int(patience)
+        self.indiff_z = float(indiff_z)
         self._snap_n = 0
         self._snap = None
         self._streak = 0
         self._drift = float('inf')
+        self.lent = 0
         self.reason = ''
         self.last = {}
 
@@ -261,10 +300,11 @@ class StopRule(object):
 
         pb = p_best(probe.q, probe.sd)
         gap = top_gap(probe.q)
-        decided = pb >= self.p_stop or gap < self.eps_indiff
+        moot = indifferent(probe.q, probe.sd, self.eps_indiff, self.indiff_z)
+        decided = pb >= self.p_stop or moot
         stable = self._drift < self.delta
         self.last = {'p_best': pb, 'gap': gap, 'drift': self._drift,
-                     'decided': decided, 'stable': stable}
+                     'moot': moot, 'decided': decided, 'stable': stable}
         if decided and stable:
             self._streak += 1
         else:
@@ -278,16 +318,18 @@ class StopRule(object):
 class BudgetPool(object):
     """Simulations saved on easy positions, lent to hard ones.
 
-    The pool cannot go into debt, and that is structural rather than a choice:
-    a position may spend at most `base + pool`, so `pool + base − used` is never
-    negative.  The arm therefore spends at most what the fixed-budget baseline
-    spends, and the A/B is one-sided in the safe direction — dynamic search
-    winning cannot be explained by it having used more compute.
+    Lending is DEBITED WHEN RESERVED, not when spent.  The self-play drivers
+    hold several positions open at once, so a pool that is only debited on
+    settle hands the same surplus to every position that looks at it before any
+    of them finishes — measured at a 12% overspend against the baseline with
+    four concurrent slots, which is exactly the confound the pool exists to
+    prevent.  Reserving first makes the total spend at most `base × moves`
+    however many searches are in flight.
 
-    What it CAN do is quietly spend much less, if the stop rule fires
-    everywhere.  That would be a real result but it is not the same experiment,
-    so `realized_mean()` is logged every eval and the reader can see which of
-    the two happened instead of assuming."""
+    What the pool CAN do is spend much less, if the stop rule fires everywhere.
+    That is a real result but not the same experiment, so `realized_mean()` is
+    logged every eval and the reader can see which of the two happened instead
+    of assuming."""
 
     def __init__(self, base, floor_frac=0.25, ceil_mult=4.0, pool_mult=8.0):
         if not 0.0 < floor_frac <= 1.0:
@@ -301,22 +343,28 @@ class BudgetPool(object):
         self.pool = 0
         self.moves = 0
         self.spent = 0
+        self.outstanding = 0
 
-    def allot(self):
-        """(min_sims, max_sims) for the next position."""
-        top = self.base + self.pool
-        top = min(top, self.hard_ceiling)
-        top = max(top, self.floor)
-        return self.floor, int(top)
+    def reserve(self):
+        """(min_sims, max_sims, lent) for one position, debiting `lent` now.
 
-    def settle(self, used):
+        The debit is the whole point — see the class docstring."""
+        lent = max(min(self.pool, self.hard_ceiling - self.base), 0)
+        self.pool -= lent
+        self.outstanding += lent
+        top = max(self.floor, min(self.base + lent, self.hard_ceiling))
+        return self.floor, int(top), int(lent)
+
+    def settle(self, used, lent=0):
         used = int(used)
+        lent = int(lent)
         self.moves += 1
         self.spent += used
-        # max(…, 0) is belt and braces: `allot` already bounds `used` by
-        # base + pool, so the sum cannot be negative unless a caller ignores the
-        # ceiling it was handed.
-        self.pool = int(min(max(self.pool + self.base - used, 0), self.cap))
+        self.outstanding -= lent
+        # Return the unspent part of what this position was allowed.  max(…, 0)
+        # is belt and braces: `reserve` already bounds `used` by base + lent.
+        self.pool = int(min(max(self.pool + self.base + lent - used, 0),
+                            self.cap))
 
     def realized_mean(self):
         """Simulations per move actually spent.  Logged, so 'compute-matched'
@@ -333,19 +381,43 @@ class DynamicSearch(object):
 
     def __init__(self, base_sims, enabled=False, floor_frac=0.25,
                  ceil_mult=4.0, pool_mult=8.0, p_stop=0.95, eps_indiff=0.02,
-                 delta=0.05, patience=2):
+                 delta=0.05, patience=2, indiff_z=1.645):
         self.enabled = bool(enabled)
         self.base = int(base_sims)
         self.params = dict(p_stop=p_stop, eps_indiff=eps_indiff, delta=delta,
-                           patience=patience)
+                           patience=patience, indiff_z=indiff_z)
         self.pool = (BudgetPool(base_sims, floor_frac, ceil_mult, pool_mult)
                      if self.enabled else None)
         self.rule = None
         self.cap = int(base_sims)
         self.stops = {}
 
-    def begin(self, base_sims=None):
-        """Start a new position.  Returns the ceiling for this search."""
+    def open_position(self, base_sims=None):
+        """Start one position: returns (rule_or_None, ceiling).
+
+        The RULE is per-root and the POOL is shared, because the self-play
+        drivers interleave many games in one engine — every slot needs its own
+        convergence state, and they should all bank into and borrow from the
+        same budget.  `begin`/`should_stop`/`end` below are the single-root
+        form for the bots, which have exactly one search in flight."""
+        cap = self._rebase(base_sims)
+        if not self.enabled:
+            return None, cap
+        lo, hi, lent = self.pool.reserve()
+        rule = StopRule(lo, hi, **self.params)
+        rule.lent = lent
+        return rule, hi
+
+    def close_position(self, rule, used):
+        if not self.enabled or self.pool is None:
+            return
+        self.pool.settle(used, getattr(rule, 'lent', 0))
+        r = rule.reason if rule is not None else ''
+        if r:
+            self.stops[r] = self.stops.get(r, 0) + 1
+
+    def _rebase(self, base_sims):
+        """Adopt a new base budget, carrying the pool's running state over."""
         if base_sims is not None and int(base_sims) != self.base:
             # fast_sims / full_sims are drawn per GAME, so the base can change
             # between positions only when a new game starts in this slot.
@@ -356,28 +428,22 @@ class DynamicSearch(object):
                                        p.hard_ceiling / max(p.base, 1),
                                        p.cap / max(p.base, 1))
                 self.pool.pool, self.pool.moves = p.pool, p.moves
-                self.pool.spent = p.spent
-        if not self.enabled:
-            self.cap = self.base
-            self.rule = None
-            return self.cap
-        lo, hi = self.pool.allot()
-        self.rule = StopRule(lo, hi, **self.params)
-        self.cap = hi
-        return hi
+                self.pool.spent, self.pool.outstanding = p.spent, p.outstanding
+        return self.base if not self.enabled else self.base + self.pool.pool
+
+    # ── single-root form, for the bots ────────────────────────────────────────
+    def begin(self, base_sims=None):
+        """Start a position and keep its rule internally.  Returns the ceiling."""
+        self.rule, self.cap = self.open_position(base_sims)
+        return self.cap
 
     def should_stop(self, probe):
         if not self.enabled or self.rule is None:
             return False
-        stop = self.rule.update(probe)
-        return stop
+        return self.rule.update(probe)
 
     def end(self, used):
-        if self.enabled and self.pool is not None:
-            self.pool.settle(used)
-            r = self.rule.reason if self.rule else ''
-            if r:
-                self.stops[r] = self.stops.get(r, 0) + 1
+        self.close_position(self.rule, used)
 
     def summary(self):
         if not self.enabled or self.pool is None:
@@ -410,4 +476,5 @@ def config_kwargs(cfg, base_sims, enabled=None):
         p_stop=get('ds_p_stop', 0.95),
         eps_indiff=get('ds_eps_indiff', 0.02),
         delta=get('ds_delta', 0.05),
-        patience=get('ds_patience', 2))
+        patience=get('ds_patience', 2),
+        indiff_z=get('ds_indiff_z', 1.645))
