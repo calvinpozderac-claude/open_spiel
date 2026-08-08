@@ -272,8 +272,10 @@ class StopRule(object):
     has been shown, so a test can drive it without a tree."""
 
     def __init__(self, min_sims, max_sims, p_stop=0.95, eps_indiff=0.02,
-                 delta=0.05, patience=2, indiff_z=1.645, mode=MODE_FULL):
+                 delta=0.05, patience=2, indiff_z=1.645, mode=MODE_FULL,
+                 check_growth=1.25):
         self.min_sims = int(min_sims)
+        self.check_growth = float(check_growth)
         self.max_sims = int(max_sims)
         self.p_stop = float(p_stop)
         self.eps_indiff = float(eps_indiff)
@@ -283,10 +285,18 @@ class StopRule(object):
         if mode not in MODES:
             raise ValueError(f'mode must be one of {MODES}')
         self.mode = mode
+        # What this rule actually reads, so the engine can skip building the
+        # rest.  Assembling a probe is the dominant cost of a check, and the
+        # naive-posterior spread and the drift target are each a large part of
+        # it -- neither is worth computing for a rule that never looks.
+        self.needs_post = (mode == MODE_NAIVE_POSTERIOR)
+        self.needs_target = mode in (MODE_FULL, MODE_DRIFT)
         self._snap_n = 0
         self._snap = None
         self._streak = 0
         self._drift = float('inf')
+        self._next_check = int(min_sims)
+        self.checks = 0
         self.lent = 0
         self.nominal = 0
         self.reason = ''
@@ -295,10 +305,15 @@ class StopRule(object):
     def _refresh_drift(self, probe):
         """Compare the target against the snapshot taken at half the evidence.
 
+        Skipped entirely for rules with no drift gate -- they are handed an
+        empty target and must not read it.
+
         The snapshot only advances once n has DOUBLED, which is what makes the
         comparison fair across n: 'the target held still while the evidence
         doubled' means the same thing at n=20 and at n=2000, where 'held still
         for 20 simulations' does not."""
+        if not self.needs_target:
+            return
         if self._snap is None:
             self._snap_n, self._snap = probe.n, probe.target.copy()
             return
@@ -306,7 +321,26 @@ class StopRule(object):
             self._drift = drift(probe.target, self._snap)
             self._snap_n, self._snap = probe.n, probe.target.copy()
 
+    def due(self, n):
+        """Is a probe worth building at `n` simulations?
+
+        Asked BEFORE the caller assembles a RootProbe, because assembling one
+        is the expensive part -- it collapses every edge's evidence twice.  In
+        the pilot the adaptive arms spent 9-18% MORE wall clock than the fixed
+        arm while running FEWER simulations, which is the rule paying for
+        itself and then some.
+
+        Checks are spaced geometrically for the same reason the drift gate is:
+        a decision that has not moved over the last 1.25x of the evidence is
+        not about to move on the next simulation, and probing every wave just
+        buys arithmetic."""
+        if n < self.min_sims:
+            return False
+        return n >= self._next_check
+
     def update(self, probe):
+        self.checks += 1
+        self._next_check = max(probe.n + 1, int(probe.n * self.check_growth))
         self._refresh_drift(probe)
         if probe.solved:
             self.reason = 'solved'
@@ -441,11 +475,13 @@ class DynamicSearch(object):
 
     def __init__(self, base_sims, enabled=False, floor_frac=0.25,
                  ceil_mult=4.0, pool_mult=8.0, p_stop=0.95, eps_indiff=0.02,
-                 delta=0.05, patience=2, indiff_z=1.645, mode=MODE_FULL):
+                 delta=0.05, patience=2, indiff_z=1.645, mode=MODE_FULL,
+                 check_growth=1.25):
         self.enabled = bool(enabled)
         self.base = int(base_sims)
         self.params = dict(p_stop=p_stop, eps_indiff=eps_indiff, delta=delta,
-                           patience=patience, indiff_z=indiff_z, mode=mode)
+                           patience=patience, indiff_z=indiff_z, mode=mode,
+                           check_growth=check_growth)
         self.pool = (BudgetPool(base_sims, floor_frac, ceil_mult, pool_mult)
                      if self.enabled else None)
         self.rule = None
@@ -524,4 +560,5 @@ def config_kwargs(cfg, base_sims, enabled=None):
         delta=get('ds_delta', 0.05),
         patience=get('ds_patience', 2),
         indiff_z=get('ds_indiff_z', 1.645),
-        mode=get('ds_rule', MODE_FULL))
+        mode=get('ds_rule', MODE_FULL),
+        check_growth=get('ds_check_growth', 1.25))

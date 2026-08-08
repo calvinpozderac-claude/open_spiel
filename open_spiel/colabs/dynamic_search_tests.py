@@ -461,6 +461,36 @@ def test_multi_slot_form():
     check('and closing is a no-op', off.summary() == {})
 
 
+def test_checks_are_spaced():
+    """Probes cost more than the gates: space them, or the rule loses its own
+    savings.
+
+    In the pilot every adaptive arm spent 9-18% MORE wall clock than the fixed
+    arm while running FEWER simulations.  Assembling a RootProbe collapses each
+    edge's evidence twice, and it was being assembled every wave."""
+    print('\nGate checks are geometrically spaced')
+    r = ds.StopRule(min_sims=20, max_sims=10 ** 6, patience=99, delta=1e9)
+    check('nothing is due below the floor', not r.due(19))
+    check('the floor itself is due', r.due(20))
+    fired = []
+    for n in range(1, 401):
+        if r.due(n):
+            fired.append(n)
+            r.update(probe(n, [0.3, 0.1], [0.4, 0.4]))
+    check('checks grow geometrically, not one per simulation',
+          len(fired) < 20, f'{len(fired)} checks over 400 sims')
+    check('and they start at the floor', fired[0] == 20, f'{fired[:4]}')
+    check('each is at least 1.25x the last',
+          all(b >= int(a * 1.25) for a, b in zip(fired, fired[1:])),
+          f'{fired}')
+    check('the rule counts them', r.checks == len(fired))
+    # A probe is never skipped so late that the ceiling is overshot: `update`
+    # still short-circuits on the ceiling regardless of the schedule.
+    r2 = ds.StopRule(min_sims=5, max_sims=50, patience=99, delta=1e9)
+    check('the ceiling still stops it', r2.update(probe(50, [0.3], [0.4]))
+          and r2.reason == 'ceiling')
+
+
 def main():
     test_p_best_against_monte_carlo()
     test_the_pitfall()
@@ -472,6 +502,7 @@ def main():
     test_disabled_is_a_passthrough()
     test_dynamic_search_end_to_end()
     test_multi_slot_form()
+    test_checks_are_spaced()
     test_config_kwargs()
     print()
     if _fails:

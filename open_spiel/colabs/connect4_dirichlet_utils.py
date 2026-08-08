@@ -155,6 +155,8 @@ TARGET_EPS = 0.05
 TERMINAL_CONC = 100.0
 TERMINAL_EPS = 0.05
 
+_EMPTY_TARGET = np.zeros(0)
+
 _SPIKE = np.full((3, 3), TERMINAL_EPS)
 _SPIKE[_WIN, _WIN] = _SPIKE[_DRAW, _DRAW] = _SPIKE[_LOSS, _LOSS] = TERMINAL_CONC
 
@@ -597,33 +599,46 @@ class _CNode:
         """Per-edge evidence counts (the analogue of MCTS visit counts)."""
         return np.array([a[0] for a in self.eacc])
 
-    def probe(self, n):
+    def probe(self, n, want_post=False, want_target=True):
         """Snapshot for the dynamic-search stop rule (see dynamic_search_utils).
 
         `sd` is read off AGG_MIXTURE and not off the arm's own `search_agg`,
         deliberately.  The mixture's concentration reflects DISAGREEMENT between
         the backed-up evaluations and is independent of how many there were,
         which is the whole reason a stop rule can use it: 'additive' would hand
-        back a spread of exactly 1/√n and turn the decision gate into a visit
-        counter.  An arm's own rule still decides the MOVE and the TARGET —
-        this is only how the search decides it has seen enough.
+        back a spread of exactly 1/sqrt(n) and turn the decision gate into a
+        visit counter.  An arm's own rule still decides the MOVE and the TARGET
+        -- this is only how the search decides it has seen enough.
+
+        `want_post` and `want_target` are asked by the rule, because building
+        this is the dominant cost of a check and a rule that reads neither
+        should not pay for both.  The posterior spread exists only for the
+        naive-posterior control; the target only for the drift gate.
         """
         import dynamic_search_utils as _ds
         k = len(self.legal)
-        q = np.empty(k); sd = np.empty(k); sdp = np.empty(k)
+        q = np.empty(k); sd = np.empty(k)
+        sdp = np.empty(k) if want_post else None
         for i in range(k):
             if self.term[i] >= 0:
-                a = p = _SPIKE[self.term[i]]
+                a = _SPIKE[self.term[i]]
             else:
                 a = observed_alpha(self.eacc[i], AGG_MIXTURE)
-                p = observed_alpha(self.eacc[i], AGG_ADDITIVE)
                 if a is None:
-                    a = p = self.alpha_p[i]    # untouched: the prior is all we
+                    a = self.alpha_p[i]        # untouched: the prior is all we
             ev, var = dir_value_mean_var(a)    # know about this edge
             q[i] = ev; sd[i] = math.sqrt(max(var, 0.0))
-            sdp[i] = math.sqrt(max(dir_value_mean_var(p)[1], 0.0))
+            if want_post:
+                if self.term[i] >= 0:
+                    p = _SPIKE[self.term[i]]
+                else:
+                    p = observed_alpha(self.eacc[i], AGG_ADDITIVE)
+                    if p is None:
+                        p = self.alpha_p[i]
+                sdp[i] = math.sqrt(max(dir_value_mean_var(p)[1], 0.0))
+        tgt = dir_mean(self.state_target()) if want_target else _EMPTY_TARGET
         return _ds.RootProbe(n, _node_solved_outcome(self) is not None,
-                             q, sd, dir_mean(self.state_target()), sd_post=sdp)
+                             q, sd, tgt, sd_post=sdp)
 
 
 def _set_term(node, idx, outcome):
@@ -1057,6 +1072,7 @@ class Config:
     ds_delta: float = 0.05            # target L1 movement that counts as still
     ds_patience: int = 2              # consecutive checks before stopping
     ds_indiff_z: float = 1.645        # confidence the gap is really below eps
+    ds_check_growth: float = 1.25     # probe at geometrically spaced n
     ds_rule: str = 'full'             # full | decision | drift |
                                       # naive_posterior | naive_gap
     # THE DEFAULT IS 'additive' for both.
@@ -1306,7 +1322,12 @@ class _SlotEngine:
         r = s.get('ds_rule')
         if r is None or s['root'] is None:
             return False
-        return r.update(s['root'].probe(s['n']))
+        # `due` first: building the probe collapses every edge's evidence
+        # twice, and it is that, not the gates, that made the adaptive arms
+        # slower than the fixed one in the pilot.
+        if not r.due(s['n']):
+            return False
+        return r.update(s['root'].probe(s['n'], r.needs_post, r.needs_target))
 
     def _ds_close(self, s):
         self.ds.close_position(s.get('ds_rule'), s['n'])
@@ -2905,7 +2926,7 @@ if _HAS_TORCH:
             ds_pool_mult=cfg.ds_pool_mult, ds_p_stop=cfg.ds_p_stop,
             ds_eps_indiff=cfg.ds_eps_indiff, ds_delta=cfg.ds_delta,
             ds_patience=cfg.ds_patience, ds_indiff_z=cfg.ds_indiff_z,
-            ds_rule=cfg.ds_rule)
+            ds_rule=cfg.ds_rule, ds_check_growth=cfg.ds_check_growth)
 
     def build_network(cfg, device):
         sig = (cfg.channels, cfg.num_blocks, cfg.head_ch)

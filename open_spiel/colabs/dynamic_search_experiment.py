@@ -32,28 +32,33 @@ import dynamic_search_utils as ds
 ROOT = os.environ.get('DS_EXP_ROOT', 'ds_experiment')
 
 # name -> Config overrides.  Everything not named here is identical across arms.
+# Four arms, several seeds each.  The pilot ran eleven arms at one seed and
+# produced a 126-Elo spread that was entirely noise -- with one run per arm
+# there is no way to tell an arm apart from the seed it drew.  Fewer arms and
+# repeated seeds buys the power to say something.
 ARMS = {
     # The control: a fixed budget, which is what every trained arm used.
     'fixed':      dict(dynamic_search=False),
-
-    # The real rule at its default thresholds, then one knob at a time.
+    # The rule the design argues for.
     'full':       dict(ds_rule='full'),
-    'full_p99':   dict(ds_rule='full', ds_p_stop=0.99),
-    'full_p90':   dict(ds_rule='full', ds_p_stop=0.90),
-    'full_d02':   dict(ds_rule='full', ds_delta=0.02),
-    'full_d15':   dict(ds_rule='full', ds_delta=0.15),
-    'full_wide':  dict(ds_rule='full', ds_ceil_mult=8.0, ds_floor_frac=0.125),
-
-    # Is each gate earning its place?
-    'decision':   dict(ds_rule='decision'),
+    # The cheapest gate, and the only arm that came in under the fixed arm's
+    # wall clock in the pilot.
     'drift':      dict(ds_rule='drift'),
-
-    # The traps, run rather than argued.
+    # The trap, as a control on whether the principled statistic MATTERS for a
+    # training outcome rather than only for what the number means.
     'naive_post': dict(ds_rule='naive_posterior'),
-    'naive_gap':  dict(ds_rule='naive_gap'),
 }
 
+SEEDS = (7, 11, 23)
 ORDER = list(ARMS)
+
+
+def runs():
+    return [(a, sd) for a in ORDER for sd in SEEDS]
+
+
+def run_name(arm, seed):
+    return f'{arm}#{seed}'
 
 
 def shared(episodes):
@@ -76,20 +81,22 @@ def shared(episodes):
     return s
 
 
-def arm_config(name, episodes):
+def arm_config(arm, seed, episodes):
     s = shared(episodes)
     cfg = B.thompson_config('MM', s)          # every arm is MM apart from the rule
-    over = dict(ARMS[name])
+    over = dict(ARMS[arm])
     over.setdefault('dynamic_search', True)
-    over['checkpoint_dir'] = os.path.join(ROOT, f'arm_{name}')
+    over['seed'] = seed
+    over['checkpoint_dir'] = os.path.join(ROOT, f'arm_{arm}_s{seed}')
     import dataclasses
     return dataclasses.replace(cfg, **over)
 
 
-def train_one(name, episodes, log=print):
-    """One short run.  Returns the row of measurements for this arm."""
+def train_one(arm, seed, episodes, log=print):
+    """One run.  Returns the row of measurements for this arm/seed."""
     import dataclasses
-    cfg = arm_config(name, episodes)
+    name = run_name(arm, seed)
+    cfg = arm_config(arm, seed, episodes)
     c4.set_game(c4.load_game(cfg.game_name))
     t0 = time.perf_counter()
     import contextlib
@@ -97,8 +104,8 @@ def train_one(name, episodes, log=print):
             contextlib.redirect_stderr(devnull):
         hist = c4.run_training(cfg, log=lambda *a, **k: None)
     wall = time.perf_counter() - t0
-    row = {'arm': name, 'wall_s': wall, 'episodes': episodes,
-           'rule': ARMS[name].get('ds_rule', '-'),
+    row = {'arm': arm, 'seed': seed, 'run': name, 'wall_s': wall,
+           'episodes': episodes, 'rule': ARMS[arm].get('ds_rule', '-'),
            'sims_mean': float('nan'), 'stop': {}}
     stats = (hist or {}).get('ds') or {}
     row.update({k: v for k, v in stats.items() if k != 'stop'})
@@ -110,15 +117,15 @@ def train_one(name, episodes, log=print):
         row['sims_mean'] = (sh['fast_prob'] * sh['fast_sims']
                             + (1 - sh['fast_prob']) * sh['full_sims'])
         row['nominal'] = True
-    log(f'  {name:<11} {wall:7.1f}s  sims/move '
+    log(f'  {name:<14} {wall:7.1f}s  sims/move '
         f'{row.get("sims_mean", float("nan")):6.1f}')
     return row
 
 
-def final_net(name, s):
-    """The trained network of one arm, from its own checkpoint."""
+def final_net(arm, seed, s):
+    """The trained network of one run, from its own checkpoint."""
     import torch
-    d = os.path.join(ROOT, f'arm_{name}')
+    d = os.path.join(ROOT, f'arm_{arm}_s{seed}')
     blob = torch.load(os.path.join(d, 'latest.pt'), map_location='cpu',
                       weights_only=False)
     net = c4.C4DirichletNet(s['channels'], s['num_blocks'], s['head_ch'])
@@ -129,7 +136,8 @@ def final_net(name, s):
 
 def tournament(rows, episodes, games_per_pair, sims, log=print):
     s = shared(episodes)
-    players = {r['arm']: ('thompson', final_net(r['arm'], s)) for r in rows}
+    players = {r['run']: ('thompson', final_net(r['arm'], r['seed'], s))
+               for r in rows}
     c4.set_game(c4.load_game(s['game']))
     B.GAME_REF[0] = c4.load_game(s['game'])
     names, _W, elo = B.round_robin(
@@ -139,21 +147,49 @@ def tournament(rows, episodes, games_per_pair, sims, log=print):
 
 
 def report(rows, elo, sims, log=print):
+    """Per run, then pooled by arm with the seed spread.
+
+    The pooled line is the one to read.  A single run's Elo carries the seed it
+    drew as much as the rule it used, which is what made the eleven-arm pilot
+    unreadable."""
     log('')
-    log(f'{"arm":<12}{"rule":<16}{"Elo":>6}{"wall s":>9}{"sims/mv":>9}'
-        f'{"vs fixed":>10}{"stop: conv/ceil/solved":>26}')
-    base_wall = next((r['wall_s'] for r in rows if r['arm'] == 'fixed'), None)
-    for r in sorted(rows, key=lambda r: -elo.get(r['arm'], 0)):
+    log(f'{"run":<15}{"rule":<16}{"Elo":>6}{"wall s":>9}{"sims/mv":>9}'
+        f'{"nominal":>9}{"stop conv/ceil":>16}')
+    for r in sorted(rows, key=lambda r: -elo.get(r['run'], 0)):
         st = r.get('stop', {}) or {}
-        mix = '/'.join(f'{st.get(k, 0.0):.2f}'
-                       for k in ('converged', 'ceiling', 'solved'))
-        rel = (r['wall_s'] / base_wall) if base_wall else float('nan')
-        log(f'{r["arm"]:<12}{r["rule"]:<16}{elo.get(r["arm"], 0):>6.0f}'
+        mix = '/'.join(f'{st.get(k, 0.0):.2f}' for k in ('converged', 'ceiling'))
+        log(f'{r["run"]:<15}{r["rule"]:<16}{elo.get(r["run"], 0):>6.0f}'
             f'{r["wall_s"]:>9.1f}{r.get("sims_mean", float("nan")):>9.1f}'
-            f'{rel:>9.2f}x{mix:>26}')
+            f'{r.get("sims_base", float("nan")):>9.1f}{mix:>16}')
+
+    log('')
+    log(f'{"arm":<12}{"rule":<16}{"Elo (mean+-sd)":>18}{"wall s":>9}'
+        f'{"sims/mv":>9}{"vs fixed time":>15}{"vs fixed sims":>15}')
+    agg = {}
+    for a in ORDER:
+        rs = [r for r in rows if r['arm'] == a]
+        if not rs:
+            continue
+        e = np.array([elo.get(r['run'], 0.0) for r in rs])
+        agg[a] = dict(
+            elo=float(e.mean()), elo_sd=float(e.std(ddof=1)) if len(e) > 1 else 0.0,
+            wall=float(np.mean([r['wall_s'] for r in rs])),
+            sims=float(np.nanmean([r.get('sims_mean', np.nan) for r in rs])),
+            n=len(rs), rule=rs[0]['rule'])
+    bw = agg.get('fixed', {}).get('wall')
+    bs = agg.get('fixed', {}).get('sims')
+    for a, v in sorted(agg.items(), key=lambda kv: -kv[1]['elo']):
+        log(f'{a:<12}{v["rule"]:<16}'
+            f'{v["elo"]:>11.0f} +-{v["elo_sd"]:>4.0f}'
+            f'{v["wall"]:>9.1f}{v["sims"]:>9.1f}'
+            f'{(v["wall"] / bw if bw else float("nan")):>14.2f}x'
+            f'{(v["sims"] / bs if bs else float("nan")):>14.2f}x')
     log('')
     log(f'(tournament: fixed {sims} simulations for every player, so this rates '
         f'the NETWORKS each rule produced, not the rules at play time.)')
+    log(f'(+-sd is over {len(SEEDS)} seeds; a gap smaller than the sd is not a '
+        f'result.)')
+    return agg
 
 
 def main(argv):
@@ -166,7 +202,7 @@ def main(argv):
     # load and torch's first kernels.  Timing it as if it were the arm's own
     # cost put 15.3s against 4s for identical work in the pilot.
     print('warm-up...')
-    train_one(ORDER[0], 2, log=lambda *a, **k: None)
+    train_one(ORDER[0], SEEDS[0], 2, log=lambda *a, **k: None)
     rows = []
     for name in ORDER:
         rows.append(train_one(name, episodes))
@@ -176,7 +212,9 @@ def main(argv):
     elo = tournament(rows, episodes, gpp, sims)
     with open(os.path.join(ROOT, 'elo.json'), 'w') as f:
         json.dump({k: float(v) for k, v in elo.items()}, f, indent=1)
-    report(rows, elo, sims)
+    agg = report(rows, elo, sims)
+    with open(os.path.join(ROOT, 'agg.json'), 'w') as f:
+        json.dump(agg, f, indent=1)
     return 0
 
 
