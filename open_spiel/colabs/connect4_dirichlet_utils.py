@@ -610,18 +610,20 @@ class _CNode:
         """
         import dynamic_search_utils as _ds
         k = len(self.legal)
-        q = np.empty(k); sd = np.empty(k)
+        q = np.empty(k); sd = np.empty(k); sdp = np.empty(k)
         for i in range(k):
             if self.term[i] >= 0:
-                a = _SPIKE[self.term[i]]
+                a = p = _SPIKE[self.term[i]]
             else:
                 a = observed_alpha(self.eacc[i], AGG_MIXTURE)
+                p = observed_alpha(self.eacc[i], AGG_ADDITIVE)
                 if a is None:
-                    a = self.alpha_p[i]        # untouched: the prior is all we
+                    a = p = self.alpha_p[i]    # untouched: the prior is all we
             ev, var = dir_value_mean_var(a)    # know about this edge
             q[i] = ev; sd[i] = math.sqrt(max(var, 0.0))
+            sdp[i] = math.sqrt(max(dir_value_mean_var(p)[1], 0.0))
         return _ds.RootProbe(n, _node_solved_outcome(self) is not None,
-                             q, sd, dir_mean(self.state_target()))
+                             q, sd, dir_mean(self.state_target()), sd_post=sdp)
 
 
 def _set_term(node, idx, outcome):
@@ -1054,6 +1056,9 @@ class Config:
     ds_eps_indiff: float = 0.02       # value gap below which the move is moot
     ds_delta: float = 0.05            # target L1 movement that counts as still
     ds_patience: int = 2              # consecutive checks before stopping
+    ds_indiff_z: float = 1.645        # confidence the gap is really below eps
+    ds_rule: str = 'full'             # full | decision | drift |
+                                      # naive_posterior | naive_gap
     # THE DEFAULT IS 'additive' for both.
     #
     # SEARCH wants concentration to GROW with evidence, so Thompson exploration
@@ -2899,7 +2904,8 @@ if _HAS_TORCH:
             ds_floor_frac=cfg.ds_floor_frac, ds_ceil_mult=cfg.ds_ceil_mult,
             ds_pool_mult=cfg.ds_pool_mult, ds_p_stop=cfg.ds_p_stop,
             ds_eps_indiff=cfg.ds_eps_indiff, ds_delta=cfg.ds_delta,
-            ds_patience=cfg.ds_patience)
+            ds_patience=cfg.ds_patience, ds_indiff_z=cfg.ds_indiff_z,
+            ds_rule=cfg.ds_rule)
 
     def build_network(cfg, device):
         sig = (cfg.channels, cfg.num_blocks, cfg.head_ch)
@@ -3218,6 +3224,21 @@ if _HAS_TORCH:
                 bar.reset()              # fresh window/ETA for the next stretch
         finally:
             bar.close()
+            # A finished run must leave a resumable checkpoint.  Saving was tied
+            # to the quick-eval cadence, so a run shorter than one eval interval
+            # (or with evals turned off) ended with nothing on disk.
+            if ep >= start_ep:
+                save_checkpoint(cfg.checkpoint_dir, ep, base_network, optimizer,
+                                scheduler, elo_pool, hist, cfg)
+            # What the adaptive budget actually spent, so 'compute-matched' is
+            # a measurement.  Empty dict whenever the toggle is off.
+            ds_stats = getattr(getattr(self_play, 'ds', None), 'summary', dict)()
+            if ds_stats:
+                hist['ds'] = dict(ds_stats)
+                hist['ds']['stop'] = {k[5:]: v for k, v in ds_stats.items()
+                                      if k.startswith('stop_')}
+                log(f'  dynamic search: {ds_stats["sims_mean"]:.1f} sims/move '
+                    f'against a nominal {ds_stats["sims_base"]:.0f}')
             self_play.shutdown()
         return hist
 

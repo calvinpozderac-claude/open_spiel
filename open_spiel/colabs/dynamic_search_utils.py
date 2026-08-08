@@ -238,14 +238,30 @@ class RootProbe(object):
     `target` is any flat vector that moves when the training target moves.
     """
 
-    __slots__ = ('n', 'solved', 'q', 'sd', 'target')
+    __slots__ = ('n', 'solved', 'q', 'sd', 'target', 'sd_post')
 
-    def __init__(self, n, solved, q, sd, target):
+    def __init__(self, n, solved, q, sd, target, sd_post=None):
         self.n = int(n)
         self.solved = bool(solved)
         self.q = np.asarray(q, dtype=np.float64).reshape(-1)
         self.sd = np.asarray(sd, dtype=np.float64).reshape(-1)
         self.target = np.asarray(target, dtype=np.float64).reshape(-1)
+        # The 1/sqrt(n) POSTERIOR spread.  Carried only so the naive rule can
+        # be run as a measured control -- nothing else should read it.
+        self.sd_post = (self.sd if sd_post is None
+                        else np.asarray(sd_post, dtype=np.float64).reshape(-1))
+
+
+# The rules, so they can be A/B'd against each other rather than argued about.
+# The last two are the traps the module docstring describes, kept runnable so
+# their cost is a measurement.
+MODE_FULL = 'full'                 # decision AND drift, the real rule
+MODE_DECISION = 'decision'         # decision gate only
+MODE_DRIFT = 'drift'               # drift gate only
+MODE_NAIVE_POSTERIOR = 'naive_posterior'   # P(best) on the 1/sqrt(n) posterior
+MODE_NAIVE_GAP = 'naive_gap'       # bare gap < eps, no equivalence test
+MODES = (MODE_FULL, MODE_DECISION, MODE_DRIFT,
+         MODE_NAIVE_POSTERIOR, MODE_NAIVE_GAP)
 
 
 class StopRule(object):
@@ -256,7 +272,7 @@ class StopRule(object):
     has been shown, so a test can drive it without a tree."""
 
     def __init__(self, min_sims, max_sims, p_stop=0.95, eps_indiff=0.02,
-                 delta=0.05, patience=2, indiff_z=1.645):
+                 delta=0.05, patience=2, indiff_z=1.645, mode=MODE_FULL):
         self.min_sims = int(min_sims)
         self.max_sims = int(max_sims)
         self.p_stop = float(p_stop)
@@ -264,6 +280,9 @@ class StopRule(object):
         self.delta = float(delta)
         self.patience = int(patience)
         self.indiff_z = float(indiff_z)
+        if mode not in MODES:
+            raise ValueError(f'mode must be one of {MODES}')
+        self.mode = mode
         self._snap_n = 0
         self._snap = None
         self._streak = 0
@@ -298,11 +317,29 @@ class StopRule(object):
             self._streak = 0
             return False
 
-        pb = p_best(probe.q, probe.sd)
         gap = top_gap(probe.q)
-        moot = indifferent(probe.q, probe.sd, self.eps_indiff, self.indiff_z)
-        decided = pb >= self.p_stop or moot
-        stable = self._drift < self.delta
+        if self.mode == MODE_NAIVE_POSTERIOR:
+            # The trap, run as a control: read the belief that narrows as
+            # 1/sqrt(n) whatever the search found.
+            pb = p_best(probe.q, probe.sd_post)
+            moot = False
+            decided, stable = pb >= self.p_stop, True
+        elif self.mode == MODE_NAIVE_GAP:
+            # The other trap: a small gap taken as indifference without asking
+            # whether it was established.
+            pb = p_best(probe.q, probe.sd)
+            moot = gap < self.eps_indiff
+            decided, stable = pb >= self.p_stop or moot, True
+        else:
+            pb = p_best(probe.q, probe.sd)
+            moot = indifferent(probe.q, probe.sd, self.eps_indiff,
+                               self.indiff_z)
+            decided = pb >= self.p_stop or moot
+            stable = self._drift < self.delta
+            if self.mode == MODE_DECISION:
+                stable = True
+            elif self.mode == MODE_DRIFT:
+                decided = True
         self.last = {'p_best': pb, 'gap': gap, 'drift': self._drift,
                      'moot': moot, 'decided': decided, 'stable': stable}
         if decided and stable:
@@ -381,11 +418,11 @@ class DynamicSearch(object):
 
     def __init__(self, base_sims, enabled=False, floor_frac=0.25,
                  ceil_mult=4.0, pool_mult=8.0, p_stop=0.95, eps_indiff=0.02,
-                 delta=0.05, patience=2, indiff_z=1.645):
+                 delta=0.05, patience=2, indiff_z=1.645, mode=MODE_FULL):
         self.enabled = bool(enabled)
         self.base = int(base_sims)
         self.params = dict(p_stop=p_stop, eps_indiff=eps_indiff, delta=delta,
-                           patience=patience, indiff_z=indiff_z)
+                           patience=patience, indiff_z=indiff_z, mode=mode)
         self.pool = (BudgetPool(base_sims, floor_frac, ceil_mult, pool_mult)
                      if self.enabled else None)
         self.rule = None
@@ -477,4 +514,5 @@ def config_kwargs(cfg, base_sims, enabled=None):
         eps_indiff=get('ds_eps_indiff', 0.02),
         delta=get('ds_delta', 0.05),
         patience=get('ds_patience', 2),
-        indiff_z=get('ds_indiff_z', 1.645))
+        indiff_z=get('ds_indiff_z', 1.645),
+        mode=get('ds_rule', MODE_FULL))
