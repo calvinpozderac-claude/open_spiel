@@ -145,3 +145,53 @@ the exercise).  The summary only reports the mean, so that is not yet known.
 
 The wall-clock column in the sweep is unreliable; this box was contended and the
 same configuration varied by more than 2x between runs.
+
+
+# Final: the block rule does not allocate adaptively either
+
+Per-position spend as a ratio of what a fixed budget would have given that
+position, nominal 500 simulations:
+
+    rule                   p05    p25    p50    p75    p95   <0.8x  >1.25x   mean
+    block d=0.02          0.00   0.99   0.99   1.00   1.02    0.15    0.00    429
+    block d=0.05          0.08   0.99   0.99   1.00   1.02    0.07    0.00    466
+    block d=0.12          0.78   0.99   0.99   0.99   1.03    0.05    0.00    474
+    block d=0.12 blk50    0.23   0.50   0.50   0.63   0.79    0.95    0.03    283
+    block d=0.20 blk50    0.50   0.50   0.50   0.50   0.63    0.99    0.00    258
+
+This settles the question the mean could not.  It is "every position trimmed",
+not "half halved and the rest doubled" -- and it is more degenerate than that.
+
+At `block_sims` = 100 the whole interquartile range sits at 0.99-1.00: nearly
+every position spends its exact nominal budget, and the sub-0.8x tail is
+terminal and solved positions rather than the rule deciding anything.  At
+`block_sims` = 50 the distribution collapses onto a different spike, 0.50, with
+95-99% of positions below 0.8x.
+
+**`>1.25x` is 0.00 in every configuration.**  Not one position in any setting
+received materially more search than the fixed budget would have given it.  The
+reallocation half of the design produces nothing, and this time it is not an
+accounting artefact -- the counter was fixed first and the distribution is
+recorded per position.
+
+The rule is behaving as a near-uniform multiplier on the simulation count, set
+by `block_sims` rather than by anything about the position.  A multiplier is
+available for free by lowering `full_sims`, without a stop rule, a budget pool,
+a probe or a gate.
+
+## Conclusion
+
+Close this line.  Three independent measurements now agree:
+
+  * strength: 4 arms x 3 seeds x 1000 episodes, whole field within 26 Elo and
+    inside the seed spread;
+  * the decision statistic: the disagreement spread does not narrow with search
+    (median 0.506 after 500 simulations), so no threshold on it can signal
+    completion;
+  * the allocation: per-position spend is a spike, and no position ever gets
+    more than 1.25x nominal.
+
+What survives is worth keeping on its own terms: `p_best` by stratified
+quadrature, the equivalence test for indifference, the block fixed point as a
+CONVERGENCE diagnostic, and the per-position accounting.  The stopping rule
+built on them does not work.
