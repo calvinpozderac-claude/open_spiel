@@ -41,31 +41,41 @@ the optimiser and evaluation do not shrink with the simulation count, so a 10%
 self-play saving is ~1% of a training run.  An adaptive budget has to save a
 lot more than 10% before it is worth anything end to end.
 
-## The diagnosis: half the mechanism never fires
+## The diagnosis — CORRECTED, and it is the opposite of what this file first said
 
-**No search in any arm, on any seed, ever hit its ceiling** — `stop_ceiling`
-is 0.00 for all nine adaptive runs.  Every search ended because the gates
-opened.
+The original write-up claimed "no search on any seed in any arm ever reached
+its ceiling", from `stop_ceiling` reading 0.00 across all nine adaptive runs.
+**That measurement was broken.**  The stop reason was recorded only when the
+RULE ended a search; the driver's own `n < cap` check ends a search without
+calling `update()` at all, leaving `reason` empty and the position uncounted.
+Every ceiling stop was therefore invisible, and the mix looked like pure
+convergence because convergence stops were the only ones being counted.
 
-That means the "spend more on hard positions" half of the design is inert.
-The budget pool banks surplus that nothing ever draws on, and the ceiling of
-4x the nominal budget is unreachable in practice.  What is actually running is
-a rule that trims ~10% off easy positions and reallocates none of it.
+With every position attributed, the picture inverts: **93-94% of searches run
+to their ceiling.**  The gates almost never fire.  The rules are not stopping
+early and reallocating nothing -- they are barely stopping at all, and the
+~10% simulation saving comes from the pool's own floor/ceiling arithmetic
+rather than from any gate opening.
 
-That, and not the choice of rule, is why the arms are indistinguishable: they
-are all doing roughly the same small thing.
+So the reason the arms are indistinguishable is not "they all do the same
+small thing because the ceiling is unreachable".  It is that the gates are
+essentially inert at these thresholds, and every arm therefore runs close to
+its allotted budget.  Which of those two stories is true changes what to do
+next entirely, and the first one was an artefact of the instrumentation.
 
 ## Where to look next, if anywhere
 
-1. **Make the reallocation half work.** The gates open on essentially every
-   position, so either `p_stop` = 0.95 is met too easily on a searched root, or
-   the disagreement spread collapses faster than expected once a few
-   simulations land.  Instrument `p_best` at the moment of stopping before
-   changing thresholds — the useful question is whether there EXIST positions
-   the rule would give 4x to, not what happens if the knobs move.
-2. **A 10% simulation saving is not worth pursuing** on its own.  If the
-   ceiling cannot be made to fire, the honest conclusion is that this is not a
-   productive direction and the fixed budget is fine.
+1. **Re-run the whole comparison with the fixed accounting.** The Elo result
+   stands -- it never depended on the stop mix -- but every statement in this
+   file about WHY was derived from a broken counter, and the numbers above are
+   from a short diagnostic rather than the 12-run experiment.
+2. **The gates are too slack, not too eager.** With 93% of searches hitting
+   the ceiling, the thing to measure is the distribution of `p_best` at the
+   moment a search ends, and how far the disagreement spread actually falls
+   over a search.  If it barely falls, no threshold on it will ever
+   discriminate and the approach is dead on that ground alone.
+3. **A 10% simulation saving is not worth pursuing** on its own, and it is not
+   currently coming from the mechanism it was supposed to come from.
 3. **Scale and game are untested.** This is Connect 4 at 1000 episodes.
    Othello has ~8.5 legal moves against 7, near-zero draws, and 60-ply games;
    the disagreement structure the gates read could behave differently.  But

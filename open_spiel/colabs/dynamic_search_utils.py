@@ -227,6 +227,33 @@ def drift(a, b):
     return float(np.abs(a - b).sum())
 
 
+def lucb_separated(q, sd, c=2.0, floor=1e-9):
+    """Does the leader's LOWER confidence bound clear every rival's UPPER one?
+
+        mean_1 - c*sd_1  >  max_{j != 1} (mean_j + c*sd_j)
+
+    The standard best-arm stopping condition, and deliberately STRICTER than
+    `p_best >= p_stop`.  That matters here: in the 12-run experiment the p_best
+    gate opened on essentially every position and NO search on any seed ever
+    reached its ceiling, so the budget pool banked surplus that nothing drew on
+    and the whole "spend more where it is hard" half of the design never fired.
+    A rule that refuses to stop while the intervals still overlap is what makes
+    a position expensive enough to be worth reallocating to.
+
+    Reads the DISAGREEMENT spread like every other gate, so it does not decay
+    with the visit count; `c` is in standard deviations, not a UCB exploration
+    constant.
+
+    One action is trivially separated -- there is nothing to clear."""
+    q = np.asarray(q, dtype=np.float64)
+    if q.size <= 1:
+        return True
+    sd = np.maximum(np.asarray(sd, dtype=np.float64), floor)
+    i = int(q.argmax())
+    j = np.arange(q.size) != i
+    return bool(q[i] - c * sd[i] > np.max(q[j] + c * sd[j]))
+
+
 class RootProbe(object):
     """What an engine must be able to say about a root, in engine-free terms.
 
@@ -238,9 +265,11 @@ class RootProbe(object):
     `target` is any flat vector that moves when the training target moves.
     """
 
-    __slots__ = ('n', 'solved', 'q', 'sd', 'target', 'sd_post')
+    __slots__ = ('n', 'solved', 'q', 'sd', 'target', 'sd_post',
+                 'block', 'block_n')
 
-    def __init__(self, n, solved, q, sd, target, sd_post=None):
+    def __init__(self, n, solved, q, sd, target, sd_post=None,
+                 block=None, block_n=0):
         self.n = int(n)
         self.solved = bool(solved)
         self.q = np.asarray(q, dtype=np.float64).reshape(-1)
@@ -250,6 +279,13 @@ class RootProbe(object):
         # be run as a measured control -- nothing else should read it.
         self.sd_post = (self.sd if sd_post is None
                         else np.asarray(sd_post, dtype=np.float64).reshape(-1))
+        # The belief built from the CURRENT BLOCK's backups alone, and how many
+        # there were.  See MODE_BLOCK: the point of measuring a block in
+        # isolation is that its weight does not decay with the total visit
+        # count, which is what makes a fixed-point test possible at all.
+        self.block = (np.zeros(0) if block is None
+                      else np.asarray(block, dtype=np.float64).reshape(-1))
+        self.block_n = int(block_n)
 
 
 # The rules, so they can be A/B'd against each other rather than argued about.
@@ -260,8 +296,13 @@ MODE_DECISION = 'decision'         # decision gate only
 MODE_DRIFT = 'drift'               # drift gate only
 MODE_NAIVE_POSTERIOR = 'naive_posterior'   # P(best) on the 1/sqrt(n) posterior
 MODE_NAIVE_GAP = 'naive_gap'       # bare gap < eps, no equivalence test
+MODE_LUCB = 'lucb'                 # leader's lower bound clears every upper one
+MODE_BLOCK = 'block'               # a fresh block of simulations does not move
+                                   # the belief it started from
+MODE_BLOCK_LUCB = 'block_lucb'     # both, ANDed
 MODES = (MODE_FULL, MODE_DECISION, MODE_DRIFT,
-         MODE_NAIVE_POSTERIOR, MODE_NAIVE_GAP)
+         MODE_NAIVE_POSTERIOR, MODE_NAIVE_GAP,
+         MODE_LUCB, MODE_BLOCK, MODE_BLOCK_LUCB)
 
 
 class StopRule(object):
@@ -273,9 +314,11 @@ class StopRule(object):
 
     def __init__(self, min_sims, max_sims, p_stop=0.95, eps_indiff=0.02,
                  delta=0.05, patience=2, indiff_z=1.645, mode=MODE_FULL,
-                 check_growth=1.25):
+                 check_growth=1.25, lucb_c=2.0, block_sims=100):
         self.min_sims = int(min_sims)
         self.check_growth = float(check_growth)
+        self.lucb_c = float(lucb_c)
+        self.block_sims = int(block_sims)
         self.max_sims = int(max_sims)
         self.p_stop = float(p_stop)
         self.eps_indiff = float(eps_indiff)
@@ -291,6 +334,8 @@ class StopRule(object):
         # it -- neither is worth computing for a rule that never looks.
         self.needs_post = (mode == MODE_NAIVE_POSTERIOR)
         self.needs_target = mode in (MODE_FULL, MODE_DRIFT)
+        self.needs_block = mode in (MODE_BLOCK, MODE_BLOCK_LUCB)
+        self._block_ref = None
         self._snap_n = 0
         self._snap = None
         self._streak = 0
@@ -320,6 +365,28 @@ class StopRule(object):
         if probe.n >= 2 * max(self._snap_n, 1):
             self._drift = drift(probe.target, self._snap)
             self._snap_n, self._snap = probe.n, probe.target.copy()
+
+    def _block_stable(self, probe):
+        """Did a WHOLE FRESH BLOCK of simulations fail to move the belief?
+
+        The drift gate compares the target across a doubling of the evidence,
+        which is fair at any n but still converges: observation n has weight
+        1/n, so the comparison gets easier to pass forever.  A block measured in
+        ISOLATION does not decay -- `probe.block` is built from that block's
+        backups alone, so 100 fresh simulations always carry the same weight
+        against the belief they started from, whether the tree has 200 visits
+        or 20,000.
+
+        "Where do 100 simulations move me from here" reaching zero is a genuine
+        fixed point, not a statement about how much evidence has piled up.
+        """
+        if probe.block_n < self.block_sims:
+            return False
+        ref, self._block_ref = self._block_ref, probe.target.copy()
+        if ref is None:
+            return False              # first block: nothing to compare against
+        self._drift = drift(probe.block, ref)
+        return self._drift < self.delta
 
     def due(self, n):
         """Is a probe worth building at `n` simulations?
@@ -365,6 +432,21 @@ class StopRule(object):
             pb = p_best(probe.q, probe.sd)
             moot = gap < self.eps_indiff
             decided, stable = pb >= self.p_stop or moot, True
+        elif self.mode in (MODE_LUCB, MODE_BLOCK, MODE_BLOCK_LUCB):
+            pb = p_best(probe.q, probe.sd)
+            moot = indifferent(probe.q, probe.sd, self.eps_indiff,
+                               self.indiff_z)
+            sep = lucb_separated(probe.q, probe.sd, self.lucb_c)
+            # Indifference still ends a search the intervals will never
+            # separate -- otherwise a true tie runs to the ceiling every time,
+            # which is spending the reallocation budget on the one shape of
+            # position where more search provably cannot help.
+            decided = sep or moot
+            stable = self._block_stable(probe)
+            if self.mode == MODE_LUCB:
+                stable = True
+            elif self.mode == MODE_BLOCK:
+                decided = True
         else:
             pb = p_best(probe.q, probe.sd)
             moot = indifferent(probe.q, probe.sd, self.eps_indiff,
@@ -476,12 +558,13 @@ class DynamicSearch(object):
     def __init__(self, base_sims, enabled=False, floor_frac=0.25,
                  ceil_mult=4.0, pool_mult=8.0, p_stop=0.95, eps_indiff=0.02,
                  delta=0.05, patience=2, indiff_z=1.645, mode=MODE_FULL,
-                 check_growth=1.25):
+                 check_growth=1.25, lucb_c=2.0, block_sims=100):
         self.enabled = bool(enabled)
         self.base = int(base_sims)
         self.params = dict(p_stop=p_stop, eps_indiff=eps_indiff, delta=delta,
                            patience=patience, indiff_z=indiff_z, mode=mode,
-                           check_growth=check_growth)
+                           check_growth=check_growth, lucb_c=lucb_c,
+                           block_sims=block_sims)
         self.pool = (BudgetPool(base_sims, floor_frac, ceil_mult, pool_mult)
                      if self.enabled else None)
         self.rule = None
@@ -509,9 +592,16 @@ class DynamicSearch(object):
             return
         self.pool.settle(used, getattr(rule, 'lent', 0),
                          getattr(rule, 'nominal', None))
-        r = rule.reason if rule is not None else ''
-        if r:
-            self.stops[r] = self.stops.get(r, 0) + 1
+        # Attribute EVERY position, not only the ones the rule got to decide.
+        # The driver's own `n < cap` check ends a search without ever calling
+        # update(), so `reason` stays empty -- and reading only `reason` made
+        # ceiling stops invisible and reported the mix as if every search had
+        # converged.  A run that spent its whole allowance ran to the ceiling
+        # whether or not the rule was the one to say so.
+        r = getattr(rule, 'reason', '') or ''
+        if not r:
+            r = 'ceiling' if used >= getattr(rule, 'max_sims', used) else 'budget'
+        self.stops[r] = self.stops.get(r, 0) + 1
 
     # ── single-root form, for the bots ────────────────────────────────────────
     def begin(self, base_sims=None):
@@ -534,7 +624,7 @@ class DynamicSearch(object):
                'sims_base': self.pool.nominal_mean(),
                'pool': float(self.pool.pool)}
         tot = sum(self.stops.values()) or 1
-        for k in ('solved', 'converged', 'ceiling'):
+        for k in ('solved', 'converged', 'ceiling', 'budget'):
             out['stop_' + k] = self.stops.get(k, 0) / tot
         return out
 
@@ -561,4 +651,6 @@ def config_kwargs(cfg, base_sims, enabled=None):
         patience=get('ds_patience', 2),
         indiff_z=get('ds_indiff_z', 1.645),
         mode=get('ds_rule', MODE_FULL),
-        check_growth=get('ds_check_growth', 1.25))
+        check_growth=get('ds_check_growth', 1.25),
+        lucb_c=get('ds_lucb_c', 2.0),
+        block_sims=get('ds_block_sims', 100))

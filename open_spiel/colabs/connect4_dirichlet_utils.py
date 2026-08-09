@@ -539,7 +539,8 @@ class _CNode:
         vloss     (k,)    in-flight selections, for within-wave diversification
     """
     __slots__ = ('player', 'legal', 'alpha_p', 'v_alpha', 'alpha_sel', 'term',
-                 'vloss', 'children', 'obs', 'eacc', 'nacc', 'ev', 'sd')
+                 'vloss', 'children', 'obs', 'eacc', 'nacc', 'ev', 'sd',
+                 'bacc')
 
     def __init__(self, player, legal, v3, vconf, p3, conf, obs=None):
         self.player = player
@@ -557,6 +558,9 @@ class _CNode:
         self.obs = obs
         self.eacc = [_new_acc() for _ in range(k)]
         self.nacc = _new_acc()
+        # Evidence from the CURRENT BLOCK only, for the block fixed-point rule.
+        # None unless a root is asked for it, so nothing else pays for it.
+        self.bacc = None
         if _GAUSSIAN_SELECT:
             self.ev, self.sd = dir_value_mean_var(self.alpha_sel)
             self.sd = np.sqrt(self.sd)
@@ -599,7 +603,24 @@ class _CNode:
         """Per-edge evidence counts (the analogue of MCTS visit counts)."""
         return np.array([a[0] for a in self.eacc])
 
-    def probe(self, n, want_post=False, want_target=True):
+    def start_block(self):
+        """Begin measuring a fresh block of backups at this node.
+
+        The tree is NOT disturbed -- this is a shadow accumulator alongside
+        `nacc`, so search behaviour is identical whether or not anything is
+        watching.  What it buys is a reading whose weight does not decay with
+        the visit count: 100 simulations measured on their own say the same
+        thing at 200 visits and at 20,000, where their contribution to `nacc`
+        would have shrunk by two orders of magnitude."""
+        self.bacc = _new_acc()
+
+    def block_target(self):
+        """This block's own belief, or None before any of it has landed."""
+        if self.bacc is None or self.bacc[0] <= 0.0:
+            return None
+        return observed_alpha(self.bacc, _TARGET_AGG)
+
+    def probe(self, n, want_post=False, want_target=True, want_block=False):
         """Snapshot for the dynamic-search stop rule (see dynamic_search_utils).
 
         `sd` is read off AGG_MIXTURE and not off the arm's own `search_agg`,
@@ -636,9 +657,15 @@ class _CNode:
                     if p is None:
                         p = self.alpha_p[i]
                 sdp[i] = math.sqrt(max(dir_value_mean_var(p)[1], 0.0))
-        tgt = dir_mean(self.state_target()) if want_target else _EMPTY_TARGET
+        tgt = (dir_mean(self.state_target())
+               if (want_target or want_block) else _EMPTY_TARGET)
+        blk, bn = _EMPTY_TARGET, 0
+        if want_block and self.bacc is not None:
+            ba = self.block_target()
+            if ba is not None:
+                blk, bn = dir_mean(ba), int(self.bacc[0])
         return _ds.RootProbe(n, _node_solved_outcome(self) is not None,
-                             q, sd, tgt, sd_post=sdp)
+                             q, sd, tgt, sd_post=sdp, block=blk, block_n=bn)
 
 
 def _set_term(node, idx, outcome):
@@ -735,6 +762,8 @@ def _backup(path, payloads):
         pl = payloads[sel]
         _acc_add(node.eacc[idx], pl)
         _acc_add(node.nacc, pl)
+        if node.bacc is not None:
+            _acc_add(node.bacc, pl)
         node.refresh_edge(idx)
         sel ^= 1
 
@@ -1073,7 +1102,10 @@ class Config:
     ds_patience: int = 2              # consecutive checks before stopping
     ds_indiff_z: float = 1.645        # confidence the gap is really below eps
     ds_check_growth: float = 1.25     # probe at geometrically spaced n
-    ds_rule: str = 'full'             # full | decision | drift |
+    ds_lucb_c: float = 2.0            # sd multiplier for the LUCB bounds
+    ds_block_sims: int = 100          # simulations per fixed-point block
+    ds_rule: str = 'full'             # full | decision | drift | lucb |
+                                      # block | block_lucb |
                                       # naive_posterior | naive_gap
     # THE DEFAULT IS 'additive' for both.
     #
@@ -1315,6 +1347,9 @@ class _SlotEngine:
     def _ds_open(self, s):
         """Hand this position its stop rule and its simulation ceiling."""
         s['ds_rule'], s['ds_cap'] = self.ds.open_position(s['sims'])
+        r = s['ds_rule']
+        if r is not None and r.needs_block and s['root'] is not None:
+            s['root'].start_block()
 
     def _ds_stop(self, s):
         """Has this position had enough search?  False whenever the toggle is
@@ -1327,7 +1362,18 @@ class _SlotEngine:
         # slower than the fixed one in the pilot.
         if not r.due(s['n']):
             return False
-        return r.update(s['root'].probe(s['n'], r.needs_post, r.needs_target))
+        if r.needs_block and s['root'].bacc is None:
+            # The root may not have existed when the position opened.
+            s['root'].start_block()
+        stop = r.update(s['root'].probe(s['n'], r.needs_post, r.needs_target,
+                                        r.needs_block))
+        if r.needs_block and s['root'].bacc is not None \
+                and s['root'].bacc[0] >= r.block_sims:
+            # Roll the block over: the next reading must be a FRESH block
+            # measured against the belief this one ended at, which is what
+            # keeps the test a fixed point rather than a convergence check.
+            s['root'].start_block()
+        return stop
 
     def _ds_close(self, s):
         self.ds.close_position(s.get('ds_rule'), s['n'])
@@ -2926,7 +2972,8 @@ if _HAS_TORCH:
             ds_pool_mult=cfg.ds_pool_mult, ds_p_stop=cfg.ds_p_stop,
             ds_eps_indiff=cfg.ds_eps_indiff, ds_delta=cfg.ds_delta,
             ds_patience=cfg.ds_patience, ds_indiff_z=cfg.ds_indiff_z,
-            ds_rule=cfg.ds_rule, ds_check_growth=cfg.ds_check_growth)
+            ds_rule=cfg.ds_rule, ds_check_growth=cfg.ds_check_growth,
+            ds_lucb_c=cfg.ds_lucb_c, ds_block_sims=cfg.ds_block_sims)
 
     def build_network(cfg, device):
         sig = (cfg.channels, cfg.num_blocks, cfg.head_ch)
