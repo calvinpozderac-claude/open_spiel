@@ -41,15 +41,18 @@ ARMS = {
     'fixed':      dict(dynamic_search=False),
     # The rule the design argues for.
     'full':       dict(ds_rule='full'),
-    # The cheapest gate, and the only arm that came in under the fixed arm's
-    # wall clock in the pilot.
-    'drift':      dict(ds_rule='drift'),
-    # The trap, as a control on whether the principled statistic MATTERS for a
-    # training outcome rather than only for what the number means.
-    'naive_post': dict(ds_rule='naive_posterior'),
+    # The strict best-arm condition.
+    'lucb':       dict(ds_rule='lucb'),
+    # The only rule whose gate actually opens.  It reads MOVEMENT of the target
+    # rather than the disagreement spread, which the diagnostic showed does not
+    # narrow with search at all (median 0.506 after 500 simulations).
+    'block':      dict(ds_rule='block', ds_delta=0.05),
 }
 
 SEEDS = (7, 11, 23)
+# One budget for every position, so `sims/mv` is directly comparable to it and
+# the mean is not a blend of a fast and a full setting.
+SIMS = int(os.environ.get('DS_EXP_SIMS', 500))
 ORDER = list(ARMS)
 
 
@@ -61,7 +64,7 @@ def run_name(arm, seed):
     return f'{arm}#{seed}'
 
 
-def shared(episodes):
+def shared(episodes, sims=None):
     """One small, cheap, identical setting for every arm."""
     s = B.default_shared(
         root=ROOT,
@@ -70,7 +73,7 @@ def shared(episodes):
         use_workers=False,          # in-process: the nets are too small for the
         n_parallel_games=8,         # worker handshake to pay for itself
         wave_per_game=4,
-        fast_sims=50, full_sims=150, fast_prob=0.75,
+        fast_sims=(sims or SIMS), full_sims=(sims or SIMS), fast_prob=1.0,
         batch_size=128, train_steps_per_ep=2,
         quick_eval_every=10 ** 9,   # the tournament below is the measurement
         deep_eval_every=10 ** 9,
@@ -113,9 +116,7 @@ def train_one(arm, seed, episodes, log=print):
     if not stats:
         # The fixed arm keeps no pool, so report what it was always going to
         # spend rather than leaving the column blank.
-        sh = shared(episodes)
-        row['sims_mean'] = (sh['fast_prob'] * sh['fast_sims']
-                            + (1 - sh['fast_prob']) * sh['full_sims'])
+        row['sims_mean'] = float(SIMS)
         row['nominal'] = True
     log(f'  {name:<14} {wall:7.1f}s  sims/move '
         f'{row.get("sims_mean", float("nan")):6.1f}')
