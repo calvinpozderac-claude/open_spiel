@@ -501,6 +501,11 @@ class BudgetPool(object):
         self.spent = 0
         self.nominal = 0
         self.outstanding = 0
+        # Per-position spend.  The MEAN alone cannot tell "every position
+        # trimmed 14%" (worth nothing) from "half halved, half doubled" (the
+        # entire point of an adaptive budget), and those are the two readings a
+        # 0.86x mean is equally consistent with.
+        self.used = []
 
     def reserve(self, nominal=None):
         """(min_sims, max_sims, lent) for one position, debiting `lent` now.
@@ -533,6 +538,8 @@ class BudgetPool(object):
         self.moves += 1
         self.spent += used
         self.nominal += nom
+        if len(self.used) < 200000:
+            self.used.append((used, nom))
         self.outstanding -= lent
         # Return the unspent part of what this position was allowed.  max(., 0)
         # is belt and braces: `reserve` already bounds `used` by nominal + lent.
@@ -542,6 +549,18 @@ class BudgetPool(object):
         """Simulations per move actually spent.  Logged, so 'compute-matched'
         is a measurement rather than a claim."""
         return self.spent / self.moves if self.moves else 0.0
+
+    def spread(self):
+        """Percentiles of used/nominal, and the share of positions that got
+        materially more or less than the fixed budget would have given them."""
+        if not self.used:
+            return {}
+        r = np.array([u / max(n, 1) for u, n in self.used], dtype=np.float64)
+        p = np.percentile(r, [5, 25, 50, 75, 95])
+        return {'p05': p[0], 'p25': p[1], 'p50': p[2], 'p75': p[3],
+                'p95': p[4], 'frac_lt_80': float((r < 0.8).mean()),
+                'frac_gt_125': float((r > 1.25).mean()),
+                'iqr': float(p[3] - p[1])}
 
     def nominal_mean(self):
         """What a fixed budget would have spent over the same positions."""
@@ -620,9 +639,10 @@ class DynamicSearch(object):
     def summary(self):
         if not self.enabled or self.pool is None:
             return {}
-        out = {'sims_mean': self.pool.realized_mean(),
+        out = dict(self.pool.spread())
+        out.update({'sims_mean': self.pool.realized_mean(),
                'sims_base': self.pool.nominal_mean(),
-               'pool': float(self.pool.pool)}
+               'pool': float(self.pool.pool)})
         tot = sum(self.stops.values()) or 1
         for k in ('solved', 'converged', 'ceiling', 'budget'):
             out['stop_' + k] = self.stops.get(k, 0) / tot
