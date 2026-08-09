@@ -491,6 +491,139 @@ def test_checks_are_spaced():
           and r2.reason == 'ceiling')
 
 
+def bprobe(n, q, sd, target, block=None, block_n=0):
+    return ds.RootProbe(n, False, q, sd, target,
+                        block=block, block_n=block_n)
+
+
+def test_lucb():
+    """The leader's lower bound against every rival's upper bound.
+
+    Stricter than p_best by construction, which is the point: with 93% of
+    searches already running to their ceiling the gates were too slack, not too
+    eager."""
+    print('\nLUCB separation')
+    check('a clear leader is separated',
+          ds.lucb_separated([0.9, 0.0], [0.05, 0.05]))
+    check('overlapping intervals are not',
+          not ds.lucb_separated([0.30, 0.20], [0.06, 0.06]))
+    check('and p_best would have been more forgiving there',
+          ds.p_best([0.30, 0.20], [0.06, 0.06]) > 0.85)
+    check('one action is trivially separated', ds.lucb_separated([0.4], [0.9]))
+    check('no actions likewise', ds.lucb_separated([], []))
+    check('a bigger c is stricter',
+          ds.lucb_separated([0.5, 0.0], [0.1, 0.1], c=1.0)
+          and not ds.lucb_separated([0.5, 0.0], [0.1, 0.1], c=3.0))
+    check('it reads the best RIVAL, not the worst',
+          not ds.lucb_separated([0.5, 0.45, -0.9], [0.05, 0.05, 0.05]))
+    check('zero spread is not a divide by zero',
+          ds.lucb_separated([0.5, 0.0], [0.0, 0.0]))
+    # Stricter than p_best across random positions -- the property the design
+    # relies on, measured rather than asserted.
+    rng = np.random.default_rng(4)
+    both = strict_only = loose_only = 0
+    for _ in range(2000):
+        k = int(rng.integers(2, 8))
+        q = rng.normal(0, 0.3, k); sd = rng.uniform(0.02, 0.3, k)
+        L, Pb = ds.lucb_separated(q, sd), ds.p_best(q, sd) >= 0.95
+        both += L and Pb
+        strict_only += L and not Pb
+        loose_only += Pb and not L
+    check('LUCB never stops where p_best would not', strict_only == 0,
+          f'{strict_only}')
+    check('and p_best stops in cases LUCB does not', loose_only > 0,
+          f'{loose_only}')
+
+
+def test_block_fixed_point():
+    """A fresh block that does not move the belief it started from.
+
+    The drift gate compares across a doubling, which is fair at any n but still
+    converges: observation n has weight 1/n, so the test gets easier forever.  A
+    block measured in ISOLATION carries the same weight whatever the tree has
+    accumulated, which is what makes this a fixed point rather than a
+    convergence check."""
+    print('\nBlock fixed point')
+    r = ds.StopRule(min_sims=1, max_sims=10 ** 9, mode=ds.MODE_BLOCK,
+                    block_sims=100, delta=0.05, patience=1)
+    check('the rule declares what it needs',
+          r.needs_block and not r.needs_target and not r.needs_post)
+    check('a part-finished block is not a reading',
+          not r.update(bprobe(50, [0.5, 0.0], [0.2, 0.2], [1.0, 0.0],
+                              block=[1.0, 0.0], block_n=50)))
+    check('the FIRST full block has nothing to compare against',
+          not r.update(bprobe(100, [0.5, 0.0], [0.2, 0.2], [1.0, 0.0],
+                              block=[1.0, 0.0], block_n=100)))
+    check('a second block that agrees with it stops',
+          r.update(bprobe(200, [0.5, 0.0], [0.2, 0.2], [1.0, 0.0],
+                          block=[1.0, 0.0], block_n=100)))
+
+    r2 = ds.StopRule(min_sims=1, max_sims=10 ** 9, mode=ds.MODE_BLOCK,
+                     block_sims=100, delta=0.05, patience=1)
+    r2.update(bprobe(100, [0.5, 0.0], [0.2, 0.2], [1.0, 0.0],
+                     block=[1.0, 0.0], block_n=100))
+    check('a second block that disagrees does not',
+          not r2.update(bprobe(200, [0.5, 0.0], [0.2, 0.2], [0.0, 1.0],
+                               block=[0.0, 1.0], block_n=100)))
+
+    # THE property: the same block reading means the same thing at any n.
+    for n in (200, 2000, 20000, 200000):
+        rr = ds.StopRule(min_sims=1, max_sims=10 ** 9, mode=ds.MODE_BLOCK,
+                         block_sims=100, delta=0.05, patience=1)
+        rr.update(bprobe(n, [0.5, 0.0], [0.2, 0.2], [1.0, 0.0],
+                         block=[1.0, 0.0], block_n=100))
+        moved = rr.update(bprobe(n + 100, [0.5, 0.0], [0.2, 0.2], [0.7, 0.3],
+                                 block=[0.7, 0.3], block_n=100))
+        check(f'a moving block still blocks the stop at n={n}', not moved,
+              f'drift {rr._drift}')
+
+    # block_lucb needs both.
+    rb = ds.StopRule(min_sims=1, max_sims=10 ** 9, mode=ds.MODE_BLOCK_LUCB,
+                     block_sims=100, delta=0.05, patience=1)
+    rb.update(bprobe(100, [0.30, 0.20], [0.06, 0.06], [1.0, 0.0],
+                     block=[1.0, 0.0], block_n=100))
+    check('block_lucb refuses on an unseparated leader even when settled',
+          not rb.update(bprobe(200, [0.30, 0.20], [0.06, 0.06], [1.0, 0.0],
+                               block=[1.0, 0.0], block_n=100)))
+    rc = ds.StopRule(min_sims=1, max_sims=10 ** 9, mode=ds.MODE_BLOCK_LUCB,
+                     block_sims=100, delta=0.05, patience=1)
+    rc.update(bprobe(100, [0.9, 0.0], [0.05, 0.05], [1.0, 0.0],
+                     block=[1.0, 0.0], block_n=100))
+    check('and stops when both hold',
+          rc.update(bprobe(200, [0.9, 0.0], [0.05, 0.05], [1.0, 0.0],
+                           block=[1.0, 0.0], block_n=100)))
+
+
+def test_every_position_is_attributed():
+    """The counter that made me report the opposite of what was happening.
+
+    Stop reasons were recorded only when the RULE ended a search.  The driver's
+    own `n < cap` check ends one without calling update(), so `reason` stayed
+    empty and the position went uncounted -- every ceiling stop invisible, the
+    mix reading as pure convergence."""
+    print('\nEvery position is attributed')
+    d = ds.DynamicSearch(100, enabled=True, patience=1)
+    rule, cap = d.open_position()
+    d.close_position(rule, cap)          # ran out its allowance, rule silent
+    check('a search the rule never ended counts as a ceiling stop',
+          d.summary()['stop_ceiling'] == 1.0, f'{d.summary()}')
+    d2 = ds.DynamicSearch(100, enabled=True, patience=1)
+    rule2, _ = d2.open_position()
+    d2.close_position(rule2, 10)         # ended early, rule silent
+    check('one that ended short of it does not',
+          d2.summary()['stop_ceiling'] == 0.0
+          and d2.summary()['stop_budget'] == 1.0, f'{d2.summary()}')
+    d3 = ds.DynamicSearch(100, enabled=True, patience=1)
+    rule3, _ = d3.open_position()
+    rule3.reason = 'converged'
+    d3.close_position(rule3, 40)
+    check('and a rule that did decide keeps its own reason',
+          d3.summary()['stop_converged'] == 1.0)
+    check('the fractions sum to one',
+          abs(sum(v for k, v in d3.summary().items()
+                  if k.startswith('stop_')) - 1.0) < 1e-9)
+
+
 def main():
     test_p_best_against_monte_carlo()
     test_the_pitfall()
@@ -503,6 +636,9 @@ def main():
     test_dynamic_search_end_to_end()
     test_multi_slot_form()
     test_checks_are_spaced()
+    test_lucb()
+    test_block_fixed_point()
+    test_every_position_is_attributed()
     test_config_kwargs()
     print()
     if _fails:

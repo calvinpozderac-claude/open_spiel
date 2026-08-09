@@ -87,3 +87,61 @@ next entirely, and the first one was an artefact of the instrumentation.
 With ~220 games per network and 3 seeds it can separate arm effects of roughly
 50 Elo.  A genuine ±20 Elo effect would be invisible.  The claim is therefore
 "no large effect", not "no effect".
+
+
+# Follow-up: why the gates are inert (dynamic_search_sweep.py)
+
+Measured at 500 simulations per position, reading the statistic at the moment a
+full search ENDS:
+
+    p_best        median 0.209    >= 0.95 on 12% of positions
+    top gap       median 0.052
+    mean spread   median 0.506
+    LUCB separated on 0% of positions (c = 2)
+
+**After 500 simulations the disagreement spread is still ~0.5 on a value scale
+of [-1, 1], and the leader is favoured 21% of the time.**  The spread does not
+narrow with search.
+
+That is not a threshold problem.  The disagreement spread was chosen *because*
+it is independent of the visit count -- that is what makes it immune to the
+1/sqrt(n) trap this whole module is built around.  The same property means it
+carries no information about how much search has been done, so no threshold on
+it can ever say "enough".  A decision gate reading it is inert by construction,
+which is why 93% of searches ran to their ceiling and why every rule keyed to it
+lands at 0.93-0.95x of nominal no matter how the knobs move:
+
+    fixed                     500.0   1.00x   ceiling 0.00  converged 0.00
+    lucb c=1.0                469.1   0.94x   ceiling 0.86  converged 0.09
+    lucb c=2.0                466.5   0.93x   ceiling 0.93  converged 0.01
+    lucb c=3.0                468.9   0.94x   ceiling 0.94  converged 0.00
+    full p=0.95               468.9   0.94x   ceiling 0.94  converged 0.00
+    full p=0.99               468.9   0.94x   ceiling 0.94  converged 0.00
+    block_lucb c=2 d=0.05     468.9   0.94x   ceiling 0.94  converged 0.00
+    block d=0.12              474.2   0.95x   ceiling 0.16  converged 0.79
+    block d=0.05              457.7   0.92x   ceiling 0.32  converged 0.59
+    block d=0.02              429.0   0.86x   ceiling 0.35  converged 0.50
+
+The one rule whose gate actually opens is **block**, and it is the only one that
+does not read the spread.  It measures how far a fresh block of simulations
+MOVES the belief, and movement does fall as a tree stabilises even though
+dispersion does not.  Its converged fraction responds to `delta` in the right
+direction (0.79 -> 0.59 -> 0.50 as delta tightens) where every spread-based rule
+is pinned near zero.
+
+There is no threshold that puts the average near 500 from below, because none of
+these rules stops early enough to matter: the whole family sits within 14% of
+the fixed budget.  Tuning further would be tuning a gate that does not open.
+
+## Consequence
+
+The p_best / LUCB / indifference family should be considered dead.  It rests on
+a statistic that cannot, even in principle, signal that a search is finished.
+If dynamic search is worth another run it is `block` alone, and the first thing
+to establish is whether its per-position simulation counts actually SPREAD --
+a mean of 0.86x is equally consistent with "every position trimmed 14%" (worth
+nothing) and with "half the positions halved, the rest doubled" (the point of
+the exercise).  The summary only reports the mean, so that is not yet known.
+
+The wall-clock column in the sweep is unreliable; this box was contended and the
+same configuration varied by more than 2x between runs.
