@@ -195,3 +195,42 @@ What survives is worth keeping on its own terms: `p_best` by stratified
 quadrature, the equivalence test for indifference, the block fixed point as a
 CONVERGENCE diagnostic, and the per-position accounting.  The stopping rule
 built on them does not work.
+
+
+# Confirmation at 500 simulations
+
+The experiment run at the requested budget: 4 arms x 3 seeds x 100 episodes,
+one flat 500-simulation budget per position, then a 12-network round robin at a
+fixed 64 simulations.
+
+    arm      rule     Elo (mean +- sd)   wall s   sims/mv   vs fixed time   vs fixed sims
+    fixed    -             19 +- 25       961.8     500.0          1.00x           1.00x
+    block    block          7 +- 22       824.0     435.5          0.86x           0.87x
+    full     full           1 +- 35       903.0     439.6          0.94x           0.88x
+    lucb     lucb         -28 +- 15       870.7     440.0          0.91x           0.88x
+
+No arm beats the fixed budget.  `lucb` is 47 Elo below it, which is about 2.8
+standard errors on three seeds -- weak evidence that the strictest rule is
+actively worse, not evidence that any rule is better.  Everything else is inside
+the noise, as at 150 simulations.
+
+Per-position allocation, averaged over each arm's seeds:
+
+    arm       p05    p25    p50    p75    <0.8x   >1.25x
+    full     0.00   1.00   1.00   1.00     0.16     0.02
+    lucb     0.00   1.00   1.00   1.00     0.16     0.02
+    block    0.00   0.99   1.00   1.00     0.17     0.02
+
+The same spike, now confirmed at the simulation count the whole exercise was
+supposed to need.  The interquartile range is 1.00 to 1.00 for every rule: the
+typical position gets exactly its nominal budget.  The mass below 0.8x is
+terminal and solved positions, and `>1.25x` is 0.02 -- two positions in a
+hundred receive more search than a fixed budget would have given them.
+
+This is the result at the budget that was asked for, and it agrees with the
+150-simulation result, the strength result and the diagnostic.  The line is
+closed on four independent measurements rather than three.
+
+(A note on cost estimates: the pre-run timing probe said ~32 s/episode and
+predicted eleven hours.  It was contended by leftover measurement processes and
+overstated by 3.5x -- the run took about three.)
