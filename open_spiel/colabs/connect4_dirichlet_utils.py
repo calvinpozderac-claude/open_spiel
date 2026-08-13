@@ -169,11 +169,24 @@ AGGREGATIONS = (AGG_MIXTURE, AGG_MEAN, AGG_SUM, AGG_ADDITIVE, AGG_ADDITIVE_MLE)
 
 # ── 'additive_mle' tuning ─────────────────────────────────────────────────────
 # This is the hot path of the two additive_mle arms and it is worth reading
-# before touching.  MEASURED on Othello self-play (32/3/8 trunk, 100/300 sims,
-# 16 parallel games): under the solver this replaced, the 'MM' arm spent 3.4x
-# the tree time of 'AA' and ~60% of its total self-play wall clock inside
-# `_mle_refresh`.  Whatever the GPU is, this runs on one CPU core in Python, so
-# it is the arm's real cost and no device can help with it.
+# before touching.  Whatever the GPU is, all of it runs on one CPU core in
+# Python, in the self-play worker processes, so it is the arm's real cost and no
+# device can help with it.
+#
+# MEASURED on Othello self-play (32/3/8 trunk, 100/300 sims, 16 games in
+# flight), tree time only — the network's share is excluded, and the two MM rows
+# differ ONLY in `set_mle_solver`:
+#
+#     arm / solver     tree s/game   MLE refreshes/game
+#     AA                   3.05              0          (no additive_mle rule)
+#     MM  legacy           7.06         45,164
+#     MM  newton           3.97         14,159
+#
+# So the rule used to cost 4.0 s/game on top of the same search — 2.3x AA's
+# total tree time — and now costs 0.9, which is 1.78x faster end to end and
+# leaves MM within 30% of AA instead of 130%.  Two effects, roughly equal:
+# 3.2x fewer solves (see `_MLE_MIN_N`) and 2.6x less work per solve (see
+# `_mle_newton`).
 _MLE_FLOOR = 1e-9      # clamp on x before log().  A single zero component would
                        # set L[j] = -inf permanently and NaN the node forever.
 _MLE_GROWTH = 1.3      # refresh the estimate when n reaches n*GROWTH, not every
@@ -183,10 +196,15 @@ _MLE_GROWTH = 1.3      # refresh the estimate when n reaches n*GROWTH, not every
 _MLE_MIN_N = 3.0       # do not refresh below this: `observed_alpha` falls back
                        # to 'additive' for n < 3 (the MLE is degenerate there),
                        # so a refresh at n = 1 or 2 is computed and discarded.
-                       # Worth having because in a 65-action Othello tree MOST
-                       # accumulators never leave small n — at 100 simulations
-                       # over ~10 legal moves, the n = 1 and n = 2 refreshes are
-                       # a large share of all of them.
+                       # This is the single largest saving here — MEASURED, it
+                       # removes 69% of all refreshes (45,164/game -> 14,159),
+                       # far more than the two thresholds it skips would suggest.
+                       # The reason is the shape of a 65-action tree at 100
+                       # simulations: the great majority of edge accumulators are
+                       # visited once or twice and NEVER AGAIN, so n = 1 and 2
+                       # are not the start of most accumulators' lives, they are
+                       # the whole of it.  Every one of those solves was thrown
+                       # away by the caller.
 _MLE_STEPS = 24        # solver iterations per refresh -- a CAP, not a count.
                        # The Newton solver below exits as soon as the estimate
                        # stops moving, which is typically after 3-6 steps from a

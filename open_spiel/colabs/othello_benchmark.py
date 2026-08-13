@@ -103,11 +103,11 @@ def default_shared(**over):
 #
 #      arm   tree s/game   NN s/game   NN share of wall
 #      AA        2.0           0.9          ~30%
-#      MM        6.9           1.6          ~19%      (before the solver fix
-#                                                      in connect4_dirichlet_
-#                                                      utils; ~60% of MM's
-#                                                      self-play wall clock was
-#                                                      inside _mle_refresh)
+#      MM        6.9           1.6          ~19%
+#
+#  (MM has since come down to ~4.0 s/game of tree time — see the additive_mle
+#  notes in connect4_dirichlet_utils — which RAISES the network's share of that
+#  arm rather than lowering it.  The point below is unaffected either way.)
 #
 #  Move the network to a GPU and the NN column collapses toward zero.  The tree
 #  column does not move at all: it is pure Python and numpy running in the
