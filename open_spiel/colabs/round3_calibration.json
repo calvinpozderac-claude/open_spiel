@@ -1,0 +1,49 @@
+{
+  "predictor_coef_full": [
+    7.108490517341602,
+    -1.7540279693092777,
+    -0.25056729935865774,
+    -0.030830601600668528
+  ],
+  "r2_full": 0.5312281410630868,
+  "predictor_coef_nl": [
+    6.947501542740074,
+    0.0,
+    -0.21091768800908606,
+    -0.034364654859036364
+  ],
+  "r2_nl": 0.5104705644739453,
+  "rules": {
+    "conf_nl": {
+      "cfg": {
+        "adaptive_check_every": 50,
+        "alloc_min": 16,
+        "alloc_max": 600,
+        "adaptive_mode": "predictor",
+        "predictor_coef": [
+          6.947501542740074,
+          0.0,
+          -0.21091768800908606,
+          -0.034364654859036364
+        ],
+        "alloc_scale": 0.45661621093750004
+      },
+      "knob": "alloc_scale",
+      "value": 0.45661621093750004,
+      "mean_sims": 149.825
+    },
+    "confkl": {
+      "cfg": {
+        "adaptive_check_every": 50,
+        "alloc_min": 16,
+        "alloc_max": 600,
+        "adaptive_mode": "confkl",
+        "adaptive_kl_eps": 0.00552896,
+        "alloc_scale": 32.47987219285618
+      },
+      "knob": "alloc_scale",
+      "value": 32.47987219285618,
+      "mean_sims": 147.5375
+    }
+  }
+}

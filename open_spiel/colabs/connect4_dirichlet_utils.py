@@ -374,6 +374,23 @@ def _new_acc():
             [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0]
 
 
+def _dir_kl(a, b):
+    """Forward KL( Dir(a) ‖ Dir(b) ), a and b length-3 concentration sequences.
+
+    Pure Python (reuses the scalar `_digamma` above) rather than a numpy/torch
+    op: this is for checkpoint-to-checkpoint convergence checks during search
+    (O(1) calls per node, not per simulation), so vectorising would only add
+    dispatch overhead. Mirrors `_dir_kl_rows` (the torch training-loss version,
+    below) exactly -- keep the two in sync if either changes."""
+    a0 = a[0] + a[1] + a[2]
+    b0 = b[0] + b[1] + b[2]
+    kl = math.lgamma(a0) - math.lgamma(b0)
+    da0 = _digamma(a0)
+    for ai, bi in zip(a, b):
+        kl += -math.lgamma(ai) + math.lgamma(bi) + (ai - bi) * (_digamma(ai) - da0)
+    return kl
+
+
 def _payload(alpha):
     """Pre-compute one backed-up Dirichlet's contribution in BOTH perspectives.
 
@@ -1021,6 +1038,23 @@ class Config:
     fast_prob: float = 0.75
     temp_threshold: int = 12          # plies of full-temperature Thompson moves
     late_temp: float = 8.0            # after that, concentration ×this (≈ greedy)
+    # Adaptive stopping (experimental, mp_worker only -- see _SlotEngine's
+    # docstring): None keeps the fast_sims/full_sims coin-flip above; a float
+    # replaces it with a single full_sims-capped budget that stops early once
+    # a check_every-sized block changes the root's own belief by less than
+    # this (forward Dirichlet KL).
+    adaptive_kl_eps: float = None
+    adaptive_check_every: int = 100
+    # Which budget rule decides sims/move.  None + adaptive_kl_eps set == 'kl'
+    # (the original scheme).  See the _ALLOC_MODES / _REACTIVE_MODES block
+    # above `_adaptive_mode` for what each one does.
+    adaptive_mode: str = None
+    alloc_scale: float = None      # the single calibration knob (upfront modes)
+    alloc_min: int = 16            # budget floor / ceiling for the upfront
+    alloc_max: int = 600           # rules, and the cap for 'decision'
+    predictor_coef: tuple = None   # 'predictor': (b0, b_margin, b_logconf, b_nlegal)
+    decision_margin: float = None  # 'decision': top1-top2 value gap to stop at
+    hybrid_margin_scale: float = None   # 'hybrid': how fast eps relaxes with margin
 
     # ── self-play ─────────────────────────────────────────────────────────────
     use_workers: bool = True          # N processes + one central batched server
@@ -1162,11 +1196,179 @@ def _restart_prefix(seq, rng, k_min, k_max):
     return list(seq[:len(seq) - k])
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  How a move's simulation budget gets decided
+# ══════════════════════════════════════════════════════════════════════════════
+# Two families, distinguished by WHEN the decision is made:
+#
+#   REACTIVE  ('kl', 'hybrid', 'decision') -- search in blocks and stop when
+#       some in-flight signal says further search is not changing anything.
+#       Structurally blind to a position that goes quiet and then discovers
+#       something later; measured rate of that failure is ~3%, and neither the
+#       action-value margin nor the state confidence predicts which positions
+#       it hits (see tier0_diagnostic.py).
+#
+#   UPFRONT   ('margin', 'conf', 'predictor') -- read the raw network prior at
+#       the root and pick the whole budget before searching at all. Cannot be
+#       fooled by a quiet stretch, but has to commit without seeing anything.
+#
+# Every rule is monotone in ONE scalar (`alloc_scale`, or `adaptive_kl_eps`
+# for 'kl'/'hybrid'), so a single bisection calibrates any of them to a target
+# mean sims/move -- which is what makes them comparable at matched compute.
+#   COMBINED  ('confkl') -- upfront allocation sets the budget for THIS
+#       position, and a reactive KL test may still cut it short. Neither part
+#       can rescue the other's blind spot alone: allocation alone always
+#       spends its full guess even once the belief has clearly settled, and
+#       the reactive test alone has no idea whether this position deserved a
+#       big budget in the first place.
+_ALLOC_MODES = ('margin', 'conf', 'predictor')      # decided before search
+_REACTIVE_MODES = ('kl', 'hybrid', 'decision', 'confkl')   # during search
+_UPFRONT_BUDGET_MODES = _ALLOC_MODES + ('confkl',)  # budget from the prior
+
+
+def _adaptive_mode(cfg):
+    """Which budget rule is in force, or None for the fixed fast/full split.
+    `adaptive_kl_eps` without an explicit mode means 'kl' -- the original
+    scheme, kept working unchanged for the already-trained arms."""
+    mode = cfg.get('adaptive_mode')
+    if mode:
+        return mode
+    return 'kl' if cfg.get('adaptive_kl_eps') is not None else None
+
+
+def _root_features(root):
+    """(margin, conf, n_legal) from the network's RAW prior at this root --
+    everything an upfront rule is allowed to look at.
+
+    `margin` is the gap between the best and second-best prior action value:
+    the standard "is this position obviously decided" signal, and low margin
+    is where extra search plausibly changes the move.  `conf` is the state
+    head's own concentration (how sure the net claims to be)."""
+    vals = dir_value(root.alpha_p)
+    n = len(vals)
+    if n < 2:
+        return 0.0, float(root.v_alpha.sum()), n
+    part = np.partition(vals, n - 2)
+    margin = float(part[n - 1] - part[n - 2])
+    return margin, float(root.v_alpha.sum()), n
+
+
+def _alloc_sims(cfg, root):
+    """The whole budget for this move, from the prior alone (upfront modes).
+
+    Each rule maps position features to a `score` in [0, 1] -- 1 meaning
+    "spend everything" -- then interpolates between alloc_min and alloc_max.
+    `alloc_scale` is the single calibration knob and every rule is increasing
+    in it, so bisection can hit any target mean."""
+    mode = _adaptive_mode(cfg)
+    scale = cfg.get('alloc_scale') or 1.0
+    lo, hi = cfg.get('alloc_min', 16), cfg.get('alloc_max', 600)
+    margin, conf, n_legal = _root_features(root)
+    if mode == 'margin':
+        # Narrow margin -> score near 1 -> search hard.  Wide margin -> the
+        # move is already clear -> score decays toward 0.
+        score = math.exp(-margin / max(scale, 1e-9))
+    elif mode in ('conf', 'confkl'):
+        # Low concentration (net is unsure) -> search hard.
+        score = 1.0 / (1.0 + conf / max(scale, 1e-9))
+    elif mode == 'predictor':
+        # Linear model on prior features, fit offline against oracle
+        # "sims actually needed" labels (see fit_sims_predictor in
+        # adaptive_stop_utils).  Predicts log-sims; `scale` shifts the whole
+        # prediction to hit the target mean.
+        c = cfg.get('predictor_coef') or (0.0, 0.0, 0.0, 0.0)
+        z = (c[0] + c[1] * margin + c[2] * math.log(max(conf, 1e-6))
+             + c[3] * n_legal)
+        return int(min(max(math.exp(z) * scale, lo), hi))
+    else:
+        return int(hi)
+    return int(min(max(lo + (hi - lo) * score, lo), hi))
+
+
+def _prime_adaptive(cfg, s):
+    """Set up this move's budget/reference state the moment the root becomes a
+    real expanded node -- whether freshly expanded or reused from the previous
+    move's subtree (tree reuse may already carry evidence, and that IS the
+    right starting point: the question is how much THIS move's own budget
+    changes it further).  No-op with no adaptive rule, or before the root
+    exists."""
+    mode = _adaptive_mode(cfg)
+    if mode is None or s['root'] is None:
+        return
+    if mode in _UPFRONT_BUDGET_MODES:
+        s['sims'] = _alloc_sims(cfg, s['root'])
+        if mode in _ALLOC_MODES:
+            # Pure allocation: nothing to re-check mid-search, so the next
+            # checkpoint IS the end.
+            s['next_check'] = s['sims']
+            return
+        s['next_check'] = min(cfg.get('adaptive_check_every', 100), s['sims'])
+    s['prev_alpha'] = observed_alpha(s['root'].nacc, _SEARCH_AGG)
+    if mode == 'hybrid':
+        # Same KL test as 'kl', but the threshold is relaxed in proportion to
+        # how clear-cut the position looks: an obvious move gets a bigger eps
+        # (stops sooner), a close one gets the base eps (stays patient).
+        margin, _conf, _n = _root_features(s['root'])
+        s['eps'] = (cfg.get('adaptive_kl_eps') or 0.0) * (
+            1.0 + margin / max(cfg.get('hybrid_margin_scale') or 0.05, 1e-9))
+
+
+def _decision_stable(cfg, s):
+    """True if the MOVE has stopped changing, regardless of whether the value
+    distribution has.  Stops on the decision rather than the belief: extra
+    search that refines a value but cannot change which action is played buys
+    nothing at play time.  Requires the best searched edge to lead the second
+    best by `decision_margin` in posterior mean value."""
+    root = s['root']
+    touched = (root.visits() > 0) | (root.term >= 0)
+    if touched.sum() < 2:
+        return True
+    vals = dir_value(root.alpha_sel)[touched]
+    n = len(vals)
+    part = np.partition(vals, n - 2)
+    return float(part[n - 1] - part[n - 2]) >= (cfg.get('decision_margin') or 0.0)
+
+
+def _adaptive_converged(cfg, s):
+    """True if this move's search should stop now (reactive modes only).
+
+    Only meaningful once s['n'] has reached the next checkpoint; when the test
+    FAILS this also advances the checkpoint (and the KL reference belief), so
+    the caller can call it once per wave and get the right answer either way.
+    Always False for upfront modes -- their budget is already final -- and
+    with no adaptive rule at all."""
+    mode = _adaptive_mode(cfg)
+    if mode is None or mode in _ALLOC_MODES or s['n'] < s['next_check']:
+        return False
+    step = cfg.get('adaptive_check_every', 100)
+    if mode == 'decision':
+        if _decision_stable(cfg, s):
+            return True
+        s['next_check'] = min(s['next_check'] + step, s['sims'])
+        return False
+    eps = s.get('eps') if mode == 'hybrid' else cfg.get('adaptive_kl_eps')
+    cur = observed_alpha(s['root'].nacc, _SEARCH_AGG)
+    if _dir_kl(s['prev_alpha'], cur) < (eps or 0.0):
+        return True
+    s['prev_alpha'] = cur
+    s['next_check'] = min(s['next_check'] + step, s['sims'])
+    return False
+
+
 class _SlotEngine:
     """The self-play state machine shared by the single-process and multiprocess
     drivers: `n` concurrent games, each an independent tree, advanced in waves so
     every NN evaluation is batched across ALL of them.  Subclasses supply only
     how a batch of positions gets evaluated and how a finished game is reported.
+
+    Adaptive stopping (cfg['adaptive_kl_eps'] is not None) replaces the fixed
+    fast_sims/full_sims coin-flip with a single per-move budget capped at
+    full_sims: search runs in cfg['adaptive_check_every']-sized blocks (100 by
+    default) and stops as soon as one block changes the root's own belief by
+    less than adaptive_kl_eps (forward Dirichlet KL), instead of always
+    running to the cap.  Only the multiprocess driver (mp_worker, below)
+    actually enforces the early stop; ParallelSelfPlay still runs each move to
+    'sims' (== full_sims here), so adaptive mode requires cfg['use_workers'].
     """
 
     def __init__(self, game, cfg, rng, checkpoint_dir=None):
@@ -1191,7 +1393,16 @@ class _SlotEngine:
 
     def new_game(self):
         cfg, rng = self.cfg, self.rng
-        sims = cfg['fast_sims'] if rng.random() < cfg['fast_prob'] else cfg['full_sims']
+        mode = _adaptive_mode(cfg)
+        adaptive = mode is not None
+        if mode is None:
+            sims = (cfg['fast_sims'] if rng.random() < cfg['fast_prob']
+                    else cfg['full_sims'])
+        elif mode == 'kl':
+            sims = cfg['full_sims']        # unchanged for the already-trained
+                                            # 'kl' arms -- do not disturb them
+        else:
+            sims = cfg.get('alloc_max') or cfg['full_sims']
         state, actions, resume = self.game.new_initial_state(), [], 0
         if cfg['curriculum']:
             state, actions, resume = _random_backbone(
@@ -1210,7 +1421,10 @@ class _SlotEngine:
                if cfg['curriculum'] else cfg['max_plies'])
         slot = {'state': state, 'hist': [], 'aux': [], 'actions': actions,
                 'move': resume, 'resume': resume, 'sims': sims, 'cap': cap,
-                'root': None, 'n': 0, 'pool': None}
+                'root': None, 'n': 0, 'pool': None,
+                'next_check': min(cfg.get('adaptive_check_every', 100), sims)
+                             if adaptive else sims,
+                'prev_alpha': None}
         if cfg['pool_prob'] > 0 and rng.random() < cfg['pool_prob']:
             labels = self._pool_labels()
             label = ('random' if not labels or rng.random() < cfg['random_pool_frac']
@@ -1230,11 +1444,16 @@ class _SlotEngine:
                       temp=self._temp(mm))
         pidx = int(np.nonzero(root.legal == a)[0][0])
         t['played'] = pidx
+        t['sims_used'] = s['n']
         s['hist'].append(t)
         s['actions'].append(int(a))
         s['root'] = root.children[pidx]
         s['state'].apply_action(a)
         s['move'] += 1; s['n'] = 0
+        s['next_check'] = (
+            min(self.cfg.get('adaptive_check_every', 100), s['sims'])
+            if _adaptive_mode(self.cfg) in _REACTIVE_MODES else s['sims'])
+        _prime_adaptive(self.cfg, s)
         st = s['state']
         if st.is_terminal():
             # The consistency target is the value of HAVING PLAYED a*, i.e. in
@@ -1252,6 +1471,7 @@ class _SlotEngine:
         s['state'].apply_action(a)
         s['actions'].append(int(a))
         s['move'] += 1
+        _prime_adaptive(self.cfg, s)
 
 
 def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
@@ -1302,7 +1522,7 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                 continue
             if _node_solved_outcome(s['root']) is not None:
                 continue
-            wave = min(cfg['wave'], s['sims'] - s['n'])
+            wave = min(cfg['wave'], s['next_check'] - s['n'])
             for _ in range(max(wave, 0)):
                 path, st, payloads, edge = _select_leaf(
                     s['root'], st0, rng, eng._temp(s['move'] - s['resume']))
@@ -1327,6 +1547,7 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                 _seed_leaf(nd)
                 if kind == 'root':
                     slots[a]['root'] = nd
+                    _prime_adaptive(cfg, slots[a])
                 else:
                     a.children[b] = nd
         for i, path, node, idx in pending:
@@ -1337,8 +1558,10 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
             s = slots[i]
             if s['root'] is None:
                 continue
-            if s['n'] < s['sims'] and _node_solved_outcome(s['root']) is None:
-                continue
+            solved = _node_solved_outcome(s['root']) is not None
+            if not solved and s['n'] < s['sims']:
+                if not _adaptive_converged(cfg, s):
+                    continue
             eng._record_move(s, s['root'])
             if s['state'].is_terminal() or s['move'] >= s['cap']:
                 finish_and_reset(i)
@@ -2033,14 +2256,14 @@ if _HAS_TORCH:
             self.temp = temp
             self._rng = random_state or np.random.default_rng()
 
-        def mcts_search(self, state, root=None):
-            if root is None:
-                root = expand_node(self.network, self.device, state)
-            sims = 0
-            while sims < self.max_simulations:
+        def _run_until(self, root, state, sims, target):
+            """Wave loop, run from `sims` up to `target` (or until the root
+            solves).  Factored out so mcts_search and mcts_search_checkpointed
+            share one implementation instead of two that could drift."""
+            while sims < target:
                 if _node_solved_outcome(root) is not None:
                     break
-                wave = min(self.batch_size, self.max_simulations - sims)
+                wave = min(self.batch_size, target - sims)
                 pending = []
                 for _ in range(wave):
                     path, st, payloads, edge = _select_leaf(
@@ -2067,7 +2290,47 @@ if _HAS_TORCH:
                 for path, st, (node, idx) in pending:
                     _backup(path, _payload(node.children[idx].v_alpha))
                     sims += 1
+            return sims
+
+        def mcts_search(self, state, root=None):
+            if root is None:
+                root = expand_node(self.network, self.device, state)
+            self._run_until(root, state, 0, self.max_simulations)
             return root
+
+        def mcts_search_checkpointed(self, state, root=None, check_every=100,
+                                     kl_eps=None, trace=None):
+            """Like mcts_search, but re-checks the root's OWN Dirichlet belief
+            (observed_alpha(root.nacc, _SEARCH_AGG) -- p(v), not any q_a(v))
+            every `check_every` simulations against its value at the previous
+            checkpoint, via the forward Dirichlet KL (`_dir_kl`).
+
+            kl_eps=None: no early stopping, just checkpointing -- runs to
+                max_simulations regardless.  Used to calibrate a threshold.
+            kl_eps=<float>: stop as soon as one checkpoint's KL against the
+                previous one drops below kl_eps, instead of continuing to
+                max_simulations.
+            `trace`, if given a list, gets one (sims, kl) tuple appended per
+            checkpoint after the first (which has nothing to compare to).
+
+            Returns (root, sims_used)."""
+            if root is None:
+                root = expand_node(self.network, self.device, state)
+            prev = observed_alpha(root.nacc, _SEARCH_AGG)
+            sims = 0
+            while sims < self.max_simulations:
+                if _node_solved_outcome(root) is not None:
+                    break
+                target = min(sims + check_every, self.max_simulations)
+                sims = self._run_until(root, state, sims, target)
+                cur = observed_alpha(root.nacc, _SEARCH_AGG)
+                kl = _dir_kl(prev, cur)
+                if trace is not None:
+                    trace.append((sims, kl))
+                prev = cur
+                if kl_eps is not None and kl < kl_eps:
+                    break
+            return root, sims
 
     def thompson_value_move(network, state, device, rng, temp=1.0):
         """Search-free move: ONE Thompson sample of the network's per-action value
@@ -2753,7 +3016,14 @@ if _HAS_TORCH:
             curriculum=cfg.curriculum, curr_depth0=cfg.curr_depth0,
             curr_mcts_tail=cfg.curr_mcts_tail,
             search_agg=cfg.search_agg, target_agg=cfg.target_agg,
-            selection=cfg.selection, virtual_loss=cfg.virtual_loss)
+            selection=cfg.selection, virtual_loss=cfg.virtual_loss,
+            adaptive_kl_eps=cfg.adaptive_kl_eps,
+            adaptive_check_every=cfg.adaptive_check_every,
+            adaptive_mode=cfg.adaptive_mode, alloc_scale=cfg.alloc_scale,
+            alloc_min=cfg.alloc_min, alloc_max=cfg.alloc_max,
+            predictor_coef=cfg.predictor_coef,
+            decision_margin=cfg.decision_margin,
+            hybrid_margin_scale=cfg.hybrid_margin_scale)
 
     def build_network(cfg, device):
         sig = (cfg.channels, cfg.num_blocks, cfg.head_ch)

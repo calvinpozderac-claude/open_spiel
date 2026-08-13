@@ -1,0 +1,78 @@
+{
+  "predictor_coef": [
+    7.108490517341602,
+    -1.7540279693092777,
+    -0.25056729935865774,
+    -0.030830601600668528
+  ],
+  "predictor_r2": 0.5312281410630868,
+  "rules": {
+    "margin": {
+      "cfg": {
+        "adaptive_check_every": 50,
+        "alloc_min": 16,
+        "alloc_max": 600,
+        "adaptive_mode": "margin",
+        "alloc_scale": 0.0030236816406250004
+      },
+      "knob": "alloc_scale",
+      "value": 0.0030236816406250004,
+      "mean_sims": 149.9875
+    },
+    "conf": {
+      "cfg": {
+        "adaptive_check_every": 50,
+        "alloc_min": 16,
+        "alloc_max": 600,
+        "adaptive_mode": "conf",
+        "alloc_scale": 18.41822485491989
+      },
+      "knob": "alloc_scale",
+      "value": 18.41822485491989,
+      "mean_sims": 150.8375
+    },
+    "predictor": {
+      "cfg": {
+        "adaptive_check_every": 50,
+        "alloc_min": 16,
+        "alloc_max": 600,
+        "adaptive_mode": "predictor",
+        "predictor_coef": [
+          7.108490517341602,
+          -1.7540279693092777,
+          -0.25056729935865774,
+          -0.030830601600668528
+        ],
+        "alloc_scale": 0.45573730468749996
+      },
+      "knob": "alloc_scale",
+      "value": 0.45573730468749996,
+      "mean_sims": 149.9875
+    },
+    "decision": {
+      "cfg": {
+        "adaptive_check_every": 50,
+        "alloc_min": 16,
+        "alloc_max": 600,
+        "adaptive_mode": "decision",
+        "decision_margin": 0.00268441837521763
+      },
+      "knob": "decision_margin",
+      "value": 0.00268441837521763,
+      "mean_sims": 150.325
+    },
+    "hybrid": {
+      "cfg": {
+        "adaptive_check_every": 50,
+        "alloc_min": 16,
+        "alloc_max": 600,
+        "adaptive_mode": "hybrid",
+        "hybrid_margin_scale": 0.05,
+        "adaptive_kl_eps": 0.005528963284088467
+      },
+      "knob": "adaptive_kl_eps",
+      "value": 0.005528963284088467,
+      "mean_sims": 150.475
+    }
+  }
+}

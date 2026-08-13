@@ -1,0 +1,26 @@
+[2026-08-10 17:17:04] start: check_every=75 kl_eps=0.1 episodes=2000 (target ~150 sims/move, matching bench_MM)
+[2026-08-10 17:17:06] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-08-10 17:17:06] device=privateuseone:0 backend=directml | params=194,832 | search_agg=additive_mle target_agg=additive_mle | start_ep=1
+[2026-08-10 17:23:12] ep    250 | loss 4.39 (klv 0.93 kla 0.92 cev 0.592 cea 0.868 cons 0.33) | sh klv 21% kla 42% cev 13% cea 20% cons 4% | conc(pred/tgt) v 13.2/112.6 a 20.2/75.6 | unsolved (49% of batch) v 25.51/125.52 a 24.21/74.76 | dr 4% ply 61 buf 26k aux 13269 | lr 2.00e-03 | vs 0 (no-MCTS) W15 D2 L13
+[2026-08-10 17:23:12]          perf: 0.70 games/s | wait(sp) 71% train 29% | NNbatch 113 (45 fwd/s)
+[2026-08-10 17:28:38] ep    500 | loss 4.20 (klv 0.86 kla 0.89 cev 0.563 cea 0.835 cons 0.35) | sh klv 20% kla 42% cev 13% cea 20% cons 4% | conc(pred/tgt) v 18.8/114.7 a 26.0/76.6 | unsolved (50% of batch) v 34.79/129.56 a 30.75/76.36 | dr 2% ply 60 buf 52k aux 25692 | lr 2.00e-03 | vs 0 (no-MCTS) W21 D3 L6
+[2026-08-10 17:28:38]          perf: 0.77 games/s | wait(sp) 66% train 33% | NNbatch 112 (43 fwd/s)
+[2026-08-10 17:34:04] ep    750 | loss 3.78 (klv 0.64 kla 0.86 cev 0.502 cea 0.788 cons 0.28) | sh klv 17% kla 45% cev 13% cea 21% cons 4% | conc(pred/tgt) v 19.4/116.1 a 27.5/76.8 | unsolved (53% of batch) v 34.07/130.50 a 32.17/76.75 | dr 2% ply 60 buf 76k aux 36543 | lr 2.00e-03 | vs 0 (no-MCTS) W15 D1 L14
+[2026-08-10 17:34:04]          perf: 0.77 games/s | wait(sp) 66% train 33% | NNbatch 112 (43 fwd/s)
+[2026-08-10 17:39:46] ep   1000 | loss 4.20 (klv 0.89 kla 0.91 cev 0.535 cea 0.785 cons 0.33) | sh klv 21% kla 43% cev 13% cea 19% cons 4% | conc(pred/tgt) v 19.3/117.2 a 26.5/77.4 | unsolved (54% of batch) v 32.55/131.94 a 30.85/77.41 | dr 2% ply 60 buf 101k aux 47129 | lr 2.00e-03
+[2026-08-10 17:39:46]          DEEP Elo@64: 1000=1118  0=972  random=936
+[2026-08-10 17:39:46]          perf: 0.76 games/s | wait(sp) 66% train 33% | NNbatch 112 (43 fwd/s)
+[2026-08-10 17:44:59] ep   1250 | loss 3.84 (klv 0.72 kla 0.82 cev 0.525 cea 0.759 cons 0.40) | sh klv 19% kla 43% cev 14% cea 20% cons 5% | conc(pred/tgt) v 26.5/117.1 a 30.3/77.3 | unsolved (57% of batch) v 42.63/129.95 a 34.77/77.21 | dr 4% ply 60 buf 124k aux 56877 | lr 1.99e-03 | vs 1000 (no-MCTS) W19 D1 L10
+[2026-08-10 17:44:59]          perf: 0.77 games/s | wait(sp) 62% train 33% | NNbatch 111 (42 fwd/s)
+[2026-08-10 17:50:25] ep   1500 | loss 3.70 (klv 0.56 kla 0.85 cev 0.497 cea 0.751 cons 0.37) | sh klv 15% kla 46% cev 13% cea 20% cons 5% | conc(pred/tgt) v 35.0/113.3 a 34.1/76.0 | unsolved (53% of batch) v 60.80/125.23 a 39.93/75.65 | dr 2% ply 61 buf 149k aux 68127 | lr 1.99e-03 | vs 1000 (no-MCTS) W18 D1 L11
+[2026-08-10 17:50:25]          perf: 0.77 games/s | wait(sp) 65% train 33% | NNbatch 112 (43 fwd/s)
+[2026-08-10 17:53:09] start: check_every=75 kl_eps=0.1 episodes=2000 (target ~150 sims/move, matching bench_MM)
+[2026-08-10 17:53:10] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-08-10 17:53:10] resumed at ep 1500
+[2026-08-10 17:53:10] device=privateuseone:0 backend=directml | params=194,832 | search_agg=additive_mle target_agg=additive_mle | start_ep=1501
+[2026-08-10 17:59:02] ep   1750 | loss 3.34 (klv 0.42 kla 0.80 cev 0.453 cea 0.670 cons 0.40) | sh klv 12% kla 48% cev 14% cea 20% cons 6% | conc(pred/tgt) v 43.6/116.4 a 34.8/76.2 | unsolved (55% of batch) v 69.30/129.53 a 39.93/75.72 | dr 2% ply 61 buf 24k aux 10692 | lr 1.99e-03 | vs 1000 (no-MCTS) W20 D1 L9
+[2026-08-10 17:59:02]          perf: 0.72 games/s | wait(sp) 69% train 31% | NNbatch 111 (45 fwd/s)
+[2026-08-10 18:04:49] ep   2000 | loss 3.41 (klv 0.42 kla 0.80 cev 0.464 cea 0.697 cons 0.45) | sh klv 12% kla 47% cev 14% cea 20% cons 7% | conc(pred/tgt) v 48.0/117.3 a 35.3/74.7 | unsolved (58% of batch) v 74.93/130.05 a 39.70/74.39 | dr 2% ply 60 buf 48k aux 21416 | lr 1.98e-03
+[2026-08-10 18:04:49]          DEEP Elo@64: 2000=1198  1000=1094  0=939  random=913
+[2026-08-10 18:04:49]          perf: 0.77 games/s | wait(sp) 64% train 34% | NNbatch 111 (43 fwd/s)
+[2026-08-10 18:04:49] done: 700s total, 0.35 s/episode

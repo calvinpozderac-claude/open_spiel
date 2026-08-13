@@ -1,0 +1,5 @@
+[2026-08-12 01:29:37] WRAPPER: wrapper started (pid 38008)
+[2026-08-12 01:29:37] WRAPPER: launching report/tournament process
+[2026-08-12 08:05:13] WRAPPER: process exited with code 0 -- will re-check/relaunch after a short pause
+[2026-08-12 08:05:18] WRAPPER: sentinel found in log -- everything is complete, exiting wrapper
+[2026-08-12 08:05:18] WRAPPER: wrapper done -- experiment fully complete

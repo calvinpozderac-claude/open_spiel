@@ -1,0 +1,5 @@
+[2026-08-11 04:42:20] WRAPPER: wrapper started (pid 14884)
+[2026-08-11 04:42:20] WRAPPER: launching training process
+[2026-08-12 01:28:45] WRAPPER: training process exited with code 0 -- will re-check/relaunch after a short pause
+[2026-08-12 01:28:50] WRAPPER: sentinel found in log -- sweep is complete, exiting wrapper
+[2026-08-12 01:28:50] WRAPPER: wrapper done

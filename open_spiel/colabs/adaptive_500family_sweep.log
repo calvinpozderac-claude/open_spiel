@@ -1,0 +1,198 @@
+[2026-08-11 04:42:23] 500family sweep start: arms=['fixed500', 'mix300_500', 'adapt350', 'adapt500']
+[2026-08-11 04:42:23] --- arm fixed500 (fast=500 full=500 fast_prob=0.0 check_every=None eps=None) starting ---
+[2026-08-11 04:42:25] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-08-11 04:42:25] device=privateuseone:0 backend=directml | params=194,832 | search_agg=additive_mle target_agg=additive_mle | start_ep=1
+[2026-08-11 05:02:24] ep    250 | loss 5.40 (klv 1.20 kla 1.41 cev 0.387 cea 0.726 cons 0.55) | sh klv 22% kla 52% cev 7% cea 13% cons 5% | conc(pred/tgt) v 4.8/101.2 a 9.0/79.7 | unsolved (26% of batch) v 13.85/104.49 a 13.79/82.66 | dr 2% ply 60 buf 53k aux 40425 | lr 2.00e-03 | vs 0 (no-MCTS) W19 D1 L10
+[2026-08-11 05:02:24]          perf: 0.21 games/s | wait(sp) 91% train 9% | NNbatch 99 (57 fwd/s)
+[2026-08-11 05:20:06] ep    500 | loss 4.42 (klv 0.82 kla 1.16 cev 0.392 cea 0.714 cons 0.35) | sh klv 19% kla 52% cev 9% cea 16% cons 4% | conc(pred/tgt) v 7.3/102.8 a 12.3/81.6 | unsolved (28% of batch) v 20.34/109.41 a 18.97/86.73 | dr 2% ply 60 buf 107k aux 80971 | lr 2.00e-03 | vs 0 (no-MCTS) W21 D1 L8
+[2026-08-11 05:20:06]          perf: 0.24 games/s | wait(sp) 89% train 10% | NNbatch 95 (56 fwd/s)
+[2026-08-11 05:37:00] ep    750 | loss 5.29 (klv 0.98 kla 1.24 cev 0.356 cea 0.650 cons 1.63) | sh klv 19% kla 47% cev 7% cea 12% cons 15% | conc(pred/tgt) v 8.0/100.4 a 11.9/77.8 | unsolved (25% of batch) v 22.11/100.89 a 19.33/80.59 | dr 3% ply 60 buf 150k aux 119961 | lr 2.00e-03 | vs 0 (no-MCTS) W19 D0 L11
+[2026-08-11 05:37:00]          perf: 0.25 games/s | wait(sp) 89% train 10% | NNbatch 95 (56 fwd/s)
+[2026-08-11 05:55:16] ep   1000 | loss 4.03 (klv 0.59 kla 1.09 cev 0.329 cea 0.727 cons 0.41) | sh klv 15% kla 54% cev 8% cea 18% cons 5% | conc(pred/tgt) v 12.5/105.5 a 17.6/87.7 | unsolved (24% of batch) v 33.08/122.09 a 27.57/95.79 | dr 4% ply 60 buf 150k aux 163224 | lr 2.00e-03
+[2026-08-11 05:55:16]          DEEP Elo@64: 1000=1105  0=987  random=934
+[2026-08-11 05:55:16]          perf: 0.23 games/s | wait(sp) 89% train 10% | NNbatch 94 (56 fwd/s)
+[2026-08-11 06:13:24] ep   1250 | loss 4.22 (klv 0.67 kla 1.17 cev 0.368 cea 0.655 cons 0.36) | sh klv 16% kla 56% cev 9% cea 16% cons 4% | conc(pred/tgt) v 13.0/104.2 a 17.7/83.2 | unsolved (25% of batch) v 35.61/116.14 a 27.88/89.89 | dr 5% ply 60 buf 150k aux 208142 | lr 1.99e-03 | vs 1000 (no-MCTS) W20 D0 L10
+[2026-08-11 06:13:24]          perf: 0.23 games/s | wait(sp) 88% train 10% | NNbatch 94 (56 fwd/s)
+[2026-08-11 06:31:32] ep   1500 | loss 4.06 (klv 0.55 kla 1.05 cev 0.319 cea 0.675 cons 0.83) | sh klv 14% kla 52% cev 8% cea 17% cons 10% | conc(pred/tgt) v 15.2/105.9 a 20.2/85.4 | unsolved (21% of batch) v 45.80/128.20 a 34.19/95.43 | dr 2% ply 60 buf 150k aux 243879 | lr 1.99e-03 | vs 1000 (no-MCTS) W18 D1 L11
+[2026-08-11 06:31:32]          perf: 0.23 games/s | wait(sp) 90% train 10% | NNbatch 93 (56 fwd/s)
+[2026-08-11 06:49:54] ep   1750 | loss 3.79 (klv 0.49 kla 1.07 cev 0.309 cea 0.642 cons 0.39) | sh klv 13% kla 57% cev 8% cea 17% cons 5% | conc(pred/tgt) v 19.5/103.8 a 21.1/81.8 | unsolved (27% of batch) v 44.10/113.86 a 32.06/88.00 | dr 2% ply 60 buf 150k aux 280106 | lr 1.99e-03 | vs 1000 (no-MCTS) W19 D1 L10
+[2026-08-11 06:49:54]          perf: 0.23 games/s | wait(sp) 90% train 10% | NNbatch 93 (56 fwd/s)
+[2026-08-11 07:08:59] ep   2000 | loss 4.03 (klv 0.53 kla 1.18 cev 0.271 cea 0.580 cons 0.58) | sh klv 13% kla 58% cev 7% cea 14% cons 7% | conc(pred/tgt) v 22.3/105.1 a 23.9/83.9 | unsolved (25% of batch) v 56.56/119.98 a 39.37/92.90 | dr 3% ply 60 buf 150k aux 320404 | lr 1.98e-03
+[2026-08-11 07:08:59]          DEEP Elo@64: 2000=1183  1000=1057  0=950  random=941
+[2026-08-11 07:08:59]          perf: 0.22 games/s | wait(sp) 90% train 10% | NNbatch 92 (56 fwd/s)
+[2026-08-11 07:26:33] ep   2250 | loss 3.67 (klv 0.48 kla 1.02 cev 0.286 cea 0.604 cons 0.49) | sh klv 13% kla 56% cev 8% cea 16% cons 7% | conc(pred/tgt) v 28.0/106.4 a 28.3/85.3 | unsolved (27% of batch) v 64.67/122.79 a 42.49/92.27 | dr 0% ply 60 buf 150k aux 363687 | lr 1.98e-03 | vs 2000 (no-MCTS) W21 D3 L6
+[2026-08-11 07:26:33]          perf: 0.23 games/s | wait(sp) 87% train 10% | NNbatch 92 (55 fwd/s)
+[2026-08-11 07:45:48] ep   2500 | loss 4.04 (klv 0.47 kla 1.10 cev 0.298 cea 0.632 cons 0.88) | sh klv 12% kla 54% cev 7% cea 16% cons 11% | conc(pred/tgt) v 22.3/103.0 a 22.4/81.3 | unsolved (24% of batch) v 54.01/112.34 a 35.38/86.59 | dr 2% ply 60 buf 150k aux 403736 | lr 1.97e-03 | vs 2000 (no-MCTS) W18 D1 L11
+[2026-08-11 07:45:48]          perf: 0.22 games/s | wait(sp) 90% train 9% | NNbatch 92 (56 fwd/s)
+[2026-08-11 08:03:58] ep   2750 | loss 3.67 (klv 0.43 kla 1.04 cev 0.289 cea 0.654 cons 0.45) | sh klv 12% kla 57% cev 8% cea 18% cons 6% | conc(pred/tgt) v 27.2/102.6 a 26.2/81.4 | unsolved (25% of batch) v 61.46/109.96 a 39.82/86.66 | dr 2% ply 60 buf 150k aux 445992 | lr 1.97e-03 | vs 2000 (no-MCTS) W15 D1 L14
+[2026-08-11 08:03:58]          perf: 0.23 games/s | wait(sp) 89% train 10% | NNbatch 92 (56 fwd/s)
+[2026-08-11 08:24:18] ep   3000 | loss 4.13 (klv 0.55 kla 1.19 cev 0.317 cea 0.592 cons 0.57) | sh klv 13% kla 58% cev 8% cea 14% cons 7% | conc(pred/tgt) v 23.0/102.7 a 22.6/78.8 | unsolved (24% of batch) v 55.28/111.56 a 35.94/84.82 | dr 4% ply 60 buf 150k aux 492925 | lr 1.96e-03
+[2026-08-11 08:24:18]          DEEP Elo@64: 3000=1298  2000=1124  1000=1049  random=927  0=916
+[2026-08-11 08:24:18]          perf: 0.22 games/s | wait(sp) 90% train 9% | NNbatch 91 (56 fwd/s)
+[2026-08-11 08:42:32] ep   3250 | loss 3.87 (klv 0.53 kla 1.10 cev 0.286 cea 0.621 cons 0.44) | sh klv 14% kla 57% cev 7% cea 16% cons 6% | conc(pred/tgt) v 26.7/100.4 a 24.4/76.8 | unsolved (22% of batch) v 60.37/101.48 a 38.60/80.20 | dr 4% ply 61 buf 150k aux 538050 | lr 1.95e-03 | vs 3000 (no-MCTS) W17 D0 L13
+[2026-08-11 08:42:32]          perf: 0.22 games/s | wait(sp) 85% train 9% | NNbatch 92 (55 fwd/s)
+[2026-08-11 09:01:18] ep   3500 | loss 3.81 (klv 0.47 kla 1.12 cev 0.289 cea 0.630 cons 0.39) | sh klv 12% kla 59% cev 8% cea 17% cons 5% | conc(pred/tgt) v 27.8/101.8 a 24.5/77.3 | unsolved (23% of batch) v 57.17/108.15 a 37.72/81.79 | dr 1% ply 61 buf 150k aux 581549 | lr 1.94e-03 | vs 3000 (no-MCTS) W16 D1 L13
+[2026-08-11 09:01:18]          perf: 0.22 games/s | wait(sp) 90% train 10% | NNbatch 91 (56 fwd/s)
+[2026-08-11 09:20:22] ep   3750 | loss 4.45 (klv 0.76 kla 1.18 cev 0.296 cea 0.664 cons 0.76) | sh klv 17% kla 53% cev 7% cea 15% cons 9% | conc(pred/tgt) v 34.5/102.9 a 26.4/77.8 | unsolved (24% of batch) v 61.81/111.89 a 38.72/82.35 | dr 2% ply 60 buf 150k aux 627161 | lr 1.93e-03 | vs 3000 (no-MCTS) W18 D1 L11
+[2026-08-11 09:20:22]          perf: 0.22 games/s | wait(sp) 90% train 10% | NNbatch 91 (56 fwd/s)
+[2026-08-11 09:41:49] ep   4000 | loss 3.77 (klv 0.44 kla 1.09 cev 0.267 cea 0.626 cons 0.49) | sh klv 12% kla 58% cev 7% cea 17% cons 7% | conc(pred/tgt) v 30.5/98.6 a 22.5/74.2 | unsolved (22% of batch) v 51.14/93.45 a 34.14/75.20 | dr 2% ply 60 buf 150k aux 678716 | lr 1.93e-03
+[2026-08-11 09:41:49]          DEEP Elo@64: 4000=1377  3000=1264  2000=1116  1000=1113  0=889  random=853
+[2026-08-11 09:41:49]          perf: 0.21 games/s | wait(sp) 90% train 9% | NNbatch 91 (56 fwd/s)
+[2026-08-11 09:59:28] ep   4250 | loss 5.21 (klv 1.55 kla 1.21 cev 0.291 cea 0.654 cons 0.61) | sh klv 30% kla 46% cev 6% cea 13% cons 6% | conc(pred/tgt) v 35.8/100.6 a 24.3/75.8 | unsolved (21% of batch) v 58.22/102.54 a 36.34/78.24 | dr 2% ply 60 buf 150k aux 726675 | lr 1.92e-03 | vs 4000 (no-MCTS) W17 D0 L13
+[2026-08-11 09:59:28]          perf: 0.22 games/s | wait(sp) 82% train 10% | NNbatch 91 (54 fwd/s)
+[2026-08-11 10:18:53] ep   4500 | loss 3.69 (klv 0.41 kla 1.10 cev 0.261 cea 0.642 cons 0.37) | sh klv 11% kla 59% cev 7% cea 17% cons 5% | conc(pred/tgt) v 35.4/98.4 a 24.3/72.8 | unsolved (20% of batch) v 54.63/91.50 a 36.17/74.02 | dr 4% ply 60 buf 150k aux 773331 | lr 1.91e-03 | vs 4000 (no-MCTS) W21 D2 L7
+[2026-08-11 10:18:53]          perf: 0.21 games/s | wait(sp) 90% train 10% | NNbatch 91 (56 fwd/s)
+[2026-08-11 10:38:03] ep   4750 | loss 4.59 (klv 0.76 kla 1.30 cev 0.280 cea 0.640 cons 0.60) | sh klv 17% kla 57% cev 6% cea 14% cons 7% | conc(pred/tgt) v 35.6/97.8 a 22.5/72.6 | unsolved (20% of batch) v 51.65/88.68 a 33.88/70.54 | dr 4% ply 61 buf 150k aux 824598 | lr 1.89e-03 | vs 4000 (no-MCTS) W14 D0 L16
+[2026-08-11 10:38:03]          perf: 0.22 games/s | wait(sp) 90% train 10% | NNbatch 91 (56 fwd/s)
+[2026-08-11 10:59:03] ep   5000 | loss 4.72 (klv 0.96 kla 1.31 cev 0.308 cea 0.681 cons 0.32) | sh klv 20% kla 55% cev 7% cea 14% cons 3% | conc(pred/tgt) v 36.9/99.5 a 28.4/74.5 | unsolved (22% of batch) v 62.95/97.57 a 41.22/75.33 | dr 2% ply 60 buf 150k aux 873378 | lr 1.88e-03
+[2026-08-11 10:59:03]          DEEP Elo@64: 5000=1409  4000=1386  3000=1296  2000=1158  1000=1103  0=863
+[2026-08-11 10:59:03]          perf: 0.22 games/s | wait(sp) 89% train 10% | NNbatch 91 (55 fwd/s)
+[2026-08-11 10:59:05] --- arm fixed500 segment done: 22602s this segment ---
+[2026-08-11 10:59:05] --- arm mix300_500 (fast=300 full=500 fast_prob=0.75 check_every=None eps=None) starting ---
+[2026-08-11 10:59:05] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-08-11 10:59:05] device=privateuseone:0 backend=directml | params=194,832 | search_agg=additive_mle target_agg=additive_mle | start_ep=1
+[2026-08-11 11:13:14] ep    250 | loss 4.65 (klv 0.81 kla 1.23 cev 0.417 cea 0.797 cons 0.33) | sh klv 17% kla 53% cev 9% cea 17% cons 4% | conc(pred/tgt) v 5.9/103.9 a 11.8/83.4 | unsolved (29% of batch) v 17.16/113.43 a 17.27/85.38 | dr 4% ply 61 buf 44k aux 31265 | lr 2.00e-03 | vs 0 (no-MCTS) W20 D2 L8
+[2026-08-11 11:13:14]          perf: 0.30 games/s | wait(sp) 90% train 10% | NNbatch 101 (56 fwd/s)
+[2026-08-11 11:27:03] ep    500 | loss 4.57 (klv 0.82 kla 1.17 cev 0.446 cea 0.776 cons 0.37) | sh klv 18% kla 51% cev 10% cea 17% cons 4% | conc(pred/tgt) v 8.2/105.4 a 14.1/82.8 | unsolved (27% of batch) v 25.47/120.49 a 21.61/88.07 | dr 0% ply 61 buf 90k aux 62761 | lr 2.00e-03 | vs 0 (no-MCTS) W18 D1 L11
+[2026-08-11 11:27:03]          perf: 0.30 games/s | wait(sp) 87% train 12% | NNbatch 94 (53 fwd/s)
+[2026-08-11 11:39:21] ep    750 | loss 4.13 (klv 0.62 kla 1.06 cev 0.330 cea 0.680 cons 0.75) | sh klv 15% kla 52% cev 8% cea 16% cons 9% | conc(pred/tgt) v 12.9/104.6 a 16.9/83.0 | unsolved (32% of batch) v 30.07/114.52 a 24.51/86.69 | dr 1% ply 60 buf 133k aux 92298 | lr 2.00e-03 | vs 0 (no-MCTS) W17 D2 L11
+[2026-08-11 11:39:21]          perf: 0.34 games/s | wait(sp) 87% train 12% | NNbatch 97 (55 fwd/s)
+[2026-08-11 11:52:01] ep   1000 | loss 3.69 (klv 0.49 kla 1.00 cev 0.311 cea 0.678 cons 0.44) | sh klv 13% kla 54% cev 8% cea 18% cons 6% | conc(pred/tgt) v 18.5/108.8 a 22.6/86.3 | unsolved (30% of batch) v 45.73/129.94 a 33.61/93.53 | dr 4% ply 60 buf 150k aux 119695 | lr 2.00e-03
+[2026-08-11 11:52:01]          DEEP Elo@64: 1000=1118  0=972  random=936
+[2026-08-11 11:52:01]          perf: 0.34 games/s | wait(sp) 88% train 12% | NNbatch 97 (55 fwd/s)
+[2026-08-11 12:06:10] ep   1250 | loss 4.02 (klv 0.82 kla 0.96 cev 0.355 cea 0.684 cons 0.49) | sh klv 20% kla 48% cev 9% cea 17% cons 6% | conc(pred/tgt) v 23.0/109.8 a 27.1/87.7 | unsolved (31% of batch) v 55.80/131.43 a 38.52/92.97 | dr 3% ply 60 buf 150k aux 148278 | lr 1.99e-03 | vs 1000 (no-MCTS) W14 D0 L16
+[2026-08-11 12:06:10]          perf: 0.29 games/s | wait(sp) 86% train 11% | NNbatch 89 (53 fwd/s)
+[2026-08-11 12:19:37] ep   1500 | loss 4.28 (klv 1.14 kla 0.98 cev 0.337 cea 0.672 cons 0.35) | sh klv 27% kla 46% cev 8% cea 16% cons 4% | conc(pred/tgt) v 25.3/110.8 a 28.6/87.5 | unsolved (30% of batch) v 64.48/135.52 a 41.75/93.77 | dr 2% ply 61 buf 150k aux 179022 | lr 1.99e-03 | vs 1000 (no-MCTS) W17 D1 L12
+[2026-08-11 12:19:37]          perf: 0.31 games/s | wait(sp) 88% train 11% | NNbatch 94 (55 fwd/s)
+[2026-08-11 12:33:41] ep   1750 | loss 3.52 (klv 0.50 kla 0.91 cev 0.339 cea 0.666 cons 0.38) | sh klv 14% kla 52% cev 10% cea 19% cons 5% | conc(pred/tgt) v 29.7/110.6 a 31.8/86.0 | unsolved (33% of batch) v 72.66/132.29 a 45.34/92.29 | dr 3% ply 61 buf 150k aux 206172 | lr 1.99e-03 | vs 1000 (no-MCTS) W23 D1 L6
+[2026-08-11 12:33:41]          perf: 0.30 games/s | wait(sp) 87% train 12% | NNbatch 89 (52 fwd/s)
+[2026-08-11 12:49:05] ep   2000 | loss 3.97 (klv 0.49 kla 1.01 cev 0.315 cea 0.646 cons 1.00) | sh klv 12% kla 51% cev 8% cea 16% cons 13% | conc(pred/tgt) v 31.1/109.4 a 32.7/84.6 | unsolved (31% of batch) v 76.01/130.11 a 46.72/89.73 | dr 2% ply 61 buf 150k aux 238596 | lr 1.98e-03
+[2026-08-11 12:49:05]          DEEP Elo@64: 1000=1176  2000=1124  0=939  random=904
+[2026-08-11 12:49:05]          perf: 0.28 games/s | wait(sp) 89% train 11% | NNbatch 89 (54 fwd/s)
+[2026-08-11 13:02:05] ep   2250 | loss 3.44 (klv 0.44 kla 0.92 cev 0.319 cea 0.636 cons 0.40) | sh klv 13% kla 54% cev 9% cea 19% cons 6% | conc(pred/tgt) v 33.2/109.7 a 32.5/84.4 | unsolved (31% of batch) v 79.99/130.51 a 47.69/90.52 | dr 2% ply 61 buf 150k aux 269019 | lr 1.98e-03 | vs 2000 (no-MCTS) W13 D2 L15
+[2026-08-11 13:02:05]          perf: 0.31 games/s | wait(sp) 84% train 12% | NNbatch 95 (53 fwd/s)
+[2026-08-11 13:16:45] ep   2500 | loss 3.72 (klv 0.40 kla 1.01 cev 0.313 cea 0.671 cons 0.63) | sh klv 11% kla 54% cev 8% cea 18% cons 8% | conc(pred/tgt) v 33.9/108.4 a 30.8/82.5 | unsolved (32% of batch) v 72.74/124.95 a 43.88/87.96 | dr 2% ply 61 buf 150k aux 296335 | lr 1.97e-03 | vs 2000 (no-MCTS) W12 D0 L18
+[2026-08-11 13:16:45]          perf: 0.29 games/s | wait(sp) 88% train 12% | NNbatch 89 (53 fwd/s)
+[2026-08-11 13:31:06] ep   2750 | loss 4.00 (klv 0.58 kla 1.08 cev 0.307 cea 0.609 cons 0.66) | sh klv 15% kla 54% cev 8% cea 15% cons 8% | conc(pred/tgt) v 35.2/107.8 a 32.3/82.2 | unsolved (30% of batch) v 79.62/124.81 a 45.94/86.54 | dr 2% ply 60 buf 150k aux 327214 | lr 1.97e-03 | vs 2000 (no-MCTS) W16 D1 L13
+[2026-08-11 13:31:06]          perf: 0.29 games/s | wait(sp) 88% train 11% | NNbatch 89 (53 fwd/s)
+[2026-08-11 13:45:13] ep   3000 | loss 3.72 (klv 0.53 kla 1.00 cev 0.323 cea 0.612 cons 0.53) | sh klv 14% kla 54% cev 9% cea 16% cons 7% | conc(pred/tgt) v 36.5/110.0 a 33.0/83.9 | unsolved (32% of batch) v 78.14/130.56 a 46.74/90.13 | dr 2% ply 60 buf 150k aux 353942 | lr 1.96e-03
+[2026-08-11 13:45:13]          DEEP Elo@64: 3000=1232  1000=1125  2000=1106  0=906  random=898
+[2026-08-11 13:45:13]          perf: 0.31 games/s | wait(sp) 87% train 11% | NNbatch 91 (54 fwd/s)
+[2026-08-11 13:57:45] ep   3250 | loss 3.69 (klv 0.51 kla 0.99 cev 0.328 cea 0.627 cons 0.48) | sh klv 14% kla 54% cev 9% cea 17% cons 7% | conc(pred/tgt) v 38.6/107.4 a 34.8/83.0 | unsolved (34% of batch) v 79.72/121.88 a 47.78/87.03 | dr 1% ply 60 buf 150k aux 381287 | lr 1.95e-03 | vs 3000 (no-MCTS) W18 D0 L12
+[2026-08-11 13:57:45]          perf: 0.31 games/s | wait(sp) 82% train 11% | NNbatch 95 (53 fwd/s)
+[2026-08-11 14:10:48] ep   3500 | loss 4.29 (klv 1.02 kla 1.08 cev 0.308 cea 0.623 cons 0.36) | sh klv 24% kla 50% cev 7% cea 15% cons 4% | conc(pred/tgt) v 36.0/105.7 a 32.3/79.7 | unsolved (31% of batch) v 74.26/117.67 a 44.89/82.88 | dr 4% ply 60 buf 150k aux 409798 | lr 1.94e-03 | vs 3000 (no-MCTS) W18 D1 L11
+[2026-08-11 14:10:48]          perf: 0.32 games/s | wait(sp) 88% train 11% | NNbatch 95 (55 fwd/s)
+[2026-08-11 14:23:48] ep   3750 | loss 3.63 (klv 0.48 kla 0.99 cev 0.328 cea 0.602 cons 0.45) | sh klv 13% kla 55% cev 9% cea 17% cons 6% | conc(pred/tgt) v 33.0/103.1 a 29.8/76.7 | unsolved (33% of batch) v 65.38/109.13 a 41.50/79.15 | dr 2% ply 60 buf 150k aux 438634 | lr 1.93e-03 | vs 3000 (no-MCTS) W21 D0 L9
+[2026-08-11 14:23:48]          perf: 0.32 games/s | wait(sp) 88% train 11% | NNbatch 94 (55 fwd/s)
+[2026-08-11 14:38:05] ep   4000 | loss 4.80 (klv 1.28 kla 1.17 cev 0.340 cea 0.606 cons 0.47) | sh klv 27% kla 49% cev 7% cea 13% cons 5% | conc(pred/tgt) v 41.6/104.0 a 31.3/78.8 | unsolved (34% of batch) v 70.46/111.34 a 42.10/81.34 | dr 3% ply 61 buf 150k aux 471174 | lr 1.93e-03
+[2026-08-11 14:38:05]          DEEP Elo@64: 4000=1271  3000=1229  2000=1112  1000=1086  0=922  random=880
+[2026-08-11 14:38:05]          perf: 0.33 games/s | wait(sp) 88% train 11% | NNbatch 95 (56 fwd/s)
+[2026-08-11 14:50:39] ep   4250 | loss 4.08 (klv 0.83 kla 1.05 cev 0.329 cea 0.602 cons 0.42) | sh klv 20% kla 52% cev 8% cea 15% cons 5% | conc(pred/tgt) v 35.6/103.6 a 32.2/79.0 | unsolved (32% of batch) v 71.96/110.71 a 43.98/80.85 | dr 2% ply 61 buf 150k aux 505285 | lr 1.92e-03 | vs 4000 (no-MCTS) W15 D1 L14
+[2026-08-11 14:50:39]          perf: 0.29 games/s | wait(sp) 74% train 13% | NNbatch 95 (50 fwd/s)
+[2026-08-11 15:04:36] ep   4500 | loss 4.80 (klv 1.18 kla 1.22 cev 0.287 cea 0.632 cons 0.54) | sh klv 25% kla 51% cev 6% cea 13% cons 6% | conc(pred/tgt) v 39.3/101.8 a 28.5/75.2 | unsolved (28% of batch) v 66.60/106.33 a 40.37/76.20 | dr 2% ply 61 buf 150k aux 539726 | lr 1.91e-03 | vs 4000 (no-MCTS) W18 D2 L10
+[2026-08-11 15:04:36]          perf: 0.30 games/s | wait(sp) 89% train 11% | NNbatch 93 (55 fwd/s)
+[2026-08-11 15:17:02] ep   4750 | loss 3.36 (klv 0.42 kla 0.93 cev 0.280 cea 0.580 cons 0.42) | sh klv 13% kla 56% cev 8% cea 17% cons 6% | conc(pred/tgt) v 38.0/102.5 a 28.7/75.2 | unsolved (30% of batch) v 66.74/108.21 a 41.21/78.55 | dr 3% ply 61 buf 150k aux 572926 | lr 1.89e-03 | vs 4000 (no-MCTS) W14 D0 L16
+[2026-08-11 15:17:02]          perf: 0.34 games/s | wait(sp) 88% train 11% | NNbatch 95 (56 fwd/s)
+[2026-08-11 15:35:20] ep   5000 | loss 3.41 (klv 0.42 kla 0.95 cev 0.292 cea 0.579 cons 0.44) | sh klv 12% kla 56% cev 9% cea 17% cons 6% | conc(pred/tgt) v 39.3/102.5 a 28.8/75.8 | unsolved (31% of batch) v 66.58/108.04 a 40.14/77.95 | dr 2% ply 61 buf 150k aux 607042 | lr 1.88e-03
+[2026-08-11 15:35:20]          DEEP Elo@64: 5000=1360  4000=1260  3000=1222  2000=1135  1000=1060  0=917
+[2026-08-11 15:35:20]          perf: 0.27 games/s | wait(sp) 88% train 12% | NNbatch 86 (53 fwd/s)
+[2026-08-11 15:35:22] --- arm mix300_500 segment done: 16577s this segment ---
+[2026-08-11 15:35:22] --- arm adapt350 (fast=100 full=1000 fast_prob=0.75 check_every=100 eps=0.005) starting ---
+[2026-08-11 15:35:22] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-08-11 15:35:23] device=privateuseone:0 backend=directml | params=194,832 | search_agg=additive_mle target_agg=additive_mle | start_ep=1
+[2026-08-11 15:49:24] ep    250 | loss 4.73 (klv 0.90 kla 1.23 cev 0.431 cea 0.758 cons 0.36) | sh klv 19% kla 52% cev 9% cea 16% cons 4% | conc(pred/tgt) v 6.1/104.7 a 11.6/82.2 | unsolved (31% of batch) v 16.22/114.66 a 16.39/83.74 | dr 1% ply 60 buf 42k aux 29722 | lr 2.00e-03 | vs 0 (no-MCTS) W20 D2 L8
+[2026-08-11 15:49:24]          perf: 0.30 games/s | wait(sp) 90% train 10% | NNbatch 98 (54 fwd/s)
+[2026-08-11 16:01:44] ep    500 | loss 4.31 (klv 0.70 kla 1.14 cev 0.402 cea 0.719 cons 0.41) | sh klv 16% kla 53% cev 9% cea 17% cons 5% | conc(pred/tgt) v 10.1/105.5 a 16.0/81.2 | unsolved (33% of batch) v 25.05/116.08 a 22.57/84.98 | dr 2% ply 60 buf 85k aux 58535 | lr 2.00e-03 | vs 0 (no-MCTS) W17 D0 L13
+[2026-08-11 16:01:44]          perf: 0.34 games/s | wait(sp) 88% train 11% | NNbatch 97 (56 fwd/s)
+[2026-08-11 16:13:41] ep    750 | loss 4.15 (klv 0.63 kla 1.08 cev 0.394 cea 0.765 cons 0.38) | sh klv 15% kla 52% cev 9% cea 18% cons 5% | conc(pred/tgt) v 12.6/104.3 a 19.0/81.2 | unsolved (33% of batch) v 31.60/112.93 a 26.69/84.09 | dr 1% ply 61 buf 128k aux 88769 | lr 2.00e-03 | vs 0 (no-MCTS) W19 D0 L11
+[2026-08-11 16:13:41]          perf: 0.35 games/s | wait(sp) 87% train 12% | NNbatch 97 (55 fwd/s)
+[2026-08-11 16:26:08] ep   1000 | loss 4.51 (klv 0.61 kla 0.96 cev 0.383 cea 0.741 cons 1.70) | sh klv 13% kla 43% cev 8% cea 16% cons 19% | conc(pred/tgt) v 18.0/107.7 a 24.6/84.1 | unsolved (33% of batch) v 44.93/123.00 a 34.68/88.63 | dr 3% ply 61 buf 150k aux 119515 | lr 2.00e-03
+[2026-08-11 16:26:08]          DEEP Elo@64: 1000=1090  0=972  random=963
+[2026-08-11 16:26:08]          perf: 0.34 games/s | wait(sp) 87% train 12% | NNbatch 97 (55 fwd/s)
+[2026-08-11 16:37:54] ep   1250 | loss 3.85 (klv 0.63 kla 0.95 cev 0.384 cea 0.747 cons 0.40) | sh klv 16% kla 49% cev 10% cea 19% cons 5% | conc(pred/tgt) v 21.4/109.0 a 28.0/85.4 | unsolved (31% of batch) v 57.28/127.97 a 41.58/92.45 | dr 5% ply 61 buf 150k aux 150871 | lr 1.99e-03 | vs 1000 (no-MCTS) W14 D3 L13
+[2026-08-11 16:37:54]          perf: 0.35 games/s | wait(sp) 86% train 12% | NNbatch 97 (55 fwd/s)
+[2026-08-11 16:49:19] ep   1500 | loss 4.16 (klv 0.79 kla 1.00 cev 0.406 cea 0.734 cons 0.43) | sh klv 19% kla 48% cev 10% cea 18% cons 5% | conc(pred/tgt) v 25.0/108.2 a 28.6/83.9 | unsolved (34% of batch) v 57.12/123.27 a 38.95/87.33 | dr 2% ply 60 buf 150k aux 178210 | lr 1.99e-03 | vs 1000 (no-MCTS) W16 D0 L14
+[2026-08-11 16:49:19]          perf: 0.36 games/s | wait(sp) 87% train 12% | NNbatch 97 (56 fwd/s)
+[2026-08-11 17:01:07] ep   1750 | loss 3.72 (klv 0.49 kla 0.94 cev 0.367 cea 0.750 cons 0.47) | sh klv 13% kla 51% cev 10% cea 20% cons 6% | conc(pred/tgt) v 30.3/110.3 a 34.4/84.8 | unsolved (32% of batch) v 74.16/132.08 a 49.01/90.99 | dr 1% ply 60 buf 150k aux 206111 | lr 1.99e-03 | vs 1000 (no-MCTS) W13 D2 L15
+[2026-08-11 17:01:07]          perf: 0.35 games/s | wait(sp) 87% train 12% | NNbatch 95 (55 fwd/s)
+[2026-08-11 17:13:08] ep   2000 | loss 3.64 (klv 0.47 kla 0.88 cev 0.393 cea 0.770 cons 0.48) | sh klv 13% kla 49% cev 11% cea 21% cons 7% | conc(pred/tgt) v 38.0/113.0 a 37.9/87.0 | unsolved (34% of batch) v 84.41/137.15 a 51.53/92.73 | dr 3% ply 61 buf 150k aux 236464 | lr 1.98e-03
+[2026-08-11 17:13:08]          DEEP Elo@64: 2000=1177  1000=1068  0=936  random=935
+[2026-08-11 17:13:08]          perf: 0.36 games/s | wait(sp) 87% train 12% | NNbatch 96 (55 fwd/s)
+[2026-08-11 17:24:09] ep   2250 | loss 3.85 (klv 0.52 kla 0.95 cev 0.349 cea 0.700 cons 0.77) | sh klv 13% kla 49% cev 9% cea 18% cons 10% | conc(pred/tgt) v 32.5/107.3 a 32.4/83.1 | unsolved (32% of batch) v 72.26/122.38 a 44.61/85.99 | dr 4% ply 61 buf 150k aux 264573 | lr 1.98e-03 | vs 2000 (no-MCTS) W12 D3 L15
+[2026-08-11 17:24:09]          perf: 0.36 games/s | wait(sp) 83% train 12% | NNbatch 96 (54 fwd/s)
+[2026-08-11 17:35:19] ep   2500 | loss 4.30 (klv 0.44 kla 1.32 cev 0.324 cea 0.710 cons 0.39) | sh klv 10% kla 61% cev 8% cea 16% cons 5% | conc(pred/tgt) v 38.6/110.1 a 37.1/83.9 | unsolved (31% of batch) v 85.52/132.45 a 51.62/89.26 | dr 2% ply 60 buf 150k aux 293059 | lr 1.97e-03 | vs 2000 (no-MCTS) W12 D1 L17
+[2026-08-11 17:35:19]          perf: 0.37 games/s | wait(sp) 87% train 12% | NNbatch 95 (55 fwd/s)
+[2026-08-11 17:47:01] ep   2750 | loss 3.61 (klv 0.43 kla 0.97 cev 0.329 cea 0.687 cons 0.46) | sh klv 12% kla 54% cev 9% cea 19% cons 6% | conc(pred/tgt) v 39.9/111.8 a 38.4/85.9 | unsolved (32% of batch) v 84.09/136.41 a 52.37/91.42 | dr 2% ply 61 buf 150k aux 321848 | lr 1.97e-03 | vs 2000 (no-MCTS) W12 D4 L14
+[2026-08-11 17:47:01]          perf: 0.36 games/s | wait(sp) 87% train 12% | NNbatch 95 (55 fwd/s)
+[2026-08-11 17:59:22] ep   3000 | loss 3.82 (klv 0.44 kla 0.95 cev 0.336 cea 0.707 cons 0.88) | sh klv 12% kla 50% cev 9% cea 19% cons 11% | conc(pred/tgt) v 37.6/108.3 a 34.9/81.6 | unsolved (31% of batch) v 80.94/126.32 a 48.82/86.03 | dr 2% ply 61 buf 150k aux 350647 | lr 1.96e-03
+[2026-08-11 17:59:22]          DEEP Elo@64: 3000=1244  2000=1186  1000=1040  random=917  0=907
+[2026-08-11 17:59:22]          perf: 0.37 games/s | wait(sp) 87% train 12% | NNbatch 95 (54 fwd/s)
+[2026-08-11 18:09:35] ep   3250 | loss 3.94 (klv 0.45 kla 1.06 cev 0.341 cea 0.631 cons 0.80) | sh klv 11% kla 54% cev 9% cea 16% cons 10% | conc(pred/tgt) v 36.9/106.8 a 30.1/79.4 | unsolved (34% of batch) v 63.87/119.77 a 38.31/81.42 | dr 2% ply 60 buf 150k aux 378415 | lr 1.95e-03 | vs 3000 (no-MCTS) W18 D2 L10
+[2026-08-11 18:09:35]          perf: 0.37 games/s | wait(sp) 78% train 12% | NNbatch 96 (53 fwd/s)
+[2026-08-11 18:21:03] ep   3500 | loss 3.76 (klv 0.54 kla 0.96 cev 0.329 cea 0.646 cons 0.64) | sh klv 14% kla 51% cev 9% cea 17% cons 8% | conc(pred/tgt) v 38.4/105.2 a 33.0/79.5 | unsolved (32% of batch) v 72.83/116.50 a 44.78/82.23 | dr 1% ply 61 buf 150k aux 408592 | lr 1.94e-03 | vs 3000 (no-MCTS) W15 D2 L13
+[2026-08-11 18:21:03]          perf: 0.36 games/s | wait(sp) 87% train 12% | NNbatch 95 (54 fwd/s)
+[2026-08-11 18:32:19] ep   3750 | loss 4.21 (klv 0.50 kla 1.27 cev 0.344 cea 0.637 cons 0.38) | sh klv 12% kla 60% cev 8% cea 15% cons 5% | conc(pred/tgt) v 36.2/103.1 a 30.5/76.3 | unsolved (31% of batch) v 70.14/109.55 a 41.70/77.20 | dr 4% ply 60 buf 150k aux 438963 | lr 1.93e-03 | vs 3000 (no-MCTS) W17 D2 L11
+[2026-08-11 18:32:19]          perf: 0.37 games/s | wait(sp) 87% train 12% | NNbatch 94 (55 fwd/s)
+[2026-08-11 18:45:23] ep   4000 | loss 3.96 (klv 0.47 kla 1.14 cev 0.327 cea 0.624 cons 0.52) | sh klv 12% kla 58% cev 8% cea 16% cons 7% | conc(pred/tgt) v 38.3/104.8 a 34.3/77.2 | unsolved (33% of batch) v 75.90/114.26 a 45.67/77.92 | dr 1% ply 61 buf 150k aux 468480 | lr 1.93e-03
+[2026-08-11 18:45:23]          DEEP Elo@64: 4000=1315  3000=1250  2000=1178  1000=1022  0=897  random=874
+[2026-08-11 18:45:23]          perf: 0.37 games/s | wait(sp) 87% train 13% | NNbatch 95 (54 fwd/s)
+[2026-08-11 18:55:39] ep   4250 | loss 4.63 (klv 0.45 kla 1.50 cev 0.323 cea 0.624 cons 0.46) | sh klv 10% kla 65% cev 7% cea 13% cons 5% | conc(pred/tgt) v 31.2/104.6 a 26.5/78.7 | unsolved (29% of batch) v 60.33/116.23 a 37.32/81.46 | dr 4% ply 61 buf 150k aux 501882 | lr 1.92e-03 | vs 4000 (no-MCTS) W11 D0 L19
+[2026-08-11 18:55:39]          perf: 0.35 games/s | wait(sp) 73% train 12% | NNbatch 95 (53 fwd/s)
+[2026-08-11 19:06:27] ep   4500 | loss 3.72 (klv 0.43 kla 1.03 cev 0.329 cea 0.669 cons 0.48) | sh klv 11% kla 55% cev 9% cea 18% cons 6% | conc(pred/tgt) v 35.1/103.6 a 30.5/76.5 | unsolved (29% of batch) v 72.04/112.19 a 42.60/78.01 | dr 4% ply 61 buf 150k aux 530333 | lr 1.91e-03 | vs 4000 (no-MCTS) W11 D0 L19
+[2026-08-11 19:06:27]          perf: 0.39 games/s | wait(sp) 86% train 13% | NNbatch 95 (55 fwd/s)
+[2026-08-11 19:17:30] ep   4750 | loss 3.66 (klv 0.46 kla 1.00 cev 0.344 cea 0.643 cons 0.42) | sh klv 12% kla 55% cev 9% cea 18% cons 6% | conc(pred/tgt) v 42.9/104.4 a 34.8/77.0 | unsolved (32% of batch) v 76.47/113.94 a 46.86/79.15 | dr 2% ply 61 buf 150k aux 557994 | lr 1.89e-03 | vs 4000 (no-MCTS) W19 D0 L11
+[2026-08-11 19:17:30]          perf: 0.38 games/s | wait(sp) 87% train 13% | NNbatch 94 (55 fwd/s)
+[2026-08-11 19:30:36] ep   5000 | loss 3.84 (klv 0.46 kla 1.09 cev 0.335 cea 0.622 cons 0.49) | sh klv 12% kla 57% cev 9% cea 16% cons 6% | conc(pred/tgt) v 38.3/103.3 a 30.5/74.6 | unsolved (31% of batch) v 70.10/110.04 a 41.91/75.74 | dr 4% ply 61 buf 150k aux 590008 | lr 1.88e-03
+[2026-08-11 19:30:36]          DEEP Elo@64: 5000=1369  4000=1333  3000=1289  2000=1146  1000=986  0=922
+[2026-08-11 19:30:36]          perf: 0.39 games/s | wait(sp) 86% train 13% | NNbatch 94 (55 fwd/s)
+[2026-08-11 19:30:37] --- arm adapt350 segment done: 14114s this segment ---
+[2026-08-11 19:30:37] --- arm adapt500 (fast=100 full=1000 fast_prob=0.75 check_every=100 eps=0.001) starting ---
+[2026-08-11 19:30:37] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-08-11 19:30:37] device=privateuseone:0 backend=directml | params=194,832 | search_agg=additive_mle target_agg=additive_mle | start_ep=1
+[2026-08-11 19:49:20] ep    250 | loss 4.83 (klv 0.86 kla 1.34 cev 0.407 cea 0.713 cons 0.34) | sh klv 18% kla 56% cev 8% cea 15% cons 3% | conc(pred/tgt) v 4.3/102.4 a 9.1/81.7 | unsolved (27% of batch) v 12.49/109.61 a 13.99/84.51 | dr 2% ply 60 buf 52k aux 38946 | lr 2.00e-03 | vs 0 (no-MCTS) W16 D1 L13
+[2026-08-11 19:49:20]          perf: 0.22 games/s | wait(sp) 92% train 8% | NNbatch 98 (57 fwd/s)
+[2026-08-11 20:06:51] ep    500 | loss 4.73 (klv 0.83 kla 1.23 cev 0.389 cea 0.818 cons 0.46) | sh klv 18% kla 52% cev 8% cea 17% cons 5% | conc(pred/tgt) v 7.1/103.2 a 11.8/83.1 | unsolved (24% of batch) v 20.91/112.54 a 18.88/89.61 | dr 3% ply 60 buf 104k aux 77911 | lr 2.00e-03 | vs 0 (no-MCTS) W15 D4 L11
+[2026-08-11 20:06:51]          perf: 0.24 games/s | wait(sp) 91% train 8% | NNbatch 96 (57 fwd/s)
+[2026-08-11 20:24:01] ep    750 | loss 4.19 (klv 0.70 kla 1.11 cev 0.367 cea 0.754 cons 0.29) | sh klv 17% kla 53% cev 9% cea 18% cons 4% | conc(pred/tgt) v 9.6/101.1 a 14.2/78.1 | unsolved (25% of batch) v 27.11/103.90 a 22.75/82.42 | dr 4% ply 60 buf 150k aux 116958 | lr 2.00e-03 | vs 0 (no-MCTS) W19 D2 L9
+[2026-08-11 20:24:01]          perf: 0.24 games/s | wait(sp) 91% train 9% | NNbatch 96 (56 fwd/s)
+[2026-08-11 20:42:47] ep   1000 | loss 4.34 (klv 0.61 kla 1.15 cev 0.360 cea 0.736 cons 0.67) | sh klv 14% kla 53% cev 8% cea 17% cons 8% | conc(pred/tgt) v 12.1/105.1 a 15.9/84.4 | unsolved (27% of batch) v 30.73/118.36 a 24.42/92.75 | dr 2% ply 60 buf 150k aux 152317 | lr 2.00e-03
+[2026-08-11 20:42:47]          DEEP Elo@64: 0=1052  1000=1021  random=953
+[2026-08-11 20:42:47]          perf: 0.23 games/s | wait(sp) 89% train 11% | NNbatch 93 (53 fwd/s)
+[2026-08-11 21:01:58] ep   1250 | loss 4.99 (klv 1.26 kla 1.21 cev 0.327 cea 0.680 cons 0.61) | sh klv 25% kla 48% cev 7% cea 14% cons 6% | conc(pred/tgt) v 16.0/103.8 a 20.6/84.8 | unsolved (27% of batch) v 41.45/113.51 a 31.67/91.37 | dr 3% ply 60 buf 150k aux 187492 | lr 1.99e-03 | vs 1000 (no-MCTS) W14 D1 L15
+[2026-08-11 21:01:58]          perf: 0.21 games/s | wait(sp) 87% train 11% | NNbatch 91 (52 fwd/s)
+[2026-08-11 21:20:30] ep   1500 | loss 4.38 (klv 0.54 kla 1.09 cev 0.323 cea 0.712 cons 1.24) | sh klv 12% kla 50% cev 7% cea 16% cons 14% | conc(pred/tgt) v 18.8/106.9 a 21.4/86.8 | unsolved (25% of batch) v 47.06/127.34 a 34.53/97.62 | dr 2% ply 60 buf 150k aux 224641 | lr 1.99e-03 | vs 1000 (no-MCTS) W12 D3 L15
+[2026-08-11 21:20:30]          perf: 0.22 games/s | wait(sp) 89% train 10% | NNbatch 92 (54 fwd/s)
+[2026-08-11 21:39:08] ep   1750 | loss 6.16 (klv 0.64 kla 1.31 cev 0.320 cea 0.686 cons 3.79) | sh klv 10% kla 42% cev 5% cea 11% cons 31% | conc(pred/tgt) v 16.9/105.6 a 17.0/85.4 | unsolved (27% of batch) v 33.91/120.26 a 24.86/92.41 | dr 3% ply 60 buf 150k aux 258636 | lr 1.99e-03 | vs 1000 (no-MCTS) W22 D3 L5
+[2026-08-11 21:39:08]          perf: 0.22 games/s | wait(sp) 90% train 10% | NNbatch 91 (54 fwd/s)
+[2026-08-11 21:57:26] ep   2000 | loss 4.31 (klv 0.96 kla 1.03 cev 0.322 cea 0.718 cons 0.49) | sh klv 22% kla 48% cev 7% cea 17% cons 6% | conc(pred/tgt) v 30.9/109.9 a 29.8/90.4 | unsolved (27% of batch) v 68.65/135.77 a 43.80/99.77 | dr 2% ply 61 buf 150k aux 296206 | lr 1.98e-03
+[2026-08-11 21:57:26]          DEEP Elo@64: 2000=1128  1000=1005  0=994  random=920
+[2026-08-11 21:57:26]          perf: 0.23 games/s | wait(sp) 91% train 9% | NNbatch 90 (55 fwd/s)
+[2026-08-11 22:14:43] ep   2250 | loss 3.88 (klv 0.55 kla 1.05 cev 0.314 cea 0.672 cons 0.50) | sh klv 14% kla 54% cev 8% cea 17% cons 6% | conc(pred/tgt) v 27.1/106.6 a 26.9/86.7 | unsolved (28% of batch) v 57.14/122.42 a 39.94/94.92 | dr 2% ply 61 buf 150k aux 330449 | lr 1.98e-03 | vs 2000 (no-MCTS) W18 D3 L9
+[2026-08-11 22:14:43]          perf: 0.23 games/s | wait(sp) 87% train 10% | NNbatch 90 (53 fwd/s)
+[2026-08-11 22:33:33] ep   2500 | loss 4.20 (klv 0.57 kla 1.17 cev 0.326 cea 0.685 cons 0.56) | sh klv 14% kla 56% cev 8% cea 16% cons 7% | conc(pred/tgt) v 27.6/107.3 a 24.6/84.9 | unsolved (28% of batch) v 57.65/126.17 a 35.85/91.47 | dr 5% ply 60 buf 150k aux 366489 | lr 1.97e-03 | vs 2000 (no-MCTS) W20 D1 L9
+[2026-08-11 22:33:33]          perf: 0.22 games/s | wait(sp) 90% train 9% | NNbatch 88 (53 fwd/s)
+[2026-08-11 22:50:48] ep   2750 | loss 3.94 (klv 0.56 kla 1.09 cev 0.341 cea 0.649 cons 0.42) | sh klv 14% kla 55% cev 9% cea 16% cons 5% | conc(pred/tgt) v 34.7/107.0 a 30.8/85.5 | unsolved (30% of batch) v 68.60/123.24 a 43.61/92.60 | dr 2% ply 60 buf 150k aux 399861 | lr 1.97e-03 | vs 2000 (no-MCTS) W22 D1 L7
+[2026-08-11 22:50:48]          perf: 0.24 games/s | wait(sp) 90% train 9% | NNbatch 89 (55 fwd/s)
+[2026-08-11 23:08:57] ep   3000 | loss 3.77 (klv 0.48 kla 1.00 cev 0.329 cea 0.619 cons 0.67) | sh klv 13% kla 53% cev 9% cea 16% cons 9% | conc(pred/tgt) v 33.1/104.9 a 29.4/81.3 | unsolved (32% of batch) v 65.19/115.90 a 40.68/85.72 | dr 2% ply 60 buf 150k aux 435271 | lr 1.96e-03
+[2026-08-11 23:08:57]          DEEP Elo@64: 3000=1229  2000=1141  1000=965  0=930  random=910
+[2026-08-11 23:08:57]          perf: 0.24 games/s | wait(sp) 91% train 9% | NNbatch 92 (56 fwd/s)
+[2026-08-11 23:26:01] ep   3250 | loss 3.42 (klv 0.44 kla 0.89 cev 0.314 cea 0.654 cons 0.44) | sh klv 13% kla 52% cev 9% cea 19% cons 6% | conc(pred/tgt) v 37.8/107.7 a 34.2/84.7 | unsolved (29% of batch) v 75.09/126.77 a 50.10/94.40 | dr 3% ply 61 buf 150k aux 471990 | lr 1.95e-03 | vs 3000 (no-MCTS) W21 D3 L6
+[2026-08-11 23:26:01]          perf: 0.23 games/s | wait(sp) 84% train 10% | NNbatch 91 (52 fwd/s)
+[2026-08-11 23:43:47] ep   3500 | loss 4.11 (klv 0.55 kla 1.18 cev 0.324 cea 0.642 cons 0.48) | sh klv 13% kla 57% cev 8% cea 16% cons 6% | conc(pred/tgt) v 35.4/103.8 a 29.4/77.2 | unsolved (28% of batch) v 66.15/112.99 a 42.71/82.48 | dr 1% ply 60 buf 150k aux 510000 | lr 1.94e-03 | vs 3000 (no-MCTS) W18 D2 L10
+[2026-08-11 23:43:47]          perf: 0.23 games/s | wait(sp) 88% train 11% | NNbatch 87 (53 fwd/s)
+[2026-08-12 00:02:32] ep   3750 | loss 4.12 (klv 0.51 kla 1.19 cev 0.299 cea 0.603 cons 0.66) | sh klv 12% kla 58% cev 7% cea 15% cons 8% | conc(pred/tgt) v 30.7/101.7 a 24.9/76.4 | unsolved (27% of batch) v 56.08/107.15 a 36.16/79.80 | dr 2% ply 61 buf 150k aux 545069 | lr 1.93e-03 | vs 3000 (no-MCTS) W20 D0 L10
+[2026-08-12 00:02:32]          perf: 0.22 games/s | wait(sp) 88% train 11% | NNbatch 86 (52 fwd/s)
+[2026-08-12 00:21:17] ep   4000 | loss 4.28 (klv 0.55 kla 1.25 cev 0.306 cea 0.560 cons 0.74) | sh klv 13% kla 58% cev 7% cea 13% cons 9% | conc(pred/tgt) v 31.8/99.9 a 24.3/73.3 | unsolved (26% of batch) v 53.26/99.11 a 33.71/73.45 | dr 3% ply 61 buf 150k aux 582328 | lr 1.93e-03
+[2026-08-12 00:21:17]          DEEP Elo@64: 4000=1298  3000=1232  2000=1131  1000=993  0=913  random=837
+[2026-08-12 00:21:17]          perf: 0.25 games/s | wait(sp) 90% train 9% | NNbatch 86 (54 fwd/s)
+[2026-08-12 00:37:22] ep   4250 | loss 3.97 (klv 0.47 kla 1.09 cev 0.322 cea 0.640 cons 0.73) | sh klv 12% kla 55% cev 8% cea 16% cons 9% | conc(pred/tgt) v 37.0/103.3 a 28.3/78.2 | unsolved (26% of batch) v 66.74/111.53 a 40.82/82.33 | dr 1% ply 60 buf 150k aux 615254 | lr 1.92e-03 | vs 4000 (no-MCTS) W16 D1 L13
+[2026-08-12 00:37:22]          perf: 0.23 games/s | wait(sp) 80% train 10% | NNbatch 88 (51 fwd/s)
+[2026-08-12 00:53:53] ep   4500 | loss 3.51 (klv 0.41 kla 1.00 cev 0.270 cea 0.584 cons 0.49) | sh klv 12% kla 57% cev 8% cea 17% cons 7% | conc(pred/tgt) v 42.0/104.6 a 31.3/79.8 | unsolved (27% of batch) v 73.66/117.46 a 44.61/85.14 | dr 2% ply 61 buf 150k aux 652190 | lr 1.91e-03 | vs 4000 (no-MCTS) W16 D0 L14
+[2026-08-12 00:53:53]          perf: 0.25 games/s | wait(sp) 90% train 9% | NNbatch 89 (55 fwd/s)
+[2026-08-12 01:09:45] ep   4750 | loss 3.61 (klv 0.41 kla 1.02 cev 0.285 cea 0.610 cons 0.51) | sh klv 11% kla 57% cev 8% cea 17% cons 7% | conc(pred/tgt) v 35.4/100.7 a 26.3/74.5 | unsolved (27% of batch) v 58.84/102.22 a 36.10/75.34 | dr 3% ply 61 buf 150k aux 689337 | lr 1.89e-03 | vs 4000 (no-MCTS) W21 D0 L9
+[2026-08-12 01:09:45]          perf: 0.26 games/s | wait(sp) 90% train 10% | NNbatch 91 (55 fwd/s)
+[2026-08-12 01:28:42] ep   5000 | loss 3.66 (klv 0.36 kla 1.07 cev 0.290 cea 0.651 cons 0.45) | sh klv 10% kla 58% cev 8% cea 18% cons 6% | conc(pred/tgt) v 43.4/103.1 a 29.4/77.6 | unsolved (27% of batch) v 71.48/111.35 a 41.49/81.02 | dr 2% ply 61 buf 150k aux 724721 | lr 1.88e-03
+[2026-08-12 01:28:42]          DEEP Elo@64: 5000=1324  4000=1309  3000=1273  2000=1086  1000=1027  0=868
+[2026-08-12 01:28:42]          perf: 0.25 games/s | wait(sp) 87% train 12% | NNbatch 91 (51 fwd/s)
+[2026-08-12 01:28:43] --- arm adapt500 segment done: 21487s this segment ---
+[2026-08-12 01:28:43] 500family sweep complete
