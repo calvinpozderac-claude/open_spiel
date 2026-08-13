@@ -93,6 +93,101 @@ def default_shared(**over):
     return _b.default_shared(**{**OTHELLO_DEFAULTS, **over})
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Running this on a CUDA machine
+# ══════════════════════════════════════════════════════════════════════════════
+#  WHAT THE RUN IS ACTUALLY LIMITED BY.  Measured on the Othello arms at the
+#  32/3/8 default (100/300 sims, 16 games in flight), splitting self-play wall
+#  clock into network time and tree time — with the network on the CPU, which
+#  is the most generous case the network will ever get:
+#
+#      arm   tree s/game   NN s/game   NN share of wall
+#      AA        2.0           0.9          ~30%
+#      MM        6.9           1.6          ~19%      (before the solver fix
+#                                                      in connect4_dirichlet_
+#                                                      utils; ~60% of MM's
+#                                                      self-play wall clock was
+#                                                      inside _mle_refresh)
+#
+#  Move the network to a GPU and the NN column collapses toward zero.  The tree
+#  column does not move at all: it is pure Python and numpy running in the
+#  self-play worker PROCESSES, one core each.  A 32/3/8 trunk on an 8x8 board is
+#  7.5 MFLOP per position, so a whole 20000-episode arm is a couple of PFLOP of
+#  network work — minutes, not hours, on any modern card.  The run is bound by
+#  CPU cores and by kernel-launch latency, and a faster GPU addresses neither.
+#
+#  So the settings below do two things.  They stop wasting the device (fixed
+#  batch shapes, one host transfer per forward, a fused optimiser, TF32), and
+#  they SPEND the headroom on capacity rather than banking it as idle time —
+#  see `CUDA_SIZES` and the note on the trunk.  Watch the `srv` percentage on
+#  the eval line to see which side you are on.
+CUDA_DEFAULTS = dict(
+    device='cuda',
+    # One worker per physical core beyond the two the parent needs (inference
+    # server thread + training).  These are PROCESSES running Python trees, and
+    # the tree is the bottleneck, so this is the setting that moves the run.
+    # 0 keeps the built-in rule, cpu_count - 2 clamped to [2, 8]; on a 6-core
+    # part that gives 4.
+    workers=0,
+    # Bigger, rarer requests.  Each worker sends one batch per wave, so these
+    # two set the GPU's batch size: workers x games_per_worker x worker_wave
+    # leaves per round.  At the Connect 4 defaults (16 x 4) a 4-worker pool
+    # sends ~256 rows, which on a card of this class is a rounding error — the
+    # forward costs the same as a batch of 32.  Doubling both quadruples the
+    # batch for no extra tree work per game and one quarter as many round trips
+    # through the request queues, whose pickling cost is per-message.
+    games_per_worker=32,
+    worker_wave=8,
+    # The training batch is a second, independent draw on the device, and with
+    # cons_frac=1.0 nearly doubles again for the consistency term.  Left at 1.0
+    # deliberately: on this card the extra rows are free, and sub-sampling the
+    # term only ever bought speed.
+    batch_size=512,
+    train_steps_per_ep=8,
+    cons_frac=1.0,
+)
+
+
+def cuda_shared(**over):
+    """Othello defaults, tuned for a CUDA card with CPU-bound self-play.
+
+        import othello_benchmark as bench
+        shared = bench.cuda_shared(num_episodes=20_000)
+        bench.train_arm('MM', shared)
+
+    Everything here is a scheduling change: same arms, same sim counts, same
+    targets, same optimiser and schedule, so a run under these settings stays
+    comparable with one under `default_shared` on the same solver.  The ONE
+    thing that is not comparable across runs is `mle_solver` — see
+    `connect4_dirichlet_utils.set_mle_solver`.
+    """
+    return default_shared(**{**CUDA_DEFAULTS, **over})
+
+
+#  Trunks worth considering once the device is no longer the constraint, with
+#  the cost of each RELATIVE to the 32/3/8 default, measured by FLOPs per
+#  position on the Othello observation (3x8x8, 65 actions):
+#
+#      trunk        params     MFLOP/pos    vs 32/3/8
+#      32/3/8       194,832        7.5         1.0x
+#      64/5/16      659,512       48.1         6.4x
+#      128/10/32  3,628,808      379.8        50.6x
+#
+#  Those multipliers apply ONLY to the network half of the run — the tree half
+#  is unchanged, because search cost depends on the simulation count and the
+#  branching factor, not on how wide the trunk is.  That is the whole argument
+#  for spending a fast card on capacity here: at 32/3/8 the device is idle most
+#  of the time, and the first several multiples of network cost are close to
+#  free in wall clock.  `sizing_table` measures this on the machine in front of
+#  you rather than trusting the table.
+#
+#  Connect 4 is a solved 10^13-state game; Othello is ~10^28, and 32 channels
+#  over 3 blocks is below the 64-128 / 5-10 range 8x8 games are usually run at.
+#  Raising it changes what is being measured, so raise it for ALL arms together
+#  on a fresh set of runs, exactly as the `lr_decay_eps` note above says.
+CUDA_SIZES = ((32, 3, 8), (64, 5, 16), (96, 6, 16), (128, 8, 16))
+
+
 def describe(log=print):
     """What this game looks like, and how the settings follow from it."""
     import connect4_dirichlet_utils as c4

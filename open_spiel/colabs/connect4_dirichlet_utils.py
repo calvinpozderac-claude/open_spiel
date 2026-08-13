@@ -167,17 +167,158 @@ AGG_ADDITIVE = 'additive'
 AGG_ADDITIVE_MLE = 'additive_mle'
 AGGREGATIONS = (AGG_MIXTURE, AGG_MEAN, AGG_SUM, AGG_ADDITIVE, AGG_ADDITIVE_MLE)
 
-# ── 'additive_mle' tuning.  Speed is preferred to exactness here: the estimate
-# is a search statistic, not a reported quantity, and it moves slowly.
+# ── 'additive_mle' tuning ─────────────────────────────────────────────────────
+# This is the hot path of the two additive_mle arms and it is worth reading
+# before touching.  MEASURED on Othello self-play (32/3/8 trunk, 100/300 sims,
+# 16 parallel games): under the solver this replaced, the 'MM' arm spent 3.4x
+# the tree time of 'AA' and ~60% of its total self-play wall clock inside
+# `_mle_refresh`.  Whatever the GPU is, this runs on one CPU core in Python, so
+# it is the arm's real cost and no device can help with it.
 _MLE_FLOOR = 1e-9      # clamp on x before log().  A single zero component would
                        # set L[j] = -inf permanently and NaN the node forever.
-_MLE_GROWTH = 1.3      # refresh the fixed point when n reaches n*GROWTH, not
-                       # every update: ~23 refreshes over a 400-sim search
-                       # instead of 400, and MORE accurate than one step per
-                       # update because each refresh iterates to near-convergence
-_MLE_STEPS = 12        # Minka iterations per refresh
+_MLE_GROWTH = 1.3      # refresh the estimate when n reaches n*GROWTH, not every
+                       # update: ~23 refreshes over a 400-sim search instead of
+                       # 400, and MORE accurate than one step per update because
+                       # each refresh iterates to near-convergence
+_MLE_MIN_N = 3.0       # do not refresh below this: `observed_alpha` falls back
+                       # to 'additive' for n < 3 (the MLE is degenerate there),
+                       # so a refresh at n = 1 or 2 is computed and discarded.
+                       # Worth having because in a 65-action Othello tree MOST
+                       # accumulators never leave small n — at 100 simulations
+                       # over ~10 legal moves, the n = 1 and n = 2 refreshes are
+                       # a large share of all of them.
+_MLE_STEPS = 24        # solver iterations per refresh -- a CAP, not a count.
+                       # The Newton solver below exits as soon as the estimate
+                       # stops moving, which is typically after 3-6 steps from a
+                       # warm start, so raising the cap costs nothing in the
+                       # common case and only buys robustness in the tail.
+_MLE_TOL = 1e-6        # residual below which a solve is converged.  Loosening it
+                       # buys nothing MEASURABLE here: over 40k refresh calls
+                       # captured from a real Othello MM search, tol from 1e-6 to
+                       # 1e-2 gave answers agreeing to 2e-16 and timings inside
+                       # the noise, because Newton on a scalar monotone residual
+                       # crosses every one of those thresholds on the same
+                       # iteration.  Left tight; it is not the lever.
 _MLE_NEWTON = 2        # Newton steps inside inverse-digamma (0.8% max rel err;
-                       # 3 would give ~1e-5 for ~15% more cost)
+                       # 3 would give ~1e-5 for ~15% more cost).  Used by the
+                       # fallback solver and by the guarded step below.
+_TRIGAMMA_FLOOR = 1e-300   # psi' ~ 1/x, so it underflows to 0 for huge alpha and
+                           # the Newton solve divides by it.  See `_mle_newton`.
+
+# ── The bound on the estimate, and why there has to be one ────────────────────
+# The Dirichlet MLE is UNBOUNDED ABOVE.  As the observed means agree more
+# closely, alpha0 runs to infinity, and the Hessian goes singular along exactly
+# that ray (psi'(x) -> 1/x makes Minka's Sherman-Morrison denominator cancel to
+# zero).  This is not a corner case in a tree: "n observations" there routinely
+# means the SAME leaf backed up n times through overlapping subtrees rather than
+# n independent confirmations, so perfect agreement is common.  The module
+# docstring already makes this point against the 'mean' and 'sum' rules.
+#
+# The old 12-step fixed point never had to confront it, because it never
+# converged.  MEASURED over a real Othello MM search (133k reads of the
+# statistic), it returned a median alpha0 of 74 against a median n of 9, and
+# exceeded n itself 99.5% of the time.  So the concentration the arm has been
+# searching on was set by where the iteration was cut off — it is a property of
+# the solver, not of the evidence.  That matters beyond speed: the whole claim
+# for 'additive_mle' is that its concentration is grounded in how much the
+# backed-up leaves disagree, and an unconverged iterate is not.
+#
+# THE BOUND IS alpha0 <= n, which is the rule this module already documents:
+# `observed_alpha` describes additive_mle as "alpha0 ~ min(n, dispersion of the
+# leaf means)".  Nothing implemented that.  With it:
+#   - leaves that agree  -> the fit saturates at n, i.e. exactly 'additive';
+#   - leaves that differ -> the fit sits below n, by however much they differ.
+# which is precisely the intended contrast with 'additive' (alpha0 == n always),
+# it cannot diverge, and it is CHEAPER than the unbounded solve because
+# `_mle_binds` settles the case in one step and the boundary problem is scalar.
+#
+# HOW OFTEN IT BINDS: on the 40k refreshes captured from a real Othello MM
+# search, 100% of them.  The unconstrained fit wants alpha0 > n EVERY TIME, for
+# the reason above — the leaves being fitted are not independent draws.  That is
+# worth knowing before reading anything into the raw MLE: over this workload it
+# is not a measurement of dispersion at all, and what makes the rule informative
+# is the bound.  With it, alpha0 has a median of 8 against a median n of 9 and
+# tracks the evidence; without it the solve diverges to overflow.
+_MLE_CONC_PER_OBS = 1.0   # the bound is this times n.  Raise it to let the fit
+                          # claim more certainty than it has observations; set it
+                          # to float('inf') to see the raw unconstrained fit
+                          # (which overflows on a real search — that is the
+                          # finding above, not a reason to leave it off).
+
+
+def _mle_binds(g0, g1, g2, cap):
+    """Is the alpha_0 <= cap constraint ACTIVE?  Exact, and nearly free.
+
+    Returns (binds, lambda0, t) where `t` is the trial point and `lambda0` the
+    multiplier it was built at — both reusable by whichever branch is taken.
+
+    One step of Minka's map from the boundary, F(a) = sum_j psi^-1(gbar_j +
+    psi(a)), evaluated at a = cap.  F is increasing, the log-likelihood is
+    concave so its fixed point alpha_0* is unique, and F(a) - a is eventually
+    decreasing because sum_j exp(gbar_j) <= 1 by AM-GM (with equality only when
+    every observation is identical — the divergent case).  So
+
+        F(cap) > cap   <=>   alpha_0* > cap   <=>   the bound binds.
+
+    Deciding this UP FRONT is what makes the bound cheap.  The alternative —
+    solve unconstrained, notice it left the ball, then solve on the boundary —
+    pays for both solves in exactly the case that is most common here, and
+    MEASURED on Othello MM that cost 2.6x the tree time of getting it right.
+    Guessing from a single out-of-bounds iterate instead is not sound: a warm
+    start at alpha_0 = 43 against a bound of 8 is perfectly compatible with an
+    optimum at alpha_0 = 0.9, and treating it as binding produced exactly that
+    wrong answer.
+    """
+    lam = _digamma(cap)
+    t0 = _inv_digamma(g0 + lam)
+    t1 = _inv_digamma(g1 + lam)
+    t2 = _inv_digamma(g2 + lam)
+    return (t0 + t1 + t2 > cap), lam, (t0, t1, t2)
+
+
+def _mle_on_boundary(g0, g1, g2, cap, steps=12, tol=_MLE_TOL, lam=None,
+                     start=None):
+    """The maximum-likelihood Dirichlet subject to alpha_0 == cap, exactly.
+
+    Not a projection.  Scaling the unconstrained iterate radially onto the
+    boundary lands on a DIFFERENT point with a different mean, and there is no
+    reason for that point to be the best one available at that total — so it is
+    solved rather than approximated.
+
+    Lagrange on  max_alpha l(alpha)  s.t.  sum_j alpha_j = cap  gives
+        psi(alpha_j) - gbar_j = lambda   for every j,
+    i.e.  alpha_j = psi^-1(gbar_j + lambda),  with lambda fixed by
+        h(lambda) = sum_j psi^-1(gbar_j + lambda) - cap = 0.
+    psi^-1 is increasing, so h is strictly increasing and has one root; Newton
+    on it converges in two or three steps, and `_mle_binds` has usually already
+    paid for the first iterate on its way to deciding this branch was the right
+    one — pass it as (`lam`, `start`) rather than recomputing it.
+    h'(lambda) is free once alpha is known, since
+    d psi^-1(y)/dy = 1 / psi'(psi^-1(y)).
+    """
+    if start is None:
+        lam = _digamma(cap / 3.0)
+        a0 = a1 = a2 = cap / 3.0
+    else:
+        a0, a1, a2 = start
+    for _ in range(steps):
+        h = a0 + a1 + a2 - cap
+        if abs(h) <= tol * cap:
+            break
+        dh = 1.0 / _trigamma(a0) + 1.0 / _trigamma(a1) + 1.0 / _trigamma(a2)
+        if not (dh > 0.0):
+            break
+        lam -= h / dh
+        a0 = _inv_digamma(g0 + lam)
+        a1 = _inv_digamma(g1 + lam)
+        a2 = _inv_digamma(g2 + lam)
+    # One radial correction so the constraint holds exactly rather than to `tol`
+    # — callers downstream add these to a prior and compare totals.
+    s = a0 + a1 + a2
+    if s > 0.0 and s != cap:
+        r = cap / s
+        a0, a1, a2 = a0 * r, a1 * r, a2 * r
+    return (max(a0, ALPHA_FLOOR), max(a1, ALPHA_FLOOR), max(a2, ALPHA_FLOOR))
 
 
 # ── Scalar digamma / trigamma / inverse-digamma (pure Python, no numpy dispatch
@@ -216,20 +357,254 @@ def _inv_digamma(y):
     return x
 
 
+def _mle_fixed_point(g0, g1, g2, a0, a1, a2, steps=_MLE_STEPS, tol=_MLE_TOL,
+                     cap=float('inf')):
+    """Minka's fixed-point iteration:  alpha_j <- psi^-1(psi(alpha_0) + gbar_j).
+
+    Unconditionally stable and monotone in the likelihood, but only LINEARLY
+    convergent — 12 steps leave |grad| around 4e-2 on real tree statistics — so
+    it is kept as the safe fallback for `_mle_newton` rather than the main path.
+    """
+    if cap < float('inf'):
+        binds, lam, trial = _mle_binds(g0, g1, g2, cap)
+        if binds:
+            return _mle_on_boundary(g0, g1, g2, cap, tol=tol, lam=lam,
+                                    start=trial)
+    for _ in range(steps):
+        c = _digamma(a0 + a1 + a2)
+        n0 = _inv_digamma(c + g0)
+        n1 = _inv_digamma(c + g1)
+        n2 = _inv_digamma(c + g2)
+        ns = n0 + n1 + n2
+        if ns > cap:                         # inf under 'legacy', so never here
+            r = cap / ns
+            n0, n1, n2, ns = n0 * r, n1 * r, n2 * r, cap
+        moved = max(abs(n0 - a0), abs(n1 - a1), abs(n2 - a2))
+        a0, a1, a2 = n0, n1, n2
+        if moved <= tol * ns:
+            break
+    return a0, a1, a2
+
+
+def _mle_newton(g0, g1, g2, a0, a1, a2, steps=_MLE_STEPS, tol=_MLE_TOL,
+                cap=float('inf')):
+    """The same Dirichlet MLE by Newton's method, guarded.
+
+    Both solvers hunt the same stationary point of the same likelihood,
+        psi(alpha_j) - psi(alpha_0) = gbar_j = (1/n) sum_i log x_ij,
+    so this is a faster route to the same answer, not a different estimator.
+
+    The Hessian of the per-observation log-likelihood is
+        H = -diag(psi'(alpha_j)) + psi'(alpha_0) 11^T
+    — diagonal plus rank one — so Sherman-Morrison inverts it in O(k) with no
+    linear algebra at all (Minka 2000, eq. 18).  Quadratic convergence: from the
+    warm start a refresh actually gets, three to six steps reach the fixed point
+    to machine precision, against the twelve linear steps that used to stop
+    short of it.
+
+    MEASURED two ways.  On 3000 synthetic accumulators spanning the
+    concentration range a real tree produces, solving UNCONSTRAINED so the
+    comparison is solver against solver:
+
+        solver                        |grad| median      p90       max
+        fixed point x12 (the old one)      4.3e-2    7.2e-2    7.3e-2
+        this, capped at 24 steps           6.7e-16   1.8e-15   5.3e-15
+
+    and end to end, on 40k refresh calls captured from an actual Othello MM
+    search and replayed: 28.7 us per refresh against the old solver's 75.1, so
+    2.6x faster while landing on the answer rather than near it.
+
+    GUARDED because Newton is only locally convergent: a step that leaves the
+    positive orthant, or that fails to shrink the gradient, is discarded in
+    favour of one fixed-point step, which is globally convergent.  That keeps
+    the worst case at the old solver's linear progress and the common case at
+    Newton's quadratic.
+
+    BOUNDED by `cap` on alpha_0.  The log-likelihood is concave and {alpha > 0,
+    sum alpha <= cap} is convex, so there are exactly two cases: the
+    unconstrained maximum is inside and the bound is irrelevant, or it is
+    outside and the constrained maximum lies ON the boundary.  `_mle_binds`
+    decides which for the price of one Minka step, BEFORE either solve, so only
+    the branch that can be right is ever run.
+    """
+    if cap < float('inf'):
+        binds, lam, trial = _mle_binds(g0, g1, g2, cap)
+        if binds:
+            return _mle_on_boundary(g0, g1, g2, cap, tol=tol, lam=lam,
+                                    start=trial)
+    s = a0 + a1 + a2
+    if s > cap:
+        # The optimum is inside the ball (or `_mle_binds` would have caught it),
+        # but this START is not.  Pull it in radially and carry on; the solve is
+        # free to move back inside from there.
+        r = cap / s
+        a0, a1, a2, s = a0 * r, a1 * r, a2 * r, cap
+    c = _digamma(s)
+    e0 = c - _digamma(a0) + g0
+    e1 = c - _digamma(a1) + g1
+    e2 = c - _digamma(a2) + g2
+    err = abs(e0) if abs(e0) > abs(e1) else abs(e1)
+    if abs(e2) > err:
+        err = abs(e2)
+    for _ in range(steps):
+        if err <= tol:
+            break
+        # H^-1 e by Sherman-Morrison.  q_j = -psi'(alpha_j) < 0, z = psi'(alpha_0).
+        # psi' decays like 1/x, so every one of these underflows to exactly 0 once
+        # alpha passes ~1e16 -- reachable, because the unconstrained MLE runs to
+        # infinity whenever the observations agree perfectly.  `cap`
+        # stops the solve long before that; the floors here are the belt to its
+        # braces, and cost one comparison each.  The DENOMINATOR is the one that
+        # actually bites: 1/psi'(x) -> x, so 1/z + sum_j 1/q_j cancels to exactly
+        # zero along the divergent ray, which is where an unbounded solve heads.
+        z = _trigamma(s)
+        q0, q1, q2 = -_trigamma(a0), -_trigamma(a1), -_trigamma(a2)
+        if q0 > -_TRIGAMMA_FLOOR: q0 = -_TRIGAMMA_FLOOR
+        if q1 > -_TRIGAMMA_FLOOR: q1 = -_TRIGAMMA_FLOOR
+        if q2 > -_TRIGAMMA_FLOOR: q2 = -_TRIGAMMA_FLOOR
+        if z < _TRIGAMMA_FLOOR: z = _TRIGAMMA_FLOOR
+        den = 1.0 / z + 1.0 / q0 + 1.0 / q1 + 1.0 / q2
+        if not (den < 0.0 or den > 0.0):
+            # Singular Hessian along the alpha0 ray: the likelihood is flat (or
+            # monotone) in the total concentration, i.e. the fit is running to
+            # infinity.  `cap` is the answer to that; without one there is no
+            # finite maximum to find, so stop where we are.
+            if cap < float('inf'):
+                return _mle_on_boundary(g0, g1, g2, cap, tol=tol)
+            break            # unbounded and divergent: stop where we are
+        b = (e0 / q0 + e1 / q1 + e2 / q2) / den
+        n0 = a0 - (e0 - b) / q0
+        n1 = a1 - (e1 - b) / q1
+        n2 = a2 - (e2 - b) / q2
+        if n0 > 0.0 and n1 > 0.0 and n2 > 0.0:
+            ns = n0 + n1 + n2
+            if ns > cap:                     # step left the ball: slide onto it
+                r = cap / ns
+                n0, n1, n2, ns = n0 * r, n1 * r, n2 * r, cap
+            nc = _digamma(ns)
+            f0 = nc - _digamma(n0) + g0
+            f1 = nc - _digamma(n1) + g1
+            f2 = nc - _digamma(n2) + g2
+            nerr = abs(f0) if abs(f0) > abs(f1) else abs(f1)
+            if abs(f2) > nerr:
+                nerr = abs(f2)
+        else:
+            nerr = err                       # forces the fallback below
+        if nerr >= err:
+            # Newton overshot, or left the positive orthant.  Fall back to ONE
+            # fixed-point step and ACCEPT it unconditionally: that map is
+            # globally convergent and monotone in the likelihood, so the worst
+            # case here is the old solver's linear progress rather than a stall.
+            # (Rejecting it when the gradient norm fails to shrink was wrong —
+            # the fixed point improves the LIKELIHOOD, which is not the same
+            # thing, and bailing on that test made the answer depend on where
+            # the solve started.)
+            n0 = _inv_digamma(c + g0)
+            n1 = _inv_digamma(c + g1)
+            n2 = _inv_digamma(c + g2)
+            ns = n0 + n1 + n2
+            if ns > cap:                     # step left the ball: slide onto it
+                r = cap / ns
+                n0, n1, n2, ns = n0 * r, n1 * r, n2 * r, cap
+            nc = _digamma(ns)
+            f0 = nc - _digamma(n0) + g0
+            f1 = nc - _digamma(n1) + g1
+            f2 = nc - _digamma(n2) + g2
+            nerr = abs(f0) if abs(f0) > abs(f1) else abs(f1)
+            if abs(f2) > nerr:
+                nerr = abs(f2)
+        moved = max(abs(n0 - a0), abs(n1 - a1), abs(n2 - a2))
+        a0, a1, a2, s, c = n0, n1, n2, ns, nc
+        e0, e1, e2, err = f0, f1, f2, nerr
+        if moved <= tol * s:
+            break
+    return a0, a1, a2
+
+
+# Which solver `_mle_refresh` runs, and from where.  Swappable as ONE switch,
+# because the pieces are not independent: the legacy behaviour is the joint
+# effect of an unconverged solver, a cold (1,1,1) start and no upper bound, and
+# restoring any one of them alone reproduces nothing.  See `set_mle_solver`.
+_MLE_SOLVER = _mle_newton
+_MLE_COLD_START = None     # None -> moment match; a 3-tuple -> that fixed start
+
+
+def set_mle_solver(name='newton'):
+    """Pick the additive_mle solver for this process.
+
+    'newton'  (default) — the bounded, converged, moment-started solve above.
+    'legacy'  — exactly what additive_mle did before: Minka's fixed point, a
+                hard 12 steps with no convergence test, started from (1,1,1),
+                refreshed from n = 1, and unbounded above.
+
+    THE TWO DO NOT AGREE, and that is the point rather than a defect.  'legacy'
+    returns whatever twelve linear steps happen to reach, which on a real
+    Othello search is a median alpha0 of 74 against a median n of 9 — a number
+    the solver's cut-off chose, not the evidence.  'newton' returns the fit
+    subject to alpha0 <= n, which is the rule `observed_alpha` documents.
+
+    Use 'legacy' only to continue a run whose earlier generations were trained
+    under it: mixing the two mid-run changes the search statistic underneath the
+    network, and comparing an arm trained under one against an arm trained under
+    the other compares the solvers as much as the arms.
+    """
+    global _MLE_SOLVER, _MLE_COLD_START, _MLE_STEPS, _MLE_TOL
+    global _MLE_CONC_PER_OBS, _MLE_MIN_N
+    if name == 'newton':
+        _MLE_SOLVER, _MLE_COLD_START = _mle_newton, None
+        _MLE_STEPS, _MLE_TOL = 24, 1e-6
+        _MLE_CONC_PER_OBS, _MLE_MIN_N = 1.0, 3.0
+    elif name in ('legacy', 'fixed_point', 'minka'):
+        _MLE_SOLVER, _MLE_COLD_START = _mle_fixed_point, (1.0, 1.0, 1.0)
+        _MLE_STEPS, _MLE_TOL = 12, 0.0
+        _MLE_CONC_PER_OBS, _MLE_MIN_N = float('inf'), 1.0
+    else:
+        raise ValueError("mle solver must be 'newton' or 'legacy'")
+    return name
+
+
+def _mle_start(acc, inv_n):
+    """Where to start the solve.
+
+    Warm: the previous estimate, which after a 1.3x growth in n is already very
+    close.  Cold (first solve on this accumulator): Minka's method-of-moments
+    initialiser, built from statistics the accumulator ALREADY carries —
+    M = SM/n and Var(m) = SQ/n - M^2, collapsed by `_beta0_from_moments`.
+
+    Worth the six lines.  In a 65-action Othello tree most accumulators never
+    get past a handful of observations, so the cold solve is the common case,
+    not a warm-up.  MEASURED over 4000 accumulators with n in [3, 40): starting
+    from (1,1,1) costs 112 us and 38 digamma evaluations per solve, starting
+    from the moment match costs 50 us and 16 — the same fixed point, reached
+    from much nearer to it."""
+    A = acc[6]
+    if A[0] > 0.0:
+        return A[0], A[1], A[2]
+    if _MLE_COLD_START is not None:
+        return _MLE_COLD_START
+    SM, SQ = acc[1], acc[2]
+    m0, m1, m2 = SM[0] * inv_n, SM[1] * inv_n, SM[2] * inv_n
+    b0 = _beta0_from_moments(
+        (m0, m1, m2),
+        (SQ[0] * inv_n - m0 * m0, SQ[1] * inv_n - m1 * m1,
+         SQ[2] * inv_n - m2 * m2))
+    return (max(m0 * b0, ALPHA_FLOOR), max(m1 * b0, ALPHA_FLOOR),
+            max(m2 * b0, ALPHA_FLOOR))
+
+
 def _mle_refresh(acc):
-    """One batch of Minka fixed-point steps from the sufficient statistics.
-    The MLE solves  psi(alpha_j) = psi(alpha_0) + mean_i log x_ij,  so (n, L) is
-    all the state needed and the iteration warm-starts from the last estimate."""
+    """Re-solve this accumulator's Dirichlet MLE from its sufficient statistics.
+
+    The MLE solves  psi(alpha_j) - psi(alpha_0) = mean_i log x_ij,  so (n, L) is
+    all the state needed and the solve warm-starts from the last estimate."""
     inv_n = 1.0 / acc[0]
     L, A = acc[5], acc[6]
-    g0, g1, g2 = L[0] * inv_n, L[1] * inv_n, L[2] * inv_n
-    a0, a1, a2 = A[0], A[1], A[2]
-    for _ in range(_MLE_STEPS):
-        c = _digamma(a0 + a1 + a2)
-        a0 = _inv_digamma(c + g0)
-        a1 = _inv_digamma(c + g1)
-        a2 = _inv_digamma(c + g2)
-    A[0], A[1], A[2] = a0, a1, a2
+    # steps/tol/cap are passed rather than defaulted: `set_mle_solver` rebinds
+    # the globals, and a default argument would have frozen the old values in.
+    A[0], A[1], A[2] = _MLE_SOLVER(L[0] * inv_n, L[1] * inv_n, L[2] * inv_n,
+                                   *_mle_start(acc, inv_n),
+                                   steps=_MLE_STEPS, tol=_MLE_TOL,
+                                   cap=acc[0] * _MLE_CONC_PER_OBS)
 
 
 def flip_alpha(alpha):
@@ -367,11 +742,17 @@ def _new_acc():
         [0] n    [1] SM = sum m   [2] SQ = sum m^2   [3] SV = sum var
         [4] SA = sum alpha
         [5] L    = sum log m      — 'additive_mle' sufficient statistic
-        [6] A    = current MLE estimate
+        [6] A    = current MLE estimate, NEGATIVE until the first solve
         [7] next refresh threshold
-    Slots 5-7 are only maintained when an 'additive_mle' rule is selected."""
+    Slots 5-7 are only maintained when an 'additive_mle' rule is selected.
+
+    A starts negative rather than at (1,1,1) purely as a sentinel: it tells
+    `_mle_refresh` that there is no previous estimate to warm-start from, so it
+    should build one by moment matching instead of climbing there from (1,1,1).
+    Nothing reads A before the first solve — `observed_alpha` returns the
+    'additive' answer below n = 3 and a solve always happens at n = 3."""
     return [0.0, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0]
+            [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [-1.0, -1.0, -1.0], 1.0]
 
 
 def _payload(alpha):
@@ -413,7 +794,13 @@ def _acc_add(acc, pl):
         x = m[0]; L[0] += math.log(x if x > _MLE_FLOOR else _MLE_FLOOR)
         x = m[1]; L[1] += math.log(x if x > _MLE_FLOOR else _MLE_FLOOR)
         x = m[2]; L[2] += math.log(x if x > _MLE_FLOOR else _MLE_FLOOR)
-        if n >= acc[7]:
+        # `observed_alpha` reads acc[6] only from n >= 3 (below that the MLE is
+        # degenerate and it returns the 'additive' answer instead), so a solve at
+        # n = 1 or 2 is thrown away.  Skipping those does not change ANY value
+        # the search or the targets ever see -- the first refresh that is read
+        # still solves from the full (n, L) statistics, just from the (1,1,1)
+        # start rather than a discarded one.
+        if n >= acc[7] and n >= _MLE_MIN_N:
             acc[7] = max(n + 1.0, n * _MLE_GROWTH)
             _mle_refresh(acc)
 
@@ -1013,6 +1400,13 @@ class Config:
     # FULL=400 label the same position 100 and 400), which is what sank the
     # 'mean' arm above.
 
+    # Which additive_mle solver the tree uses.  Ignored unless an additive_mle
+    # rule is selected.  'newton' is the bounded, converged fit; 'legacy' is the
+    # unconverged twelve-step fixed point earlier runs were trained under, kept
+    # so one of them can be continued.  See `set_mle_solver` — the two do not
+    # produce the same search statistic and must not be mixed within a run.
+    mle_solver: str = 'newton'
+
     # ── search ────────────────────────────────────────────────────────────────
     selection: str = 'dirichlet'      # exact draw | 'gaussian' approximation
     virtual_loss: float = 1.0         # in-flight edge penalty on v ∈ [−1, 1]
@@ -1262,6 +1656,9 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
     set_game(game)
     set_search(cfg['search_agg'], cfg['target_agg'], cfg['selection'],
                cfg['virtual_loss'])
+    # The workers run the tree, so THEY are where the additive_mle solve happens.
+    # Setting it in the parent alone would leave every worker on the default.
+    set_mle_solver(cfg.get('mle_solver', 'newton'))
     rng = np.random.default_rng(cfg['seed'] + worker_id * 7919)
     eng = _SlotEngine(game, cfg, rng, cfg.get('checkpoint_dir'))
     curr_shared = cfg.get('curr_depth_shared')
@@ -1388,6 +1785,28 @@ if _HAS_TORCH:
 
     # ── Device selection ──────────────────────────────────────────────────────
     def pick_device(pref='auto'):
+        """Resolve a device preference to (device, backend).
+
+        'auto' PREFERS CUDA.  It used to prefer DirectML, which was right when
+        DirectML was the only way to reach the GPU this was developed on, and is
+        wrong on any machine that has both: DirectML is a compatibility layer
+        that here has no fused lgamma or digamma, no fused optimiser step
+        (`LerpFreeAdamW` exists solely because aten::lerp has no DML kernel), no
+        torch.compile, and a habit of silently running an unsupported operator
+        on the CPU — a full pipeline sync inside the loss.  `set_backend` probes
+        for all of that and reports what it had to fall back to.  Ask for
+        'directml' explicitly if you want it anyway.
+        """
+        if pref in ('cuda', 'auto') and torch.cuda.is_available():
+            try:
+                name = torch.cuda.get_device_name(0)
+                cap = torch.cuda.get_device_capability(0)
+                print(f'Using CUDA: {name} (sm_{cap[0]}{cap[1]})')
+            except Exception:
+                print('Using CUDA')
+            return torch.device('cuda'), 'cuda'
+        if pref == 'cuda':
+            print('CUDA requested but unavailable — falling back.')
         if pref in ('directml', 'auto'):
             try:
                 import torch_directml
@@ -1400,9 +1819,48 @@ if _HAS_TORCH:
             except Exception:
                 if pref == 'directml':
                     print('DirectML requested but unavailable — falling back.')
-        if pref in ('cuda', 'auto') and torch.cuda.is_available():
-            return torch.device('cuda'), 'cuda'
         return torch.device('cpu'), 'cpu'
+
+    # ── CUDA-only runtime setup ───────────────────────────────────────────────
+    # None of this changes what is computed to more than float32 rounding; it
+    # changes how the same arithmetic is scheduled.  It is all a no-op off CUDA.
+    _CUDA_TUNED = False
+
+    def configure_cuda(device, log=print):
+        """Turn on the CUDA fast paths this workload actually benefits from.
+
+        The trunk here is small (a 32-channel, 3-block net on an 8x8 board is
+        7.5 MFLOP per position), so the run is LAUNCH-BOUND, not FLOP-bound:
+        what matters is how many kernels are dispatched and how many times the
+        host has to wait for the device, not how fast the arithmetic is.  Both
+        settings below target that.
+
+        cudnn.benchmark
+            Picks the fastest convolution algorithm per shape, once, by trying
+            them.  It pays off exactly when the shapes repeat, which is why the
+            inference server rounds its batches into fixed buckets — without
+            that this would re-benchmark on nearly every forward and lose.
+        TF32
+            Tensor-core matmul/convolution with ~10 bits of mantissa.  The
+            Dirichlet loss itself (lgamma, digamma, the KLs) is NOT affected —
+            TF32 applies to convolution and matmul only, and the accumulation
+            stays fp32.  On a Blackwell part this is most of the trunk's speed.
+        """
+        if not (device is not None and str(device).startswith('cuda')
+                and torch.cuda.is_available()):
+            return False
+        global _CUDA_TUNED
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        try:
+            torch.set_float32_matmul_precision('high')
+        except Exception:
+            pass
+        _CUDA_TUNED = True
+        log('cuda: cudnn.benchmark on, TF32 on (convolution and matmul only — '
+            'the Dirichlet loss stays fp32)')
+        return True
 
     def batch_to_tensor(obs_list, device):
         obs = np.asarray(obs_list, dtype=np.float32)
@@ -1705,13 +2163,15 @@ if _HAS_TORCH:
             kl = kl / target.sum(-1).clamp_min(1.0)
         return kl
 
-    def full_loss(out, out2, meta, weights, kl_normalize=False):
+    def full_loss(out, out2, meta, weights, kl_normalize=False,
+                  defer_diag=False):
         """All five losses on one batch.
 
         `out`  = network outputs for the batch positions              (B rows)
         `out2` = outputs for the SUCCESSOR positions the consistency
                  term needs, or None when nothing in the batch has one (B2 rows)
-        Returns (total, parts-dict-of-floats)."""
+        Returns (total, parts-dict-of-floats), or with `defer_diag` the
+        diagnostics as an UNDOWNLOADED device tensor — see `diag_parts`."""
         v_logits, v_conf_raw, a_logits, a_conf_raw = out
         act = meta['pad_act']                            # (B,K) long
         mask = meta['pad_mask']                          # (B,K) bool
@@ -1798,11 +2258,23 @@ if _HAS_TORCH:
                 total, L_klv, L_kla, L_cev, L_cea, L_cons,
                 v_alpha.sum(1).mean(), meta['v_obs'].sum(1).mean(), qa_p, qa_t,
                 uv_p, uv_t, ua_p, ua_t, uns.mean(),
-            ]).to('cpu', copy=False).tolist()
-        parts = dict(zip(('loss', 'klv', 'kla', 'cev', 'cea', 'cons',
-                          'cv_p', 'cv_t', 'ca_p', 'ca_t',
-                          'uv_p', 'uv_t', 'ua_p', 'ua_t', 'unsolved'), diag))
-        return total, parts
+            ])
+        if defer_diag:
+            # Hand back the device tensor and let the caller choose WHEN to pay
+            # for it.  Downloading here costs a full pipeline sync before
+            # backward has even been enqueued — see `train_step`.
+            return total, diag
+        return total, diag_parts(diag)
+
+    _DIAG_KEYS = ('loss', 'klv', 'kla', 'cev', 'cea', 'cons',
+                  'cv_p', 'cv_t', 'ca_p', 'ca_t',
+                  'uv_p', 'uv_t', 'ua_p', 'ua_t', 'unsolved')
+
+    def diag_parts(diag):
+        """Device diagnostics tensor -> the parts dict of Python floats."""
+        if torch.is_tensor(diag):
+            diag = diag.to('cpu', copy=False).tolist()
+        return dict(zip(_DIAG_KEYS, diag))
 
     _Z_CORNER = {1: _WIN, 0: _DRAW, -1: _LOSS}
 
@@ -1942,20 +2414,30 @@ if _HAS_TORCH:
                 out = (v_logits[:B], v_conf[:B], a_logits[:B], a_conf[:B])
                 out2 = ((v_logits[B:], v_conf[B:], a_logits[B:], a_conf[B:])
                         if obs2 else None)
-                optimizer.zero_grad()
-                loss, parts = full_loss(out, out2, meta, weights, kl_normalize)
+                optimizer.zero_grad(set_to_none=True)
+                loss, diag = full_loss(out, out2, meta, weights, kl_normalize,
+                                       defer_diag=True)
                 loss.backward()
                 gnorm = torch.nn.utils.clip_grad_norm_(network.parameters(),
                                                        grad_clip)
+                # ONE host transfer per step, and it happens here rather than
+                # inside full_loss.  The diagnostics and the gradient norm are
+                # both wanted on the host, so they ride down together — and
+                # putting the single sync AFTER backward and clipping means the
+                # forward, the backward and the clip are all enqueued before the
+                # host stops to wait for any of them.  Downloading the
+                # diagnostics inside full_loss cost a second stall, at the worst
+                # possible point: before backward had been issued at all.
+                #
                 # A single non-finite step is unrecoverable: clip_grad_norm_
                 # turns a NaN norm into a NaN scale factor, AdamW writes NaN
                 # into every weight and every moment, and the run is dead while
                 # continuing to look alive.  Skipping the step instead costs one
-                # batch.  `parts['loss']` is already on the host (full_loss
-                # stacks the diagnostics into one transfer), so the only added
-                # sync is the grad norm.
-                ok = (math.isfinite(parts['loss'])
-                      and bool(torch.isfinite(gnorm)))
+                # batch.
+                host = torch.cat((diag.reshape(-1),
+                                  gnorm.detach().reshape(1))).to('cpu').tolist()
+                parts = diag_parts(host[:-1])
+                ok = math.isfinite(parts['loss']) and math.isfinite(host[-1])
                 if ok:
                     optimizer.step()
                 else:
@@ -1997,6 +2479,35 @@ if _HAS_TORCH:
                     denom = (v / bc2).sqrt_().add_(eps)
                     p.addcdiv_(m, denom, value=-lr / bc1)
             return loss
+
+    def build_optimizer(network, cfg, backend, log=print):
+        """AdamW, in the fastest form the backend supports.
+
+        This net is SMALL and WIDE in parameter-tensor count — a 32/3/8 trunk is
+        26 tensors of a few thousand elements each — and the step runs 4-8 times
+        per episode.  Which AdamW implementation is used therefore matters out of
+        all proportion to its FLOPs:
+
+          fused    one kernel for every parameter tensor at once.  CUDA only.
+          foreach  one kernel per OPERATION over a list of tensors (torch's
+                   default): ~10 launches instead of ~10 x 26.
+          LerpFreeAdamW  the hand-rolled fallback in this module, ~8 launches
+                   PER TENSOR, written because aten::lerp has no DirectML
+                   kernel.  Necessary there, pure overhead anywhere else.
+        """
+        if backend == 'directml':
+            return LerpFreeAdamW(network.parameters(), lr=cfg.lr_peak,
+                                 weight_decay=cfg.weight_decay)
+        kw = dict(lr=cfg.lr_peak, weight_decay=cfg.weight_decay)
+        if backend == 'cuda':
+            try:
+                opt = torch.optim.AdamW(network.parameters(), fused=True, **kw)
+                log('optimizer: fused AdamW')
+                return opt
+            except (RuntimeError, TypeError, ValueError) as e:
+                log(f'optimizer: fused AdamW unavailable ({type(e).__name__}) '
+                    f'— foreach AdamW')
+        return torch.optim.AdamW(network.parameters(), **kw)
 
     # ── Inference helpers ─────────────────────────────────────────────────────
     def nn_eval_states(network, device, states):
@@ -2315,6 +2826,14 @@ if _HAS_TORCH:
             self._stop = _threading.Event()
             self.window, self.max_batch_rows = batch_window_s, max_batch_rows
             self._gather_ok = _probe_gather(device)
+            self._bucketing = str(device).startswith('cuda')
+            # Wall time this thread spends inside the forward, against wall time
+            # the pool has been alive.  This is THE number that says whether the
+            # GPU is the bottleneck: every worker blocks on this one thread, so
+            # if the ratio is far below 1 the device is idling and a faster one
+            # buys nothing.  Reported at every eval line.
+            self.fwd_seconds = 0.0
+            self._t_start = time.perf_counter()
             self.last_aux = 0
             self.stats = {'games': 0, 'draw': 0, 'cutoff': 0, 'plies': 0}
             self.fwd_calls = self.fwd_rows = 0
@@ -2359,6 +2878,45 @@ if _HAS_TORCH:
         def curr_depth(self):
             return self._curr.value
 
+        @property
+        def server_busy(self):
+            """Fraction of wall time SINCE THE POOL STARTED that the inference
+            server thread spent inside a forward pass.
+
+            READ THIS BEFORE BUYING A GPU.  Every self-play worker blocks on this
+            one thread, so it is the only serial device resource in the run.  At
+            0.9 the device is the bottleneck and a faster one converts almost
+            one-for-one.  At 0.2 it is idle four seconds in five, the tree search
+            on the CPU cores is the constraint, and a faster device buys at most
+            the 20%.  The `train` share of the eval line is the other half of the
+            picture: training forwards contend for the same device but not for
+            this thread.
+
+            Note it includes time spent WAITING FOR `lock`, i.e. blocked behind a
+            training step.  That is deliberate — from a worker's point of view
+            the server is equally unavailable either way — but it does mean a
+            high reading is "the device is the constraint", not necessarily "the
+            forward itself is slow"."""
+            return self.busy_since(self._t_start, self.fwd_seconds)[0]
+
+        def busy_window(self, mark=None):
+            """(busy fraction, new mark) over the window since `mark`.
+
+            Both ends of the ratio are read from the SAME clock the server
+            increments, and in this order, so the fraction cannot exceed 1 the
+            way it can when the numerator and denominator are baselined from two
+            different places in the caller."""
+            now, spent = time.perf_counter(), self.fwd_seconds
+            if mark is None:
+                return 0.0, (now, spent)
+            el = now - mark[0]
+            return ((spent - mark[1]) / el if el > 0 else 0.0), (now, spent)
+
+        @staticmethod
+        def busy_since(t0, spent):
+            el = time.perf_counter() - t0
+            return (spent / el if el > 0 else 0.0), el
+
         def _get_net(self, net_id):
             if net_id == 'live':
                 return self.network, self.device, True
@@ -2378,20 +2936,77 @@ if _HAS_TORCH:
                 self._pool_nets[net_id] = net
             return net, 'cpu', False
 
+        # Batch sizes the server is willing to run.  A wave's row count depends
+        # on how many workers happened to arrive inside the batching window, so
+        # left alone it is a different number nearly every time — which defeats
+        # `cudnn.benchmark` (it re-searches per new shape) and rules out any
+        # form of graph capture.  Rounding UP to one of these trades a few
+        # wasted rows for a handful of shapes that repeat for the whole run.
+        # Geometric, so the waste is bounded at ~30%; the small sizes are dense
+        # because most waves are small.
+        _BUCKETS = (16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024)
+
+        def _bucket(self, xin):
+            """Pad a batch up to the next bucket, or leave it alone off CUDA.
+
+            Only CUDA benefits: the CPU and DirectML paths pay for the padded
+            rows without an algorithm cache to win it back."""
+            if not self._bucketing:
+                return xin
+            n = xin.shape[0]
+            for b in self._BUCKETS:
+                if b >= n:
+                    if b == n:
+                        return xin
+                    pad = np.zeros((b - n,) + xin.shape[1:], dtype=xin.dtype)
+                    return np.concatenate((xin, pad), axis=0)
+            return xin                        # above the largest bucket: as-is
+
         def _forward_gathered(self, net, dev, xin, flat):
-            x = torch.from_numpy(xin).to(dev)
+            """One forward, and ONE device->host transfer.
+
+            Every `.cpu()` on a CUDA tensor is a synchronisation point: the host
+            thread stops until the whole queued stream has drained.  Four of them
+            per forward meant four stalls, and this server thread is the single
+            resource every worker process is blocked on, so its stalls are the
+            pipeline's stalls.  The four results have three different shapes,
+            so they are flattened and concatenated into one buffer, moved once,
+            and split on the host — where splitting is free.
+
+            The gather stays on-device when the backend can do it (`_gather_ok`):
+            only the LEGAL action entries then cross the bus, which on Othello
+            is ~10 rows out of 65."""
+            n = xin.shape[0]
+            xin = self._bucket(xin)
+            x = torch.from_numpy(xin).to(dev, non_blocking=True)
             v_logits, v_conf_raw, a_logits, a_conf_raw = net(x)
+            if xin.shape[0] != n:            # drop the padding rows
+                v_logits, v_conf_raw = v_logits[:n], v_conf_raw[:n]
+                a_logits, a_conf_raw = a_logits[:n], a_conf_raw[:n]
             v3 = F.softmax(v_logits, dim=-1)
             vc = _conf(v_conf_raw)
             if self._gather_ok and str(dev) != 'cpu':
-                ft = torch.from_numpy(flat).to(dev)
-                p = F.softmax(a_logits.reshape(-1, 3).index_select(0, ft),
-                              dim=-1).cpu().numpy()
-                c = _conf(a_conf_raw.reshape(-1).index_select(0, ft)).cpu().numpy()
-            else:
-                p = F.softmax(a_logits.reshape(-1, 3), dim=-1).cpu().numpy()[flat]
-                c = _conf(a_conf_raw.reshape(-1)).cpu().numpy()[flat]
-            return v3.cpu().numpy(), vc.cpu().numpy(), p, c
+                ft = torch.from_numpy(flat).to(dev, non_blocking=True)
+                p = F.softmax(a_logits.reshape(-1, 3).index_select(0, ft), dim=-1)
+                c = _conf(a_conf_raw.reshape(-1).index_select(0, ft))
+                packed = torch.cat((v3.reshape(-1), vc.reshape(-1),
+                                    p.reshape(-1), c.reshape(-1))).to('cpu')
+                k = flat.shape[0]
+                out = packed.numpy()
+                return (out[:3 * n].reshape(n, 3), out[3 * n:4 * n],
+                        out[4 * n:4 * n + 3 * k].reshape(k, 3),
+                        out[4 * n + 3 * k:])
+            # CPU (or a backend without index_select): gather on the host, which
+            # means shipping all A actions back, so there is nothing to fuse.
+            p_all = F.softmax(a_logits.reshape(-1, 3), dim=-1)
+            c_all = _conf(a_conf_raw.reshape(-1))
+            packed = torch.cat((v3.reshape(-1), vc.reshape(-1),
+                                p_all.reshape(-1), c_all.reshape(-1))).to('cpu')
+            m = c_all.shape[0]
+            out = packed.numpy()
+            return (out[:3 * n].reshape(n, 3), out[3 * n:4 * n],
+                    out[4 * n:4 * n + 3 * m].reshape(m, 3)[flat],
+                    out[4 * n + 3 * m:][flat])
 
         def _serve(self):
             A = _NUM_ACTIONS
@@ -2424,8 +3039,10 @@ if _HAS_TORCH:
                     np.cumsum([len(l) for l in row_legals], out=offs[1:])
                     import contextlib
                     ctxm = self.lock if needs_lock else contextlib.nullcontext()
+                    _t = time.perf_counter()
                     with ctxm, torch.no_grad():
                         v3, vc, p, c = self._forward_gathered(net, dev, xin, flat)
+                    self.fwd_seconds += time.perf_counter() - _t
                     tqs = self.resp_qs if net_id == 'live' else self.pool_resp_qs
                     ri = 0
                     for wid, o, ls in group:
@@ -2753,7 +3370,8 @@ if _HAS_TORCH:
             curriculum=cfg.curriculum, curr_depth0=cfg.curr_depth0,
             curr_mcts_tail=cfg.curr_mcts_tail,
             search_agg=cfg.search_agg, target_agg=cfg.target_agg,
-            selection=cfg.selection, virtual_loss=cfg.virtual_loss)
+            selection=cfg.selection, virtual_loss=cfg.virtual_loss,
+            mle_solver=cfg.mle_solver)
 
     def build_network(cfg, device):
         sig = (cfg.channels, cfg.num_blocks, cfg.head_ch)
@@ -2791,6 +3409,8 @@ if _HAS_TORCH:
         set_search(cfg.search_agg, cfg.target_agg, cfg.selection,
                    cfg.virtual_loss)
         set_backend(backend, device)
+        configure_cuda(device, log=log)
+        set_mle_solver(cfg.mle_solver)
         random.seed(cfg.seed); np.random.seed(cfg.seed)
         torch.manual_seed(cfg.seed)
 
@@ -2807,8 +3427,7 @@ if _HAS_TORCH:
                 except Exception as e:
                     log(f'torch.compile: disabled ({type(e).__name__}) — eager')
 
-        optimizer = (LerpFreeAdamW if backend == 'directml' else torch.optim.AdamW)(
-            network.parameters(), lr=cfg.lr_peak, weight_decay=cfg.weight_decay)
+        optimizer = build_optimizer(network, cfg, backend, log=log)
 
         def _lr(ep):
             if ep < cfg.lr_warmup_eps:
@@ -2920,6 +3539,8 @@ if _HAS_TORCH:
         # first fills) — misleading exactly when you want to spot a real slowdown.
         bar_mark = (time.perf_counter(), self_play.stats['games']); inst_gs = 0.0
         prev_fwd = (self_play.fwd_calls, self_play.fwd_rows)
+        srv_mark = (self_play.busy_window()[1]
+                    if hasattr(self_play, 'busy_window') else None)
         with_cons = cfg.loss_weights[4] > 0.0
         step_fails = 0
         step_rng = np.random.default_rng(cfg.seed + 991)
@@ -3029,12 +3650,24 @@ if _HAS_TORCH:
                 #   wait(sp) high → self-play is the bottleneck
                 #   train high    → training steps dominate the GPU
                 #   NNbatch small → GPU underfed: raise games_per_worker/workers
+                #   srv           → fraction of the window the inference-server
+                #                   thread was inside a forward.  This is the
+                #                   one to read before blaming (or replacing)
+                #                   the GPU: every worker blocks on that thread,
+                #                   so a low number means the device is idle and
+                #                   the CPU trees are the constraint.  See
+                #                   MPSelfPlayPool.server_busy.
                 wall = max(time.perf_counter() - win_t0, 1e-9)
                 dg2 = self_play.stats['games'] - win_games
                 dfc = self_play.fwd_calls - prev_fwd[0]
                 dfr = self_play.fwd_rows - prev_fwd[1]
+                if hasattr(self_play, 'busy_window'):
+                    busy, srv_mark = self_play.busy_window(srv_mark)
+                    srv = f'srv {100 * busy:.0f}% '
+                else:
+                    srv = ''            # single-process: no separate server
                 perf = (f'{dg2 / wall:.2f} games/s | wait(sp) {100 * t_sp / wall:.0f}% '
-                        f'train {100 * t_tr / wall:.0f}% '
+                        f'train {100 * t_tr / wall:.0f}% {srv}'
                         f'| NNbatch {dfr / max(dfc, 1):.0f} '
                         f'({dfc / wall:.0f} fwd/s)')
                 t_sp = t_tr = 0.0; win_t0 = time.perf_counter()

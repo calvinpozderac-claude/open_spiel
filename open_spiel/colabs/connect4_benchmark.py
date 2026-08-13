@@ -181,6 +181,7 @@ def thompson_config(name, shared):
         head_ch=shared['head_ch'], seed=shared['seed'],
         device_preference=shared['device'],
         search_agg=sagg, target_agg=tagg, kl_normalize=False,
+        mle_solver=shared['mle_solver'],
         cons_frac=shared['cons_frac'],
         selection='dirichlet',
         fast_sims=shared['fast_sims'], full_sims=shared['full_sims'],
@@ -261,6 +262,14 @@ def default_shared(**over):
         # parameters instead; see its docstring for the trade-off.
         az_channels=None, az_num_blocks=None, az_head_ch=None,
         num_episodes=2000, seed=0, device='auto',
+        # Solver for the additive_mle evidence rule, so it applies to the MA, AM
+        # and MM arms and is inert for the rest.  'newton' is the bounded,
+        # converged fit; 'legacy' reproduces the unconverged twelve-step fixed
+        # point that arms trained before it ran under.  They are NOT the same
+        # search statistic — see connect4_dirichlet_utils.set_mle_solver — so an
+        # arm trained under one cannot be rated against an arm trained under the
+        # other without confounding the solver with the rule.
+        mle_solver='newton',
         max_plies=42, eval_max_plies=42,
         channels=32, num_blocks=3, head_ch=8,
         fast_sims=50, full_sims=150, fast_prob=0.75, temp_threshold=12,

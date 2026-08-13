@@ -99,6 +99,120 @@ def test_identical_observations():
                   close(c4.dir_mean(got), c4.dir_mean(a), 1e-9))
 
 
+def test_mle_solver():
+    print('\nadditive_mle solver: bounded, converged, and warm-started')
+
+    def gradnorm(g, A):
+        """|d/dalpha of the per-observation log-likelihood| at A.  Zero at the
+        MLE, so this scores a solve without needing a reference answer."""
+        c = c4._digamma(sum(A))
+        return max(abs(c - c4._digamma(a) + gi) for a, gi in zip(A, g))
+
+    rng = np.random.default_rng(11)
+    stats = []
+    for _ in range(400):
+        n = int(rng.integers(3, 400))
+        m = np.maximum(rng.dirichlet(np.full(3, 10 ** rng.uniform(-1, 2.5)),
+                                     size=n), 1e-9)
+        stats.append((n, tuple(np.log(m).sum(0) / n)))
+
+    # Newton finds the stationary point the fixed point only creeps toward.
+    # Uncapped on both sides, so this compares SOLVERS, not bounds.
+    nw = [gradnorm(g, c4._mle_newton(*g, 1., 1., 1., steps=24, tol=1e-9))
+          for _, g in stats]
+    fp = [gradnorm(g, c4._mle_fixed_point(*g, 1., 1., 1., steps=12, tol=0.0))
+          for _, g in stats]
+    check('newton reaches the MLE where 12 fixed-point steps do not',
+          np.median(nw) < 1e-8 < np.median(fp),
+          f'median |grad| newton {np.median(nw):.1e} vs fixed point '
+          f'{np.median(fp):.1e}')
+    check('...and it is not a tail effect: every case improves',
+          all(a <= b + 1e-12 for a, b in zip(nw, fp)),
+          f'{sum(a > b for a, b in zip(nw, fp))} of {len(nw)} worse')
+
+    # When the cap binds, the answer must be the BEST point on that boundary,
+    # not merely a point on it.  Score candidates by the per-observation
+    # log-likelihood the solver is maximising,
+    #     l(alpha) = lnG(a0) - sum lnG(a_j) + sum (a_j - 1) gbar_j.
+    import math
+
+    def loglik(g, A):
+        return (math.lgamma(sum(A)) - sum(math.lgamma(a) for a in A)
+                + sum((a - 1.0) * gi for a, gi in zip(A, g)))
+
+    g = (-0.02, -4.0, -4.0)                       # leaves that agree closely
+    a = c4._mle_newton(*g, 1., 1., 1., steps=24, tol=1e-9, cap=25.0)
+    check('the cap binds exactly at the bound', abs(sum(a) - 25.0) < 1e-9,
+          f'{sum(a)}')
+    best, rival = loglik(g, a), -float('inf')
+    for t in np.linspace(0.001, 0.999, 400):      # sweep the boundary simplex
+        for u in np.linspace(0.0005, 1 - t - 0.0005, 60):
+            if u <= 0:
+                continue
+            rival = max(rival, loglik(g, (25.0 * t, 25.0 * u,
+                                          25.0 * (1 - t - u))))
+    check('...and it is the maximum-likelihood point ON that boundary',
+          best >= rival - 1e-6, f'{best:.6f} vs best swept {rival:.6f}')
+    free = c4._mle_newton(*g, 1., 1., 1., steps=24, tol=1e-9, cap=1e12)
+    check('the bound is what stops it: uncapped it runs far past',
+          sum(free) > 100 * 25.0, f'uncapped a0={sum(free):.3g}')
+
+    # Perfectly agreeing observations: the unconstrained MLE is +infinity, and
+    # Minka's Sherman-Morrison denominator cancels to exactly zero there.  This
+    # is the case that used to raise ZeroDivisionError.
+    same = [np.array([0.6, 0.1, 0.3]) * 20.0] * 40
+    got = c4.observed_alpha(mle_acc_of(same), c4.AGG_ADDITIVE_MLE)
+    check('perfect agreement stays finite instead of diverging',
+          bool(np.all(np.isfinite(got))) and got.sum() <= 40.0 + 1e-6,
+          f'a0={got.sum()}')
+
+    # alpha0 <= n is the rule `observed_alpha` documents ("min(n, dispersion)").
+    worst, rng2 = 0.0, np.random.default_rng(12)
+    for _ in range(60):
+        n = int(rng2.integers(3, 120))
+        xs = rng2.dirichlet(np.full(3, 10 ** rng2.uniform(-1, 2.0)), size=n)
+        worst = max(worst,
+                    c4.observed_alpha(mle_acc_of(xs),
+                                      c4.AGG_ADDITIVE_MLE).sum() / n)
+    check('alpha0 never exceeds the observation count', worst <= 1.0 + 1e-9,
+          f'worst alpha0/n = {worst:.4f}')
+
+    # The cold start is an optimisation, so it must not move the answer.
+    c4.set_search(search_agg=c4.AGG_ADDITIVE_MLE, target_agg=c4.AGG_ADDITIVE_MLE)
+    worst = 0.0
+    for n, g in stats[:80]:
+        cap = float(n)
+        mm = c4._mle_newton(*g, 1., 1., 1., steps=64, tol=1e-12, cap=cap)
+        # from a deliberately bad start
+        bad = c4._mle_newton(*g, 0.05, 40.0, 3.0, steps=64, tol=1e-12, cap=cap)
+        worst = max(worst, max(abs(x - y) / max(y, 1e-12)
+                               for x, y in zip(bad, mm)))
+    check('converges to the same fit from any start', worst < 1e-5,
+          f'max rel spread {worst:.2e}')
+
+    # 'legacy' really is the old behaviour, and really is different.
+    try:
+        c4.set_mle_solver('legacy')
+        old = c4.observed_alpha(mle_acc_of(same), c4.AGG_ADDITIVE_MLE).sum()
+        check('legacy reproduces the unbounded fixed point (alpha0 >> n)',
+              old > 40.0, f'a0={old} at n=40')
+    finally:
+        c4.set_mle_solver('newton')
+    check('set_mle_solver restores the default', c4._MLE_SOLVER is c4._mle_newton)
+    try:
+        c4.set_mle_solver('nope')
+        check('an unknown solver name is rejected', False, 'no raise')
+    except ValueError:
+        check('an unknown solver name is rejected', True)
+    c4.set_search(search_agg=c4.AGG_MIXTURE, target_agg=c4.AGG_MIXTURE)
+
+
+def mle_acc_of(xs):
+    """acc_of, with an additive_mle rule selected so the log-sums are kept."""
+    c4.set_search(search_agg=c4.AGG_ADDITIVE_MLE, target_agg=c4.AGG_ADDITIVE_MLE)
+    return acc_of([np.asarray(x, float) for x in xs])
+
+
 def test_mixture_against_monte_carlo():
     print('\nMixture collapse vs Monte Carlo (disagreeing observations)')
     alphas = [np.array([8.0, 1.0, 1.0]), np.array([1.0, 1.0, 8.0]),
@@ -1140,6 +1254,7 @@ def main():
     test_identical_observations()
     test_additive_rule()
     test_additive_mle()
+    test_mle_solver()
     test_mixture_against_monte_carlo()
     test_mean_against_monte_carlo()
     test_incremental_equals_batch()
