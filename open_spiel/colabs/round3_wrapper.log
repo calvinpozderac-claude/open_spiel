@@ -1,2 +1,5 @@
 [2026-08-13 08:09:02] WRAPPER: wrapper started (pid 37236)
 [2026-08-13 08:09:02] WRAPPER: launching round3 process
+[2026-08-13 19:21:27] WRAPPER: process exited with code 0 -- re-checking after a pause
+[2026-08-13 19:21:32] WRAPPER: sentinel found -- round 3 complete, exiting wrapper
+[2026-08-13 19:21:32] WRAPPER: wrapper done

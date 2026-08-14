@@ -1,0 +1,120 @@
+
+==============================================================================
+mm2000: 5000 positions from 335 games
+==============================================================================
+solved-early positions: 13.3%
+
+--- label distributions ---
+     patience: mean=   304 median=  250 p10=  200 p90=  550 at cap  0.0%  sd(log)=0.568
+   action_eps: mean=   406 median=  300 p10=   50 p90=  950 at cap  7.4%  sd(log)=1.216
+     decision: mean=   253 median=   50 p10=   50 p90=  800 at cap  1.9%  sd(log)=1.121
+  eps sweep for action_eps:
+    eps=0.002  mean=   693 median=  850 at cap 27.1%
+    eps=0.005  mean=   529 median=  550 at cap 15.8%
+    eps=0.01   mean=   406 median=  300 at cap  7.4%
+    eps=0.02   mean=   281 median=  100 at cap  1.8%
+    eps=0.05   mean=   141 median=   50 at cap  0.1%
+  patience vs action_eps: under 44% / over 41% / equal 15%   mean gap +102 sims
+
+--- label noise ceiling (2000 positions re-searched with different search RNG) ---
+     patience: reliability corr=+0.920  1-Var(noise)/Var(y)=+0.920  => max attainable r2 ~ 0.92   (exact agreement 72%)
+   action_eps: reliability corr=+0.954  1-Var(noise)/Var(y)=+0.954  => max attainable r2 ~ 0.95   (exact agreement 49%)
+     decision: reliability corr=+0.618  1-Var(noise)/Var(y)=+0.618  => max attainable r2 ~ 0.62   (exact agreement 47%)
+
+split by game: train 3488 / val 752 / test 760
+
+--- target: patience, log sims   [ceiling r2 ~ 0.92] ---
+model                     train r2   TEST r2
+linear(3 scalars)            0.106     0.154   coef=[5.071, 3.168, 0.059, 0.026]
+MLP(3 scalars)               0.485     0.535
+conv(board)                  0.819     0.757
+conv(board)+scalars          0.810     0.749
+  by game phase (stones on board):
+    20-30 n=44    mean=   318  sd(log)=1.025  linear r2=+0.124
+    30-40 n=98    mean=   365  sd(log)=0.840  linear r2=+0.178
+    40-50 n=304   mean=   333  sd(log)=0.557  linear r2=+0.097
+    50-65 n=307   mean=   254  sd(log)=0.192  linear r2=-0.090
+
+--- target: action_eps, log sims   [ceiling r2 ~ 0.95] ---
+model                     train r2   TEST r2
+linear(3 scalars)            0.235     0.238   coef=[5.469, 5.242, -0.301, 0.122]
+MLP(3 scalars)               0.759     0.721
+conv(board)                  0.822     0.778
+conv(board)+scalars          0.841     0.778
+  by game phase (stones on board):
+    20-30 n=44    mean=   381  sd(log)=1.145  linear r2=-0.197
+    30-40 n=98    mean=   608  sd(log)=1.060  linear r2=-0.210
+    40-50 n=304   mean=   624  sd(log)=0.879  linear r2=-0.306
+    50-65 n=307   mean=   151  sd(log)=0.897  linear r2=-0.412
+
+--- target: decision, log sims   [ceiling r2 ~ 0.62] ---
+model                     train r2   TEST r2
+linear(3 scalars)            0.017     0.015   coef=[4.608, -1.004, 0.01, 0.032]
+MLP(3 scalars)               0.111     0.100
+conv(board)                  0.141     0.051
+conv(board)+scalars          0.195     0.059
+  by game phase (stones on board):
+    20-30 n=44    mean=   256  sd(log)=1.134  linear r2=+0.030
+    30-40 n=98    mean=   238  sd(log)=1.093  linear r2=+0.036
+    40-50 n=304   mean=   229  sd(log)=1.069  linear r2=+0.013
+    50-65 n=307   mean=   301  sd(log)=1.165  linear r2=-0.027
+
+==============================================================================
+conf5000: 5000 positions from 335 games
+==============================================================================
+solved-early positions: 13.1%
+
+--- label distributions ---
+     patience: mean=   315 median=  250 p10=  200 p90=  550 at cap  0.0%  sd(log)=0.576
+   action_eps: mean=   628 median=  750 p10=   50 p90= 1000 at cap 23.4%  sd(log)=1.031
+     decision: mean=   240 median=   50 p10=   50 p90=  750 at cap  1.4%  sd(log)=1.091
+  eps sweep for action_eps:
+    eps=0.002  mean=   819 median=  950 at cap 48.2%
+    eps=0.005  mean=   735 median=  950 at cap 36.7%
+    eps=0.01   mean=   628 median=  750 at cap 23.4%
+    eps=0.02   mean=   473 median=  450 at cap  9.5%
+    eps=0.05   mean=   253 median=  150 at cap  0.4%
+  patience vs action_eps: under 71% / over 16% / equal 13%   mean gap +312 sims
+
+--- label noise ceiling (2000 positions re-searched with different search RNG) ---
+     patience: reliability corr=+0.862  1-Var(noise)/Var(y)=+0.862  => max attainable r2 ~ 0.86   (exact agreement 52%)
+   action_eps: reliability corr=+0.954  1-Var(noise)/Var(y)=+0.954  => max attainable r2 ~ 0.95   (exact agreement 42%)
+     decision: reliability corr=+0.576  1-Var(noise)/Var(y)=+0.576  => max attainable r2 ~ 0.58   (exact agreement 46%)
+
+split by game: train 3488 / val 750 / test 762
+
+--- target: patience, log sims   [ceiling r2 ~ 0.86] ---
+model                     train r2   TEST r2
+linear(3 scalars)            0.164     0.201   coef=[5.17, 1.036, -0.019, 0.059]
+MLP(3 scalars)               0.472     0.545
+conv(board)                  0.720     0.673
+conv(board)+scalars          0.727     0.685
+  by game phase (stones on board):
+    20-30 n=44    mean=   286  sd(log)=0.955  linear r2=+0.182
+    30-40 n=134   mean=   362  sd(log)=0.778  linear r2=+0.208
+    40-50 n=271   mean=   355  sd(log)=0.541  linear r2=+0.167
+    50-65 n=303   mean=   278  sd(log)=0.229  linear r2=-0.455
+
+--- target: action_eps, log sims   [ceiling r2 ~ 0.95] ---
+model                     train r2   TEST r2
+linear(3 scalars)            0.522     0.545   coef=[5.004, 0.957, -0.148, 0.196]
+MLP(3 scalars)               0.765     0.770
+conv(board)                  0.893     0.796
+conv(board)+scalars          0.898     0.836
+  by game phase (stones on board):
+    20-30 n=44    mean=   389  sd(log)=1.225  linear r2=+0.420
+    30-40 n=134   mean=   652  sd(log)=1.077  linear r2=+0.544
+    40-50 n=271   mean=   821  sd(log)=0.705  linear r2=+0.333
+    50-65 n=303   mean=   519  sd(log)=1.006  linear r2=+0.482
+
+--- target: decision, log sims   [ceiling r2 ~ 0.58] ---
+model                     train r2   TEST r2
+linear(3 scalars)            0.074     0.080   coef=[4.51, -2.122, -0.044, 0.073]
+MLP(3 scalars)               0.150     0.135
+conv(board)                  0.100     0.059
+conv(board)+scalars          0.124     0.083
+  by game phase (stones on board):
+    20-30 n=44    mean=   219  sd(log)=1.063  linear r2=+0.056
+    30-40 n=134   mean=   218  sd(log)=1.000  linear r2=+0.128
+    40-50 n=271   mean=   263  sd(log)=1.116  linear r2=+0.017
+    50-65 n=303   mean=   256  sd(log)=1.138  linear r2=+0.107
