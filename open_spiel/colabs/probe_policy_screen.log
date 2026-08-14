@@ -1,0 +1,10 @@
+net=othello_benchmark/bench_R2conf@5000  sims=64  games=600 per candidate
+score is the CANDIDATE's, vs the incumbent policy (k=0, temp=1)
+  risk k=+1.0       40.1%  [36.2%, 44.1%]  n=600  320s   <-- separated from 50%
+  risk k=+0.5       49.2%  [45.3%, 53.2%]  n=600  305s
+  risk k=-0.5       53.1%  [49.1%, 57.0%]  n=600  298s
+  risk k=-1.0       56.1%  [52.1%, 60.0%]  n=600  303s   <-- separated from 50%
+  seltemp 2         52.4%  [48.4%, 56.4%]  n=600  300s
+  seltemp 4         54.8%  [50.8%, 58.8%]  n=600  302s   <-- separated from 50%
+  seltemp 0.5       45.8%  [41.9%, 49.8%]  n=600  300s   <-- separated from 50%
+  null (k=0)        47.4%  [43.5%, 51.4%]  n=600  298s

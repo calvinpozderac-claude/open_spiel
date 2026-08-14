@@ -1,0 +1,6 @@
+net=othello_benchmark/bench_R2conf@5000  sims=64  games=600 per candidate
+score is the CANDIDATE's, vs the incumbent value-argmax pick
+  visits             3.7%  [2.4%, 5.5%]  n=600  310s   <-- separated from 50%
+  visits+value      24.2%  [21.0%, 27.8%]  n=600  300s   <-- separated from 50%
+  evidence only     49.8%  [45.8%, 53.8%]  n=600  300s
+  null              47.4%  [43.5%, 51.4%]  n=600  300s
