@@ -1,0 +1,76 @@
+
+================================================================================
+mm2000: does the cheap win beat the incumbents on MOVE AGREEMENT?
+  2000 positions, out-of-fold predictions, scored on an independent run
+================================================================================
+                                     mean 100   mean 150   mean 300
+  fixed                                69.2%      73.1%      80.5% 
+  conf                                 69.8%      74.7%      81.0% 
+  predictor                            71.3%      75.1%      80.5% 
+  -- fitted against the patience label --
+  mlp(phase only) [oof r2=+0.10]       71.7%      75.0%      80.9% 
+  linear(3+phase) [oof r2=+0.11]       71.0%      74.5%      81.3% 
+  mlp(3+phase) [oof r2=+0.56]          71.8%      75.0%      80.8% 
+  -- fitted against the action_eps label --
+  mlp(phase only) [oof r2=+0.45]       70.9%      74.7%      80.3% 
+  linear(3+phase) [oof r2=+0.30]       70.5%      74.3%      81.8% 
+  mlp(3+phase) [oof r2=+0.74]          70.8%      73.7%      79.3% 
+  -- fitted against the decision label --
+  mlp(phase only) [oof r2=+0.01]       69.7%      73.8%      80.9% 
+  linear(3+phase) [oof r2=+0.01]       71.1%      74.5%      80.6% 
+  mlp(3+phase) [oof r2=+0.09]          71.4%      75.1%      81.2% 
+  oracle cross-run (ceiling)           71.7%      74.4%      80.8% 
+  (fixed baseline again)               69.2%      73.1%      80.5% 
+
+  paired difference vs predictor (same positions; +/- 1 SE, n=2000):
+    fixed                            -2.10%+-0.50%*   -2.00%+-0.53%*   -0.05%+-0.57% 
+    conf                             -1.55%+-0.72%*   -0.40%+-0.61%    +0.45%+-0.59% 
+    mlp(phase only) [oof r2=+0.10]   +0.35%+-0.58%    -0.15%+-0.59%    +0.40%+-0.61% 
+    linear(3+phase) [oof r2=+0.11]   -0.25%+-0.71%    -0.60%+-0.65%    +0.80%+-0.65% 
+    mlp(3+phase) [oof r2=+0.56]      +0.45%+-0.54%    -0.10%+-0.58%    +0.25%+-0.62% 
+    mlp(phase only) [oof r2=+0.45]   -0.45%+-0.79%    -0.40%+-0.82%    -0.20%+-0.82% 
+    linear(3+phase) [oof r2=+0.30]   -0.75%+-0.70%    -0.80%+-0.75%    +1.30%+-0.76% 
+    mlp(3+phase) [oof r2=+0.74]      -0.50%+-0.85%    -1.45%+-0.85%    -1.15%+-0.85% 
+    mlp(phase only) [oof r2=+0.01]   -1.65%+-0.62%*   -1.30%+-0.66%    +0.40%+-0.67% 
+    linear(3+phase) [oof r2=+0.01]   -0.20%+-0.75%    -0.60%+-0.73%    +0.10%+-0.70% 
+    mlp(3+phase) [oof r2=+0.09]      +0.10%+-0.67%    +0.00%+-0.69%    +0.65%+-0.67% 
+    oracle cross-run (ceiling)       +0.35%+-0.92%    -0.70%+-0.98%    +0.30%+-0.95% 
+    (* = differs from predictor by more than 2 SE)
+
+================================================================================
+conf5000: does the cheap win beat the incumbents on MOVE AGREEMENT?
+  2000 positions, out-of-fold predictions, scored on an independent run
+================================================================================
+                                     mean 100   mean 150   mean 300
+  fixed                                67.6%      73.0%      81.6% 
+  conf                                 69.5%      73.0%      81.2% 
+  predictor                            70.5%      74.6%      81.7% 
+  -- fitted against the patience label --
+  mlp(phase only) [oof r2=+0.08]       70.5%      74.7%      81.2% 
+  linear(3+phase) [oof r2=+0.19]       69.3%      75.1%      81.2% 
+  mlp(3+phase) [oof r2=+0.50]          69.8%      74.4%      82.1% 
+  -- fitted against the action_eps label --
+  mlp(phase only) [oof r2=+0.39]       71.2%      75.4%      80.9% 
+  linear(3+phase) [oof r2=+0.52]       70.5%      72.2%      80.9% 
+  mlp(3+phase) [oof r2=+0.76]          71.0%      74.7%      81.5% 
+  -- fitted against the decision label --
+  mlp(phase only) [oof r2=+0.04]       70.3%      74.8%      81.3% 
+  linear(3+phase) [oof r2=+0.08]       70.0%      75.0%      81.3% 
+  mlp(3+phase) [oof r2=+0.13]          71.9%      74.9%      82.0% 
+  oracle cross-run (ceiling)           72.5%      76.0%      81.8% 
+  (fixed baseline again)               67.6%      73.0%      81.6% 
+
+  paired difference vs predictor (same positions; +/- 1 SE, n=2000):
+    fixed                            -2.90%+-0.49%*   -1.50%+-0.60%*   -0.05%+-0.62% 
+    conf                             -1.05%+-0.73%    -1.55%+-0.67%*   -0.50%+-0.52% 
+    mlp(phase only) [oof r2=+0.08]   +0.00%+-0.67%    +0.10%+-0.67%    -0.40%+-0.66% 
+    linear(3+phase) [oof r2=+0.19]   -1.20%+-0.70%    +0.55%+-0.72%    -0.40%+-0.67% 
+    mlp(3+phase) [oof r2=+0.50]      -0.65%+-0.56%    -0.15%+-0.63%    +0.45%+-0.64% 
+    mlp(phase only) [oof r2=+0.39]   +0.65%+-0.72%    +0.90%+-0.79%    -0.75%+-0.71% 
+    linear(3+phase) [oof r2=+0.52]   +0.05%+-0.80%    -2.30%+-0.87%*   -0.75%+-0.76% 
+    mlp(3+phase) [oof r2=+0.76]      +0.55%+-0.76%    +0.15%+-0.82%    -0.10%+-0.78% 
+    mlp(phase only) [oof r2=+0.04]   -0.20%+-0.74%    +0.25%+-0.77%    -0.30%+-0.70% 
+    linear(3+phase) [oof r2=+0.08]   -0.55%+-0.70%    +0.50%+-0.75%    -0.30%+-0.69% 
+    mlp(3+phase) [oof r2=+0.13]      +1.40%+-0.71%    +0.35%+-0.80%    +0.40%+-0.72% 
+    oracle cross-run (ceiling)       +2.00%+-0.89%*   +1.45%+-0.94%    +0.15%+-0.96% 
+    (* = differs from predictor by more than 2 SE)
