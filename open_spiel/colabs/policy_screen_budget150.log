@@ -1,0 +1,6 @@
+preset=budget  net=othello_benchmark/bench_R2conf@5000  FIXED sims=150  games=400/candidate
+score is the CANDIDATE's, vs the incumbent (value argmax, k=0, temp=1)
+  seltemp 1e4       76.4%  [72.0%, 80.3%]  n=400  546s   <-- separated from 50%
+  k=-2 temp=1e4     73.0%  [68.4%, 77.1%]  n=400  536s   <-- separated from 50%
+  seltemp 8         60.8%  [55.9%, 65.4%]  n=400  508s   <-- separated from 50%
+  null              52.1%  [47.2%, 57.0%]  n=400  504s

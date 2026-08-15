@@ -1,0 +1,48 @@
+    1/15  coupled 38.0-2.0 random  (63s)
+    2/15  coupled 16.5-23.5 dtinf  (112s)
+    3/15  coupled 25.5-14.5 bench_MM  (113s)
+    4/15  coupled 13.5-26.5 dt16  (113s)
+    5/15  coupled 21.5-18.5 dt4  (115s)
+    6/15  dt4 39.0-1.0 random  (163s)
+    7/15  dt4 12.0-28.0 dt16  (171s)
+    8/15  dt4 20.0-20.0 bench_MM  (217s)
+    9/15  dt4 19.0-21.0 dtinf  (217s)
+    10/15  dt16 28.5-11.5 dtinf  (218s)
+    11/15  dt16 39.0-1.0 random  (225s)
+    12/15  dt16 34.0-6.0 bench_MM  (266s)
+    13/15  bench_MM 38.0-2.0 random  (267s)
+    14/15  dtinf 37.0-3.0 random  (272s)
+    15/15  dtinf 30.5-9.5 bench_MM  (317s)
+
+=== Bradley-Terry @ 2000 eps, fixed 64 sims, inference descent temp 1 (random=0) ===
+  dt16         +687.3   W 156.0 L  44.0
+  dtinf        +564.5   W 123.5 L  76.5
+  coupled      +534.3   W 115.0 L  85.0
+  dt4          +511.3   W 108.5 L  91.5
+  bench_MM     +437.2   W  88.0 L 112.0
+  random         +0.0   W   9.0 L 191.0
+    1/15  coupled 40.0-0.0 random  (71s)
+    2/15  coupled 11.0-29.0 dt4  (118s)
+    3/15  coupled 12.0-28.0 dtinf  (120s)
+    4/15  coupled 16.5-23.5 dt16  (120s)
+    5/15  coupled 29.0-11.0 bench_MM  (121s)
+    6/15  dt4 40.0-0.0 random  (171s)
+    7/15  dt4 9.5-30.5 dt16  (175s)
+    8/15  dt4 18.5-21.5 dtinf  (218s)
+    9/15  dt4 28.0-12.0 bench_MM  (222s)
+    10/15  dt16 24.5-15.5 dtinf  (222s)
+    11/15  dt16 39.0-1.0 random  (228s)
+    12/15  bench_MM 38.0-2.0 random  (271s)
+    13/15  dt16 33.0-7.0 bench_MM  (274s)
+    14/15  dtinf 40.0-0.0 random  (277s)
+    15/15  dtinf 34.5-5.5 bench_MM  (319s)
+
+=== Bradley-Terry @ 2000 eps, fixed 64 sims, inference descent temp 10000 (random=0) ===
+  dt16         +882.2   W 150.5 L  49.5
+  dtinf        +838.6   W 139.5 L  60.5
+  dt4          +783.5   W 125.0 L  75.0
+  coupled      +721.5   W 108.5 L  91.5
+  bench_MM     +578.7   W  73.5 L 126.5
+  random         +0.0   W   3.0 L 197.0
+
+wrote temp_arm_tournament.json

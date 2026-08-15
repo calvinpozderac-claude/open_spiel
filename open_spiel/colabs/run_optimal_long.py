@@ -1,20 +1,38 @@
 """Long run under the best configuration found so far.
 
 Previous best (the round-3 tournament winner, `conf`) plus the one change the
-policy screens turned up, so anything that moves is attributable to that
-change:
+screens and the 2000-episode sweep turned up, so anything that moves is
+attributable to that change:
 
-  descent_temp = 1e4    Take the sampling out of in-tree descent.  _temp() used
-                        to drive BOTH the root Thompson pick and every
-                        _select_leaf below it, so self-play exploration and
-                        descent noise were the same knob.  They should not be:
-                        the root pick is where self-play diversity has to come
-                        from, while noise in the DESCENT only adds variance to
-                        the estimate search returns.  Splitting them and making
-                        descent deterministic scored 74.5% against the coupled
-                        default in self-play at a fixed 64 sims (about +186
-                        Elo).  Root exploration is untouched -- temp_threshold
-                        30 / late_temp 8.0 as before.
+  descent_temp = 16     Sharpen in-tree descent, but do NOT make it
+                        deterministic.  _temp() used to drive BOTH the root
+                        Thompson pick and every _select_leaf below it, so
+                        self-play exploration and descent noise were the same
+                        knob.  They should not be: the root pick is where
+                        self-play diversity has to come from, while noise in
+                        the DESCENT only adds variance to the estimate search
+                        returns.
+
+                        The two temperatures want different values, which is
+                        why this is 16 and not 1e4:
+
+                          inference  monotone to deterministic -- 1e4 scores
+                                     76.4% against the coupled default at 150
+                                     sims (~+204 Elo).  othello_ladder plays
+                                     at 1e4 for exactly this reason.
+                          training   PEAKS at 16 and declines after.  Over
+                                     2000-episode arms compared at a fixed
+                                     budget, dt16 beat the coupled baseline by
+                                     +153/+161 Elo under inference temp 1/1e4,
+                                     while deterministic training managed only
+                                     +30/+117 -- taking the sampling out
+                                     entirely costs the exploration.
+
+                        Cost matters too: dt16 trained in 5991s against the
+                        baseline's 4895s (+22%), whereas dtinf needed 9770s
+                        (+100%) for a smaller gain.
+
+Root exploration is untouched -- temp_threshold 30 / late_temp 8.0 as before.
 
 Everything else is round 3's configuration verbatim, including the `conf`
 allocation rule at its round-2 calibrated scale.  Allocation is kept not
@@ -37,7 +55,7 @@ NUM_EPISODES = 20000
 ROOT = 'othello_benchmark'
 CKPT = 'bench_OPT'
 LOG_PATH = os.path.join(os.path.dirname(__file__), 'optimal_long.log')
-DESCENT_TEMP = 1e4
+DESCENT_TEMP = 16.0
 
 
 def _log(msg):
@@ -67,7 +85,7 @@ def make_cfg(rule_cfg):
                         if rule_cfg.get('predictor_coef') else None),
         decision_margin=rule_cfg.get('decision_margin'),
         hybrid_margin_scale=rule_cfg.get('hybrid_margin_scale'),
-        # THE change under test: deterministic descent, root exploration as before.
+        # THE change: sharpened (not deterministic) descent; root unchanged.
         temp_threshold=30, late_temp=8.0, descent_temp=DESCENT_TEMP,
         max_plies=128, eval_max_plies=128,
         use_workers=True, selfplay_workers=4, games_per_worker=16,
