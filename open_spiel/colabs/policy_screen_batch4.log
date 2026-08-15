@@ -1,0 +1,9 @@
+preset=batch4  net=othello_benchmark/bench_R2conf@5000  FIXED sims=64  games=600/candidate
+score is the CANDIDATE's, vs the incumbent (value argmax, k=0, temp=1)
+  seltemp 32        68.1%  [64.2%, 71.7%]  n=600  307s   <-- separated from 50%
+  seltemp 64        68.2%  [64.4%, 71.8%]  n=600  308s   <-- separated from 50%
+  seltemp 1e4       74.5%  [70.9%, 77.8%]  n=600  316s   <-- separated from 50%
+  k=-2 temp=16      72.2%  [68.5%, 75.7%]  n=600  307s   <-- separated from 50%
+  k=-2 temp=32      69.6%  [65.8%, 73.1%]  n=600  309s   <-- separated from 50%
+  k=-1 temp=16      67.2%  [63.3%, 70.8%]  n=600  305s   <-- separated from 50%
+  null              47.4%  [43.5%, 51.4%]  n=600  298s

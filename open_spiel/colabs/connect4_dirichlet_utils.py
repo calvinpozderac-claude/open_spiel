@@ -1038,6 +1038,21 @@ class Config:
     fast_prob: float = 0.75
     temp_threshold: int = 12          # plies of full-temperature Thompson moves
     late_temp: float = 8.0            # after that, concentration ×this (≈ greedy)
+    # How sharp the IN-TREE descent is, independent of root exploration.
+    #
+    # `late_temp`/`temp_threshold` were driving both: one _temp() fed the root
+    # Thompson pick AND every _select_leaf on the way down, so buying
+    # exploration at the root forced a noisy descent to go with it.  They are
+    # not the same knob -- the root pick is where self-play diversity has to
+    # come from, while a noisy DESCENT just adds variance to the estimate the
+    # search returns.  Measured on othello (policy_screen.py, one net playing
+    # itself at a fixed 64 sims): sharpening descent alone is monotone all the
+    # way to deterministic -- temp 1 -> 2 -> 4 -> 8 -> 16 -> 1e4 scores 50%,
+    # 52.4%, 54.8%, 62.9%, 65.2%, 74.5%, i.e. about +186 Elo for taking the
+    # sampling out of descent entirely.  Note the default already runs descent
+    # at late_temp=8 after temp_threshold; it is the OPENING that is noisy.
+    # None keeps the old coupled behaviour exactly.
+    descent_temp: float = None
     # Adaptive stopping (experimental, mp_worker only -- see _SlotEngine's
     # docstring): None keeps the fast_sims/full_sims coin-flip above; a float
     # replaces it with a single full_sims-capped budget that stops early once
@@ -1433,7 +1448,15 @@ class _SlotEngine:
         return slot
 
     def _temp(self, move):
+        """Root-pick temperature: full-temperature Thompson early (that IS the
+        self-play exploration), sharpened after temp_threshold."""
         return 1.0 if move < self.cfg['temp_threshold'] else self.cfg['late_temp']
+
+    def _descent_temp(self, move):
+        """In-tree temperature.  Falls back to _temp so an unset config behaves
+        exactly as before this knob existed."""
+        dt = self.cfg.get('descent_temp')
+        return self._temp(move) if dt is None else dt
 
     def _record_move(self, s, root):
         """Append this position's target, Thompson-pick the move, apply it, and
@@ -1525,7 +1548,8 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
             wave = min(cfg['wave'], s['next_check'] - s['n'])
             for _ in range(max(wave, 0)):
                 path, st, payloads, edge = _select_leaf(
-                    s['root'], st0, rng, eng._temp(s['move'] - s['resume']))
+                    s['root'], st0, rng,
+                    eng._descent_temp(s['move'] - s['resume']))
                 if st is None:
                     _backup_terminal(path, payloads, s['aux'])
                     s['n'] += 1; continue
@@ -2494,7 +2518,7 @@ if _HAS_TORCH:
                 for _ in range(max(wave, 0)):
                     path, st, payloads, edge = _select_leaf(
                         s['root'], s['state'], self.rng,
-                        self._temp(s['move'] - s['resume']))
+                        self._descent_temp(s['move'] - s['resume']))
                     if st is None:
                         _backup_terminal(path, payloads, s['aux'])
                         s['n'] += 1
@@ -3007,7 +3031,8 @@ if _HAS_TORCH:
             n_parallel=cfg.n_parallel_games, wave_per_game=cfg.wave_per_game,
             fast_sims=cfg.fast_sims, full_sims=cfg.full_sims,
             fast_prob=cfg.fast_prob, temp_threshold=cfg.temp_threshold,
-            late_temp=cfg.late_temp, max_plies=cfg.max_plies,
+            late_temp=cfg.late_temp, descent_temp=cfg.descent_temp,
+            max_plies=cfg.max_plies,
             pool_prob=cfg.pool_prob, random_pool_frac=cfg.random_pool_frac,
             checkpoint_dir=cfg.checkpoint_dir,
             restart_prob=cfg.restart_prob, restart_k_min=cfg.restart_k_min,

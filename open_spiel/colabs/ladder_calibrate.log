@@ -1,0 +1,7 @@
+calibrating ladder against othello_benchmark/bench_R2conf@5000
+our side: 64 sims, policy={'mode': 'value', 'k': 0.0, 'sel_temp': 10000.0}
+    vs MCTS-25    100.0%  [88.6%, 100.0%]  n=30
+    vs MCTS-100   100.0%  [88.6%, 100.0%]  n=30
+    vs MCTS-400    93.3%  [78.7%, 98.2%]  n=30
+    vs MCTS-1600   93.3%  [78.7%, 98.2%]  n=30
+    (239s)

@@ -69,6 +69,30 @@ PRESETS = {
                 ('seltemp 16', dict(sel_temp=16.0)),
                 ('k=-2 temp=8', dict(k=-2.0, sel_temp=8.0)),
                 ('null', dict())],
+    # Batch 4: k turned over at -2.0 (58.5%, then -3: 54.8, -4: 53.8, -6:
+    # 49.1), so that axis is solved.  seltemp did NOT turn -- 8: 62.9%, 16:
+    # 65.2% -- and the two compose (k=-2 temp=8: 66.8%).  Push temp to the
+    # greedy limit: as temp -> inf the Thompson draw collapses to the mean, so
+    # descent becomes deterministic best-first and only virtual loss still
+    # diversifies a wave.  That either keeps paying or falls off a cliff when
+    # exploration disappears, and which one matters a great deal.
+    'batch4': [('seltemp 32', dict(sel_temp=32.0)),
+               ('seltemp 64', dict(sel_temp=64.0)),
+               ('seltemp 1e4', dict(sel_temp=1e4)),
+               ('k=-2 temp=16', dict(k=-2.0, sel_temp=16.0)),
+               ('k=-2 temp=32', dict(k=-2.0, sel_temp=32.0)),
+               ('k=-1 temp=16', dict(k=-1.0, sel_temp=16.0)),
+               ('null', dict())],
+    # Budget check.  Everything above was measured at 64 sims, but the arms
+    # TRAIN at ~150, and the two reasons to expect a budget interaction pull in
+    # opposite directions: sd[v] shrinks as sims grow, so a fixed k is a
+    # smaller correction at 150; and a sharper tree plausibly helps most when
+    # the budget is too small to explore broadly anyway.  Run this preset at
+    # --sims 150 and --sims 400 before treating any of it as a recipe.
+    'budget': [('seltemp 1e4', dict(sel_temp=1e4)),
+               ('k=-2 temp=1e4', dict(k=-2.0, sel_temp=1e4)),
+               ('seltemp 8', dict(sel_temp=8.0)),
+               ('null', dict())],
 }
 
 
