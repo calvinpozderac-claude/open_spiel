@@ -22,6 +22,9 @@ import othello_ladder as ol
 CKPT_DIR = 'othello_benchmark/bench_OPT'
 RESULTS = 'ladder_results.json'
 POLL_S = 120
+# othello_ladder defaults to 2 so it can sit alongside a running trainer; when
+# scoring after the fact there is nothing to share with.
+WORKERS = 5
 
 
 def _log(msg):
@@ -50,13 +53,14 @@ def available(ckpt_dir):
 
 
 def score(ckpt_dir, ep, results):
-    _log(f'  scoring {ckpt_dir}@{ep} vs ladder {list(ol.LADDER)}')
-    frac = ol.evaluate(ckpt_dir, str(ep), log=_log)
+    names = [r[0] for r in ol.RUNGS]
+    _log(f'  scoring {ckpt_dir}@{ep} vs {names}')
+    frac = ol.evaluate(ckpt_dir, str(ep), workers=WORKERS, log=_log)
     results[str(ep)] = frac
     with open(RESULTS, 'w') as fh:
         json.dump(results, fh, indent=2, sort_keys=True)
-    line = '  '.join(f'MCTS-{lv}: {frac[lv]:.1%}' for lv in ol.LADDER)
-    _log(f'  ep {ep}: {line}')
+    _log(f'  ep {ep}: '
+         + '  '.join(f'{n} {frac[n]:.1%}' for n in names))
 
 
 def main():
