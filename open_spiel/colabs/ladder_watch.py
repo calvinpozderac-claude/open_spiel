@@ -20,7 +20,7 @@ import time
 import othello_ladder as ol
 
 CKPT_DIR = 'othello_benchmark/bench_OPT'
-RESULTS = 'ladder_results.json'
+RESULTS = 'ladder_results_edax.json'
 POLL_S = 120
 # othello_ladder defaults to 2 so it can sit alongside a running trainer; when
 # scoring after the fact there is nothing to share with.

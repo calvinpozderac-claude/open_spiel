@@ -53,12 +53,24 @@ OUR_POLICY = dict(mode='value', k=0.0, sel_temp=1e4)
 # (name, spec, games).  Games shrink as rungs get expensive: MCTS cost is
 # linear in simulations, and MCTS-1600 alone is ~56s/game.
 CHAMPION = ('othello_benchmark/bench_R2conf', '5000')
+
+# Edax rungs are dialled by EPSILON (fraction of moves replaced by a uniform
+# random legal move), not by level. Level is unusably coarse here: against
+# bench_OPT@20000 at 64 sims, Edax level 1 scores 50% and level 2 scores 0%,
+# with level 0 losing every game to level 1. Its pattern evaluation is simply
+# far stronger than one 64-simulation search of ours, so depth cannot resolve
+# the range we live in. Epsilon is continuous, monotone, reproducible, and
+# ~11s per 30 games -- far cheaper than MCTS-1600 and, unlike it, still has
+# headroom above the current model.
 RUNGS = [
-    ('MCTS-25',    ('mcts', 25),          30),
-    ('MCTS-100',   ('mcts', 100),         30),
-    ('MCTS-400',   ('mcts', 400),         20),
-    ('MCTS-1600',  ('mcts', 1600),        12),
-    ('champion',   ('net',) + CHAMPION,   30),
+    ('MCTS-100',    ('mcts', 100),          30),   # kept for continuity
+    ('edax-e45',    ('edax', 2, 0.45),      30),
+    ('edax-e30',    ('edax', 2, 0.30),      30),
+    ('edax-e20',    ('edax', 2, 0.20),      30),
+    ('edax-e10',    ('edax', 2, 0.10),      30),
+    ('edax-e05',    ('edax', 2, 0.05),      30),
+    ('edax-full',   ('edax', 2, 0.0),       20),   # the ceiling; 0% for now
+    ('champion',    ('net',) + CHAMPION,    30),
 ]
 UCT_C = 2.0
 OPENING_PLIES = 2
@@ -89,9 +101,14 @@ def _worker(args):
     import policy_screen as ps
     net = c4.load_benchmark_net(ckpt_dir, label, ad.MM_SIG)
 
-    opp_net = None
+    opp_net = edax = None
     if spec[0] == 'net':
         opp_net = c4.load_benchmark_net(spec[1], spec[2], ad.MM_SIG)
+    elif spec[0] == 'edax':
+        # One persistent process for the whole job: loading eval.dat costs
+        # about a second, which would dominate if respawned per game.
+        import edax_bot as eb
+        edax = eb.EdaxBot(game, level=spec[1], epsilon=spec[2], seed=seed)
 
     rng = np.random.default_rng(seed)
     pts = 0.0
@@ -119,11 +136,15 @@ def _worker(args):
                     a = _our_move(c4, ps, game, net, st, rng)
                 elif spec[0] == 'mcts':
                     a = opp.step(st)
+                elif spec[0] == 'edax':
+                    a = edax.step(st)
                 else:
                     a = _our_move(c4, ps, game, opp_net, st, rng)
                 st.apply_action(a)
             r = st.returns()[seat]
             pts += 1.0 if r > 0 else (0.0 if r < 0 else 0.5)
+    if edax is not None:
+        edax.close()
     return name, pts, 2 * (n_games // 2)
 
 
