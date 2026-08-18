@@ -1,0 +1,10 @@
+AZ self-play A/B: othello_benchmark/bench_AZ@40000, 64 sims, 400 games
+baseline = {'c_puct': 1.5, 'pick': 'visits', 'temp': 0.3, 'noise': 0.15} (standard AlphaZero eval)
+  q-argmax          64.2%  [59.4%, 68.8%]  n=400  178s   <-- separated from 50%
+  cpuct 0.5         41.4%  [36.7%, 46.3%]  n=400  179s   <-- separated from 50%
+  cpuct 1.0         46.6%  [41.8%, 51.5%]  n=400  190s
+  cpuct 2.5         61.6%  [56.8%, 66.3%]  n=400  191s   <-- separated from 50%
+  q + cpuct1.0      63.0%  [58.2%, 67.6%]  n=400  165s   <-- separated from 50%
+  q + cpuct0.5      53.8%  [48.9%, 58.6%]  n=400  163s
+  null              51.0%  [46.1%, 55.9%]  n=400  263s
+DONE

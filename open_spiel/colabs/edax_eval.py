@@ -45,11 +45,29 @@ import numpy as np
 GAMES = 50
 OUR_SIMS = 64
 OUR_TEMP = 64.0            # see module docstring
+# TUNED, from az_policy_screen (400 games/cell, root noise on both sides so
+# every cell is a real sample rather than one deterministic game replayed).
+# c_puct is monotone increasing over 0.5/1.0/1.5/2.5/6.0 -> 41.4/46.6/50/61.6/
+# 68.5%, so the trained 1.5 was far too low for PLAY.  Visit sampling, which an
+# earlier version of this eval used to manufacture variety, costs ~90% against
+# plain argmax and is dropped; root Dirichlet noise supplies variety instead at
+# a fraction of the cost.
+AZ_CPUCT = 6.0
+AZ_NOISE = 0.15
 N_WORKERS = 5
 RESULTS = 'edax_eval.json'
 
 # The best of each line, plus the reference points worth placing on the scale.
+# (name, dir, label, kind).  kind 'az' drives the AlphaZero engine instead of
+# the Dirichlet/Thompson one: PUCT descent, move by visit count.  AlphaZero is
+# deterministic (no root noise at eval, argmax visits), so like our side it
+# needs a stochastic setting to produce distinct games -- its dial is the
+# visit-sampling temperature, and AZ_TEMP is the smallest value giving full
+# variety (10/10 distinct games, versus 2/10 at argmax).
 MODELS = [
+    ('AZ@40000',    'othello_benchmark/bench_AZ',          '40000', 'az'),
+    ('AZ@20000',    'othello_benchmark/bench_AZ',          '20000', 'az'),
+    ('AZ@10000',    'othello_benchmark/bench_AZ',          '10000', 'az'),
     ('OPT@20000',   'othello_benchmark/bench_OPT',         '20000'),
     ('OPT@16000',   'othello_benchmark/bench_OPT',         '16000'),
     ('OPT@12000',   'othello_benchmark/bench_OPT',         '12000'),
@@ -76,13 +94,18 @@ def _init():
 
 
 def _worker(args):
-    name, ckpt_dir, label, opp_spec, n_games, seed, first_seat = args
+    name, ckpt_dir, label, kind, opp_spec, n_games, seed, first_seat = args
     c4, game = _init()
     import adaptive_stop_utils as ad
     import policy_screen as ps
     import edax_bot as eb
 
-    net = c4.load_benchmark_net(ckpt_dir, label, ad.MM_SIG)
+    if kind == 'az':
+        import connect4_alphazero_utils as az
+        az.set_search(c_puct=AZ_CPUCT, virtual_loss=1.0)
+        net = az.load_benchmark_net(ckpt_dir, label, ad.MM_SIG)
+    else:
+        net = c4.load_benchmark_net(ckpt_dir, label, ad.MM_SIG)
     if opp_spec[0] == 'L1':
         opp = eb.EdaxBot(game, level=1)
     else:
@@ -95,7 +118,11 @@ def _worker(args):
         seat = (first_seat + gi) % 2          # colours alternate
         st = game.new_initial_state()         # standard start, no opening
         while not st.is_terminal():
-            if st.current_player() == seat:
+            if st.current_player() == seat and kind == 'az':
+                b = az.AZMCTSBot(game, net, 'cpu', OUR_SIMS, batch_size=8,
+                                 random_state=rng, noise_frac=AZ_NOISE)
+                a = az.root_pick(b.mcts_search(st), rng, sample=False)
+            elif st.current_player() == seat:
                 b = c4.C4MCTSBot(game, net, 'cpu', OUR_SIMS, batch_size=16,
                                  temp=OUR_TEMP, random_state=rng)
                 a = ps.pick(c4, b.mcts_search(st), pol)
@@ -120,10 +147,13 @@ def wilson(p, n, z=1.96):
 def run(opp_spec, games, models=MODELS, log=print):
     jobs = []
     per = max(2, games // N_WORKERS)
-    for name, d, lab in models:
+    for m in models:
+        name, d, lab = m[0], m[1], m[2]
+        kind = m[3] if len(m) > 3 else 'thompson'
         for w in range(N_WORKERS):
             # first_seat alternates per worker so the colour split stays even
-            jobs.append((name, d, lab, opp_spec, per, 6100 + 53 * w, w % 2))
+            jobs.append((name, d, lab, kind, opp_spec, per,
+                         6100 + 53 * w, w % 2))
     t0 = time.time()
     with mp.Pool(N_WORKERS) as pool:
         parts = pool.map(_worker, jobs)
@@ -132,7 +162,7 @@ def run(opp_spec, games, models=MODELS, log=print):
         p, m = agg.get(name, (0.0, 0))
         agg[name] = (p + pts, m + n)
     out = {}
-    for name, _d, _l in models:
+    for name in [m[0] for m in models]:
         pts, n = agg[name]
         frac = pts / n
         lo, hi = wilson(frac, n)
@@ -151,8 +181,8 @@ if __name__ == '__main__':
     if '--top' in sys.argv:
         # The candidates worth resolving properly, plus a weak control so the
         # scale stays anchored.
-        keep = {'dt16@2000', 'R2conf@5000', 'OPT@20000', 'OPT@16000',
-                'coupled@2000'}
+        keep = {'AZ@40000', 'AZ@20000', 'AZ@10000', 'dt16@2000',
+                'OPT@20000', 'R2conf@5000'}
         models = [m for m in MODELS if m[0] in keep]
     all_out = {}
     if mode == 'vs-l1':
