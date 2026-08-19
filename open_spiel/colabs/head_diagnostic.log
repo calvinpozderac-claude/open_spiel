@@ -1,0 +1,17 @@
+
+=== ENDGAME (~12 empties, Edax L18)  (n=200, ground truth = Edax-solved) ===
+net           raw MSE  srch MSE   delta  raw sign  srch sign
+OPT@20000       0.451     0.485  +0.034    82.0%     82.5%   <-- search HURTS
+dt16@2000       0.500     0.555  +0.055    79.5%     78.0%   <-- search HURTS
+AZ@20000        0.617     0.494  -0.124    77.0%     80.5%
+AZ@40000        0.510     0.439  -0.071    82.5%     81.5%
+  truth mix: win 59% draw 2% loss 39%   (66s)
+
+=== MIDGAME (~30 empties, Edax L10)  (n=200, ground truth = Edax-solved) ===
+net           raw MSE  srch MSE   delta  raw sign  srch sign
+OPT@20000       0.487     0.537  +0.050    82.5%     81.5%   <-- search HURTS
+dt16@2000       0.707     0.707  -0.000    72.0%     76.5%
+AZ@20000        0.890     0.584  -0.306    68.5%     75.5%
+AZ@40000        0.777     0.556  -0.221    71.0%     77.0%
+  truth mix: win 59% draw 2% loss 39%   (310s)
+DONE
