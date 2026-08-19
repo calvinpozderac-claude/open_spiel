@@ -79,6 +79,10 @@ MODELS = [
     ('dt16@2000',   'othello_benchmark/bench_Tdt16',        '2000'),
     ('coupled@2000', 'othello_benchmark/bench_Tcoupled',    '2000'),
     ('benchMM@2000', 'othello_benchmark/bench_MM',          '2000'),
+    ('MM@5000',     'othello_benchmark/bench_MM',           '5000'),
+    ('MM@20000',    'othello_benchmark/bench_MM',          '20000'),
+    ('MM@30000',    'othello_benchmark/bench_MM',          '30000'),
+    ('anneal@24000', 'othello_benchmark/bench_OPTanneal',  '24000'),
 ]
 
 
@@ -181,8 +185,11 @@ if __name__ == '__main__':
     if '--top' in sys.argv:
         # The candidates worth resolving properly, plus a weak control so the
         # scale stays anchored.
-        keep = {'AZ@40000', 'AZ@20000', 'AZ@10000', 'dt16@2000',
-                'OPT@20000', 'R2conf@5000'}
+        # Testing whether later checkpoints trade easy-opponent skill for
+        # hard-opponent skill: if so, the ranking should invert as the mixture
+        # shifts from L1 toward L2.
+        keep = {'MM@5000', 'MM@20000', 'MM@30000', 'dt16@2000',
+                'anneal@24000'}
         models = [m for m in MODELS if m[0] in keep]
     all_out = {}
     if mode == 'vs-l1':

@@ -8,7 +8,7 @@ import multiprocessing as mp, sys, time
 import numpy as np
 import edax_eval as ee
 
-WORKERS = 3
+WORKERS = 5
 
 
 def run(models, games):
@@ -32,9 +32,13 @@ def run(models, games):
 
 
 if __name__ == '__main__':
-    labs = sys.argv[1:] or ['21000', '22000']
+    args = sys.argv[1:]
+    ckdir = 'othello_benchmark/bench_OPTanneal'
+    if args and args[0].startswith('dir='):
+        ckdir = args.pop(0)[4:]
+    labs = args or ['21000', '22000']
     t0 = time.time()
     print('annealed checkpoints vs Edax L1 (baseline: OPT@20000 = 37.0%)')
-    run([(f'anneal@{l}', 'othello_benchmark/bench_OPTanneal', l) for l in labs],
-        200)
+    tag = ckdir.rsplit('_', 1)[-1]
+    run([(f'{tag}@{l}', ckdir, l) for l in labs], 200)
     print(f'  ({time.time()-t0:.0f}s)')
