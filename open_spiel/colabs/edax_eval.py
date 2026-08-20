@@ -82,6 +82,9 @@ MODELS = [
     ('MM@5000',     'othello_benchmark/bench_MM',           '5000'),
     ('MM@20000',    'othello_benchmark/bench_MM',          '20000'),
     ('MM@30000',    'othello_benchmark/bench_MM',          '30000'),
+    ('anneal@21000', 'othello_benchmark/bench_OPTanneal',  '21000'),
+    ('anneal@22000', 'othello_benchmark/bench_OPTanneal',  '22000'),
+    ('anneal@23000', 'othello_benchmark/bench_OPTanneal',  '23000'),
     ('anneal@24000', 'othello_benchmark/bench_OPTanneal',  '24000'),
 ]
 
@@ -188,8 +191,14 @@ if __name__ == '__main__':
         # Testing whether later checkpoints trade easy-opponent skill for
         # hard-opponent skill: if so, the ranking should invert as the mixture
         # shifts from L1 toward L2.
-        keep = {'MM@5000', 'MM@20000', 'MM@30000', 'dt16@2000',
-                'anneal@24000'}
+        # Re-reading the LR anneal probe on the yardstick that can actually
+        # see training progress. OPT@20000 is the pre-anneal baseline; MM@30000
+        # is the strongest network we have by the L2 measure; dt16@2000 is the
+        # L1 leader that collapses against strong play.
+        # Matched-episode head-to-head on the yardstick. At 200 games the
+        # three rungs all favoured OPT (37.0/13.5/7.8 vs 27.0/11.2/6.0) but
+        # none individually separated, so this runs them at 800.
+        keep = {'OPT@20000', 'MM@20000'}
         models = [m for m in MODELS if m[0] in keep]
     all_out = {}
     if mode == 'vs-l1':
