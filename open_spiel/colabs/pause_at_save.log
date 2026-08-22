@@ -1,0 +1,74 @@
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  6:59:21 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:00:25 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:01:27 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:02:30 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:03:33 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:04:35 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:05:38 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:06:40 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:07:43 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:08:46 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:09:48 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:10:51 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:11:54 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:12:57 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:14:00 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:15:02 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:16:05 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:17:08 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:18:10 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:19:12 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:20:15 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:21:18 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:22:21 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:23:23 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:24:26 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:25:29 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:26:31 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:27:34 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:28:37 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:29:39 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:30:42 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:31:44 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:32:47 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:33:50 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:34:52 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:35:55 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:36:59 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:38:02 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:39:05 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:40:07 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:41:10 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:42:12 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:43:15 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:44:17 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:45:20 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:46:23 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:47:25 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:48:28 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:49:30 PM
+[pause] latest.pt ep=16000 target=17000 Fri, Aug 21, 2026  7:50:33 PM
+[pause] latest.pt ep=17000 target=17000 Fri, Aug 21, 2026  7:51:35 PM
+[pause] reached ep 17000 -- stopping trainer
+ERROR: The process with PID 34544 could not be terminated.
+Reason: This process can only be terminated forcefully (with /F option).
+/T : The term '/T' is not recognized as the name of a cmdlet, function, script file, or operable program. Check the 
+spelling of the name, or if a path was included, verify that the path is correct and try again.
+At line:2 char:2
++  /T /F
++  ~~
+    + CategoryInfo          : ObjectNotFound: (/T:String) [], CommandNotFoundException
+    + FullyQualifiedErrorId : CommandNotFoundException
+ 
+ERROR: The process with PID 37596 could not be terminated.
+Reason: This process can only be terminated forcefully (with /F option).
+/T : The term '/T' is not recognized as the name of a cmdlet, function, script file, or operable program. Check the 
+spelling of the name, or if a path was included, verify that the path is correct and try again.
+At line:2 char:2
++  /T /F
++  ~~
+    + CategoryInfo          : ObjectNotFound: (/T:String) [], CommandNotFoundException
+    + FullyQualifiedErrorId : CommandNotFoundException
+ 
+ERROR: The process "30664" not found.
+[pause] PAUSED at ep 17000

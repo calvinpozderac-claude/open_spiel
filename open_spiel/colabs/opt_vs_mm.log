@@ -1,0 +1,43 @@
+
+vs Edax mixture p(L1)=1, else L2 -- 800 games
+  OPT@20000       32.9%  [29.7%, 36.2%]  n=800
+  MM@20000        30.4%  [27.3%, 33.6%]  n=800
+  (635s)
+
+vs Edax mixture p(L1)=0.25, else L2 -- 800 games
+multiprocessing.pool.RemoteTraceback: 
+"""
+Traceback (most recent call last):
+  File "C:\Users\Calvin Pozderac\AppData\Local\Programs\Python\Python312\Lib\multiprocessing\pool.py", line 125, in worker
+    result = (True, func(*args, **kwds))
+                    ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Calvin Pozderac\AppData\Local\Programs\Python\Python312\Lib\multiprocessing\pool.py", line 48, in mapstar
+    return list(map(*args))
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\Calvin Pozderac\Documents\open_spiel\open_spiel\colabs\edax_eval.py", line 137, in _worker
+    a = opp.step(st)
+        ^^^^^^^^^^^^
+  File "C:\Users\Calvin Pozderac\Documents\open_spiel\open_spiel\colabs\edax_bot.py", line 165, in step
+    return pick.step(state)
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\Calvin Pozderac\Documents\open_spiel\open_spiel\colabs\edax_bot.py", line 118, in step
+    raise RuntimeError('Edax produced no move')
+RuntimeError: Edax produced no move
+"""
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\Calvin Pozderac\Documents\open_spiel\open_spiel\colabs\edax_eval.py", line 214, in <module>
+    all_out[f'mix_p{p:g}'] = run(('mix', p), games, models)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Calvin Pozderac\Documents\open_spiel\open_spiel\colabs\edax_eval.py", line 166, in run
+    parts = pool.map(_worker, jobs)
+            ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Calvin Pozderac\AppData\Local\Programs\Python\Python312\Lib\multiprocessing\pool.py", line 367, in map
+    return self._map_async(func, iterable, mapstar, chunksize).get()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Calvin Pozderac\AppData\Local\Programs\Python\Python312\Lib\multiprocessing\pool.py", line 774, in get
+    raise self._value
+RuntimeError: Edax produced no move
+DONE
