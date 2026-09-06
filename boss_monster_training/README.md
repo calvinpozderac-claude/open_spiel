@@ -21,44 +21,58 @@ First real run, on a 4-core CPU container. Config (also in `config.json`):
 Pace: **~1.8 minutes per learn step** (~1030 new states, ~24 self-play
 games), i.e. about 9.3 states/s of self-play across 3 actors.
 
-### Result after 30 steps: the loop works, the agent does not improve
+### Result after 50 steps: the loop works; strength barely moves
 
-This is the honest headline, and it matters more than the loss curve.
+| | steps 1-5 | steps 16-20 | steps 26-30 | steps 46-50 |
+|---|---|---|---|---|
+| policy loss | 1.061 | 0.972 | 0.927 | 0.932 |
+| value loss | 0.297 | 0.199 | 0.187 | **0.168** |
+| avg return vs MCTS-25 | -0.553 | -0.493 | -0.487 | **-0.273** |
+| avg return vs MCTS-250 | -0.400 | -0.567 | -0.600 | -0.573 |
 
-| | steps 1-5 | steps 16-20 | steps 26-30 |
-|---|---|---|---|
-| policy loss | 1.061 | 0.972 | **0.927** |
-| avg return vs MCTS-25 | -0.553 | -0.493 | -0.487 |
-| avg return vs MCTS-250 | -0.400 | -0.567 | **-0.600** |
+Two different stories in those two eval rows, and the honest reading needs
+care about noise:
 
-Read the last two columns together, because that contrast is the whole
-result: **the policy loss keeps falling while playing strength does not
-move at all.** Over 30 steps and 745 self-play games the network gets
-steadily better at fitting its training targets and no better at winning —
-against the stronger 250-simulation opponent it drifts slightly *worse*.
-The step-1 evaluation (-0.27 / -0.17), taken with an essentially untrained
-network, still beats every window that follows.
+* **Against the equal-budget opponent (MCTS-25), there is a hint of real
+  improvement** — from about -0.49 to -0.27 between steps 30 and 50. Treat
+  it as suggestive, not established. Each reported number is a rolling mean
+  over only the last 30 evaluation games (~0.18 standard error), consecutive
+  steps therefore share most of their games and are strongly
+  autocorrelated, per-step values swing between -0.10 and -0.60, and step 50
+  itself fell back to -0.43. The move is on the order of one standard error.
+* **Against deeper search (MCTS-250) nothing has changed** in 50 steps:
+  -0.40 → -0.57, flat within noise the whole way.
 
-"Fits the targets better, plays no better" is the signature of targets that
-are not learnable from the observation — see reason 2 below — rather than
-of a model that merely needs more steps.
+Meanwhile the policy loss stopped falling around step 26 (0.927 → 0.932)
+while the value loss kept improving (0.187 → 0.168). So whatever gain there
+may be against the equal-budget bot looks more like a better *value*
+estimate than a better policy.
+
+An earlier version of this file, written at step 30, claimed flatly that the
+agent "does not improve" and predicted step 100 would look like step 30. The
+step-50 data does not support that strong a claim for the equal-budget
+baseline, so it has been walked back. What the data does still support: no
+movement at all against deeper search, and a policy head that has stopped
+improving — see reason 2 below.
 
 Mechanically everything is fine — win split stays balanced (no first-player
 degeneracy), game lengths hold at ~40-46 moves, the value head is accurate
 late-game, and no policy mass leaks onto illegal actions. So this is not a
-broken pipeline; it is a pipeline that needs far more than 745 self-play
+broken pipeline; it is a pipeline that needs far more than 1,233 self-play
 games, and quite possibly a different approach. Candidate reasons, roughly
 in order of how much I'd bet on them:
 
-1. **Nowhere near enough data.** 30 steps is ~31K states / 745 games.
+1. **Nowhere near enough data.** 50 steps is ~52K states / 1,233 games.
    AlphaZero results are quoted in millions of games.
 2. **Hidden information is fought, not modeled.** MCTS here clones the full
    state, so it searches *while seeing the opponent's hand*, and then trains
    the network toward those policy targets — but the network's observation
    deliberately hides that hand. It is being asked to regress targets that
    depend on information it cannot see, which puts a hard floor under the
-   policy loss no matter how long it trains. A policy loss that keeps
-   creeping down while win rate stays flat is consistent with exactly this.
+   policy loss no matter how long it trains. A policy loss that stalls at
+   ~0.93 while the value loss keeps improving is consistent with exactly
+   this: the value of a position is largely predictable from public state,
+   the opponent's best reply often is not.
 3. **25 simulations is shallow** for 40+ move games, so the targets
    themselves are weak and noisy.
 4. **Heavy stochasticity.** Every card draw and Hero reveal is a chance
