@@ -37,6 +37,12 @@ Notes for training this particular game:
   * Boss Monster games are long (tens of decisions per player plus a chance
     node for every card drawn or Hero revealed), so `temperature_drop` is
     set much higher than the Tic-Tac-Toe default.
+  * On CPU the run is bounded by neural-net inference, not by the game:
+    MCTS asks for one batch-1 forward pass per simulation, and JAX dispatch
+    alone costs ~14ms of that regardless of `nn_width` (mlp at width 64 and
+    width 128 time identically). So `max_simulations` is the flag that
+    actually sets your wall clock -- budget roughly
+    `max_simulations * 14ms` per move, times ~40 moves per game.
   * Run the tests first if you've modified the game:
       ./build/games/boss_monster_test                       # C++
       python3 open_spiel/python/games/boss_monster_test.py  # Python
@@ -95,7 +101,12 @@ flags.DEFINE_integer(
 )
 flags.DEFINE_enum(
     "nn_model",
-    "resnet",
+    # Boss Monster's observation is a flat 247-float feature vector, not a
+    # board, so an MLP is the right shape of model here. The conv-based
+    # models reshape that vector into a pretend 2D grid: measured on this
+    # repo, resnet(128,2) costs 45ms per batch-1 inference against 14ms for
+    # mlp(128,2), for no structure the convolutions can actually exploit.
+    "mlp",
     utils.api_selector(utils.AVIALABLE_APIS[0]).Model.valid_model_types,
     "What type of model should be used?",
 )

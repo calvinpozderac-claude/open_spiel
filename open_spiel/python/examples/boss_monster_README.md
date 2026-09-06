@@ -148,8 +148,33 @@ prompted.
 pip install "jax[cpu]" flax chex optax   # AlphaZero's neural-net deps
 python3 open_spiel/python/examples/boss_monster_alpha_zero.py \
     --path=/tmp/boss_monster_az --actors=3 --evaluators=1 \
-    --max_simulations=50 --max_steps=500
+    --nn_model=mlp --max_simulations=25 --replay_buffer_size=4096 \
+    --max_steps=1000
 ```
+
+### Picking a config (measured on a 4-core CPU box)
+
+Self-play here is bound by **neural-net inference**, not by the game. MCTS
+asks for one batch-1 forward pass per simulation, and per-call JAX dispatch
+overhead dominates:
+
+| model | ms / inference |
+|---|---|
+| `resnet(128, 2)` | 45.4 |
+| `mlp(128, 2)` | 14.4 |
+| `mlp(64, 2)` | 14.2 |
+
+Two things follow. First, **use `mlp`** (now the default): the observation is
+a flat 247-float feature vector, so the conv-based models are reshaping it
+into a pretend 2D grid and paying 3x for structure that isn't there.
+Second, `nn_width` is nearly free — width 64 and 128 time the same — so the
+knob that sets your wall clock is `max_simulations`. Budget about
+`max_simulations x 14ms` per move and ~40 moves per game.
+
+For reference, a `resnet(128,2)` run at `--max_simulations=50` with a
+`--replay_buffer_size=8192` needed **24.5 minutes per learn step** on 4
+cores; switching to `mlp` at 25 simulations and a 4096 buffer brings that
+down by roughly an order of magnitude.
 
 The game satisfies what OpenSpiel's `alpha_zero.py` needs
 (`Dynamics.SEQUENTIAL`, `RewardModel.TERMINAL`, a full `observation_tensor`
