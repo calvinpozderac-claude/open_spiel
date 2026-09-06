@@ -18,25 +18,30 @@ First real run, on a 4-core CPU container. Config (also in `config.json`):
 | batch size | 64 |
 | temperature drop | move 40 |
 
-Pace: **~1.85 minutes per learn step** (~1030 new states, ~24 self-play
+Pace: **~1.8 minutes per learn step** (~1030 new states, ~24 self-play
 games), i.e. about 9.3 states/s of self-play across 3 actors.
 
 ### Result after 20 steps: the loop works, the agent does not improve
 
 This is the honest headline, and it matters more than the loss curve.
 
-| | steps 1-5 | steps 16-20 |
-|---|---|---|
-| policy loss | 1.061 | 0.972 |
-| avg return vs MCTS-25 | -0.553 | -0.493 |
-| avg return vs MCTS-250 | -0.400 | -0.567 |
+| | steps 1-5 | steps 16-20 | steps 26-30 |
+|---|---|---|---|
+| policy loss | 1.061 | 0.972 | **0.927** |
+| avg return vs MCTS-25 | -0.553 | -0.493 | -0.487 |
+| avg return vs MCTS-250 | -0.400 | -0.567 | **-0.600** |
 
-Loss fell quickly over the first ~6 steps (1.575 → 1.21) and then **flat-lined
-for the next 14**. Strength against the MCTS baselines never went anywhere:
-it is roughly where it started, and against the stronger 250-simulation
-opponent it is slightly *worse*. Notably the step-1 evaluation (-0.27 /
--0.17), taken with an essentially untrained network, is better than
-everything from steps 3-15. That is not a learning curve.
+Read the last two columns together, because that contrast is the whole
+result: **the policy loss keeps falling while playing strength does not
+move at all.** Over 30 steps and 745 self-play games the network gets
+steadily better at fitting its training targets and no better at winning —
+against the stronger 250-simulation opponent it drifts slightly *worse*.
+The step-1 evaluation (-0.27 / -0.17), taken with an essentially untrained
+network, still beats every window that follows.
+
+"Fits the targets better, plays no better" is the signature of targets that
+are not learnable from the observation — see reason 2 below — rather than
+of a model that merely needs more steps.
 
 Mechanically everything is fine — win split stays balanced (no first-player
 degeneracy), game lengths hold at ~40-46 moves, the value head is accurate
