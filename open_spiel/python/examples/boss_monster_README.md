@@ -29,6 +29,12 @@ identical and cross-checked against each other by a test:
 | `open_spiel/python/examples/boss_monster_colab.ipynb` | Colab notebook wrapping the above. |
 | `open_spiel/python/examples/boss_monster_alpha_zero.py` | AlphaZero training entry point. |
 
+The browser server deliberately runs the **Python** game: it reads the state's
+internals (hands, dungeons, waiting Heroes) to render the board, and those
+accessors only exist on the Python side. Since the two engines are
+equivalent, a human playing on the server is playing exactly the game an
+agent trains on.
+
 The C++ port is a transliteration of the Python engine, down to the action
 encoding and the chance-node numbering, so the same action sequence drives
 both to the same state. `boss_monster_equivalence_test.py` plays random games
