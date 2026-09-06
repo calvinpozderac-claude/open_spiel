@@ -1,0 +1,32 @@
+{
+  "actors": 3,
+  "checkpoint_freq": 10,
+  "decouple_weight_decay": false,
+  "eval_levels": 2,
+  "evaluation_window": 30,
+  "evaluators": 1,
+  "game": "boss_monster",
+  "learning_rate": 0.001,
+  "max_simulations": 25,
+  "max_steps": 1000,
+  "nn_api_version": "linen",
+  "nn_depth": 2,
+  "nn_model": "mlp",
+  "nn_width": 128,
+  "observation_shape": [
+    247
+  ],
+  "output_size": 11,
+  "path": "/tmp/claude-0/-home-user-open-spiel/9eda3eed-3ebf-5af8-8499-749c08e148e2/scratchpad/az_boss_monster",
+  "policy_alpha": 1.0,
+  "policy_epsilon": 0.25,
+  "quiet": true,
+  "replay_buffer_reuse": 4,
+  "replay_buffer_size": 4096,
+  "temperature": 1.0,
+  "temperature_drop": 40,
+  "train_batch_size": 64,
+  "uct_c": 1.41,
+  "verbose": false,
+  "weight_decay": 0.0001
+}
