@@ -84,6 +84,30 @@ determinized/ISMCTS variant) fits this game better than vanilla AlphaZero.
 AlphaZero here is best understood as a solid engineering baseline on top of
 a correct, fast game implementation.
 
+### Replication (run 2, independent seed)
+
+After the container restart the run was relaunched from scratch with the
+same config and a fresh seed, which turns "re-derive the same curve" into a
+useful control. Comparing the two runs over their first 21 steps:
+
+| window | run 1 policy | run 2 policy | run 1 vs25 | run 2 vs25 | run 1 vs250 | run 2 vs250 |
+|---|---|---|---|---|---|---|
+| 1-5 | 1.061 | 1.053 | -0.553 | -0.387 | -0.400 | -0.307 |
+| 6-10 | 0.975 | 1.042 | -0.553 | -0.600 | -0.653 | -0.600 |
+| 11-15 | 0.978 | 0.969 | -0.633 | -0.493 | -0.627 | -0.447 |
+| 16-20 | 0.972 | 0.967 | -0.493 | -0.587 | -0.567 | -0.373 |
+
+Average game length: 43.0 (run 1) vs 43.1 (run 2).
+
+**The learning side replicates; the winning side does not exist to
+replicate.** The policy-loss curve tracks closely across independent seeds
+and game length matches to a tenth of a move, while the evaluation numbers
+scatter differently in each run inside the same -0.4 to -0.65 band, trending
+in neither. That is the cleanest available evidence that the dissociation
+above is systematic rather than a quirk of one seed -- and that run 1's
+step-50 bump was seed noise, since run 2 produces its own, differently
+placed bumps.
+
 ### Mid-run snapshot (step 10), kept for reference
 
 At step 10 the picture looked encouraging in isolation -- loss 1.187 (from
