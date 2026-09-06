@@ -21,7 +21,7 @@ First real run, on a 4-core CPU container. Config (also in `config.json`):
 Pace: **~1.8 minutes per learn step** (~1030 new states, ~24 self-play
 games), i.e. about 9.3 states/s of self-play across 3 actors.
 
-### Result after 20 steps: the loop works, the agent does not improve
+### Result after 30 steps: the loop works, the agent does not improve
 
 This is the honest headline, and it matters more than the loss curve.
 
@@ -46,19 +46,19 @@ of a model that merely needs more steps.
 Mechanically everything is fine — win split stays balanced (no first-player
 degeneracy), game lengths hold at ~40-46 moves, the value head is accurate
 late-game, and no policy mass leaks onto illegal actions. So this is not a
-broken pipeline; it is a pipeline that needs far more than 492 self-play
+broken pipeline; it is a pipeline that needs far more than 745 self-play
 games, and quite possibly a different approach. Candidate reasons, roughly
 in order of how much I'd bet on them:
 
-1. **Nowhere near enough data.** 20 steps is ~21K states / 492 games.
+1. **Nowhere near enough data.** 30 steps is ~31K states / 745 games.
    AlphaZero results are quoted in millions of games.
 2. **Hidden information is fought, not modeled.** MCTS here clones the full
    state, so it searches *while seeing the opponent's hand*, and then trains
    the network toward those policy targets — but the network's observation
    deliberately hides that hand. It is being asked to regress targets that
    depend on information it cannot see, which puts a hard floor under the
-   policy loss no matter how long it trains. A ~0.97 policy loss that will
-   not move is consistent with exactly this.
+   policy loss no matter how long it trains. A policy loss that keeps
+   creeping down while win rate stays flat is consistent with exactly this.
 3. **25 simulations is shallow** for 40+ move games, so the targets
    themselves are weak and noisy.
 4. **Heavy stochasticity.** Every card draw and Hero reveal is a chance
