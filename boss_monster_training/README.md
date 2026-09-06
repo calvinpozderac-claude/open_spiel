@@ -21,48 +21,48 @@ First real run, on a 4-core CPU container. Config (also in `config.json`):
 Pace: **~1.8 minutes per learn step** (~1030 new states, ~24 self-play
 games), i.e. about 9.3 states/s of self-play across 3 actors.
 
-### Result after 50 steps: the loop works; strength barely moves
+### Result after 72 steps: better fit, no better play
 
-| | steps 1-5 | steps 16-20 | steps 26-30 | steps 46-50 |
+The run ended at step 72 / 1,785 self-play games when the container was
+restarted (not a crash -- see "Why it stopped" below). That is enough data
+to answer the question cleanly, using the correlation of each metric with
+step number across all 72 points:
+
+| metric | correlation with step | reading |
+|---|---|---|
+| policy loss | **-0.788** | strong, consistent improvement |
+| return vs MCTS-25 | +0.273 | weak, within noise |
+| return vs MCTS-250 | +0.028 | none |
+
+Window means tell the same story:
+
+| | steps 1-5 | steps 26-30 | steps 46-50 | steps 68-72 |
 |---|---|---|---|---|
-| policy loss | 1.061 | 0.972 | 0.927 | 0.932 |
-| value loss | 0.297 | 0.199 | 0.187 | **0.168** |
-| avg return vs MCTS-25 | -0.553 | -0.493 | -0.487 | **-0.273** |
-| avg return vs MCTS-250 | -0.400 | -0.567 | -0.600 | -0.573 |
+| policy loss | 1.061 | 0.927 | 0.932 | **0.880** |
+| value loss | 0.297 | 0.187 | 0.168 | 0.181 |
+| avg return vs MCTS-25 | -0.553 | -0.487 | **-0.273** | -0.467 |
+| avg return vs MCTS-250 | -0.400 | -0.600 | -0.573 | -0.467 |
 
-Two different stories in those two eval rows, and the honest reading needs
-care about noise:
+**The apparent improvement at step 50 did not hold.** Return against the
+equal-budget opponent bounced to -0.273 around steps 46-50 and was back to
+-0.467 by steps 68-72 -- exactly the one-standard-error wobble that the
+step-50 note warned it might be. Against deeper search there is no trend
+whatsoever across the whole run (r = +0.03).
 
-* **Against the equal-budget opponent (MCTS-25), there is a hint of real
-  improvement** — from about -0.49 to -0.27 between steps 30 and 50. Treat
-  it as suggestive, not established. Each reported number is a rolling mean
-  over only the last 30 evaluation games (~0.18 standard error), consecutive
-  steps therefore share most of their games and are strongly
-  autocorrelated, per-step values swing between -0.10 and -0.60, and step 50
-  itself fell back to -0.43. The move is on the order of one standard error.
-* **Against deeper search (MCTS-250) nothing has changed** in 50 steps:
-  -0.40 → -0.57, flat within noise the whole way.
-
-Meanwhile the policy loss stopped falling around step 26 (0.927 → 0.932)
-while the value loss kept improving (0.187 → 0.168). So whatever gain there
-may be against the equal-budget bot looks more like a better *value*
-estimate than a better policy.
-
-An earlier version of this file, written at step 30, claimed flatly that the
-agent "does not improve" and predicted step 100 would look like step 30. The
-step-50 data does not support that strong a claim for the equal-budget
-baseline, so it has been walked back. What the data does still support: no
-movement at all against deeper search, and a policy head that has stopped
-improving — see reason 2 below.
+So the conclusion is the one the step-30 data suggested, now on 72 steps
+rather than 30 and with the noise properly accounted for: **the network
+gets steadily and measurably better at fitting its training targets
+(r = -0.79) while getting no better at winning.** That dissociation, not
+the raw loss curve, is the result.
 
 Mechanically everything is fine — win split stays balanced (no first-player
 degeneracy), game lengths hold at ~40-46 moves, the value head is accurate
 late-game, and no policy mass leaks onto illegal actions. So this is not a
-broken pipeline; it is a pipeline that needs far more than 1,233 self-play
+broken pipeline; it is a pipeline that needs far more than 1,785 self-play
 games, and quite possibly a different approach. Candidate reasons, roughly
 in order of how much I'd bet on them:
 
-1. **Nowhere near enough data.** 50 steps is ~52K states / 1,233 games.
+1. **Nowhere near enough data.** 72 steps is ~76K states / 1,785 games.
    AlphaZero results are quoted in millions of games.
 2. **Hidden information is fought, not modeled.** MCTS here clones the full
    state, so it searches *while seeing the opponent's hand*, and then trains
@@ -84,24 +84,14 @@ determinized/ISMCTS variant) fits this game better than vanilla AlphaZero.
 AlphaZero here is best understood as a solid engineering baseline on top of
 a correct, fast game implementation.
 
-### What the numbers looked like at step 10
+### Mid-run snapshot (step 10), kept for reference
 
-| metric | value |
-|---|---|
-| loss (total / policy / value) | 1.187 / 0.963 / 0.188 (from 1.575 / 1.132 / 0.392 at step 1) |
-| game length | avg 45.6 moves (min 29, max 73) |
-| win split (P1 / P2 / draw) | 14 / 9 / 0 |
-| value-head MSE, early game | 1.004 |
-| value-head MSE, late game | 0.0034 |
-| avg return vs MCTS (25 / 250 sims) | -0.47 / -0.57 |
-| total self-play states | 10,445 |
-
-Read that as: the loop is healthy and learning (loss falling, no degenerate
-first-player bias, sane game lengths, and a value head that is already
-near-perfect late in a game where the outcome is largely determined) but the
-agent is still **losing to a plain MCTS baseline** — which is exactly what
-10 learn steps and ~250 self-play games should look like. This is a
-correctly-wired pipeline caught early, not a trained agent.
+At step 10 the picture looked encouraging in isolation -- loss 1.187 (from
+1.575), games averaging 45.6 moves, a balanced 14/9/0 win split, and a value
+head already near-perfect late-game (MSE 0.0034) though weak early (1.004).
+Read on its own it looked like "healthy and learning". The 72-step analysis
+above is why that reading was premature: the loss really was falling, but
+it was not turning into wins.
 
 ### Using the checkpoint
 
@@ -133,7 +123,7 @@ model = model_lib.Model.build_model(
     game.num_distinct_actions(), nn_width=cfg["nn_width"],
     nn_depth=cfg["nn_depth"], weight_decay=cfg["weight_decay"],
     learning_rate=cfg["learning_rate"], path=run)
-model.load_checkpoint(10)          # by step number, not path
+model.load_checkpoint(70)          # by step number, not path
 
 state = game.new_initial_state()
 mask = np.zeros(game.num_distinct_actions(), np.bool_)
@@ -147,9 +137,11 @@ Pair it with `open_spiel.python.algorithms.alpha_zero.evaluator
 
 ### Why it stopped where it did
 
-The run was executing in an ephemeral container; these artifacts were
-committed so the work survives the container, not because the run reached a
-natural end. To take it further, use a GPU box (the ~14ms per batch-1
+It did not crash. The run was executing in an ephemeral container, which was
+restarted at 03:37 while the learner sat in "Collecting trajectories" after
+step 72; the log simply ends there, with no error and no OOM. The disk
+survived, so these artifacts (final checkpoint at step 70, config, full
+per-step metrics, learner log) are committed here. To take it further, use a GPU box (the ~14ms per batch-1
 inference that dominates this run is mostly CPU dispatch overhead) or the
 C++ AlphaZero in `open_spiel/algorithms/alpha_zero_torch`, which keeps the
 whole search loop out of Python.
