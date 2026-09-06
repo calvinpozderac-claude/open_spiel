@@ -44,14 +44,39 @@ correctly-wired pipeline caught early, not a trained agent.
 
 The saved checkpoint is for **inference**, not for resuming training:
 upstream `alpha_zero.py` always initializes a fresh model in the learner, so
-continuing this run would need code changes. To load the policy/value net:
+continuing this run would need code changes.
+
+Two upstream gotchas make loading less obvious than it should be, so this
+snippet is one that has actually been run against the committed checkpoint:
+
+* `Model.from_checkpoint()` is **broken** — it calls the instance method
+  `load_checkpoint(path)` as though it were a classmethod, when the real
+  signature takes a *step number*. Build the model, then load by step.
+* The checkpoint path must be **absolute**, or orbax raises
+  `Checkpoint path should be absolute`.
 
 ```python
+import json, os
+import numpy as np, pyspiel
 from open_spiel.python.algorithms.alpha_zero import utils
+
+run = os.path.abspath("boss_monster_training/run-2026-09-06")
+cfg = json.load(open(f"{run}/config.json"))
+game = pyspiel.load_game(cfg["game"])
+
 model_lib = utils.api_selector("linen")
-model = model_lib.Model.from_checkpoint(
-    "boss_monster_training/run-2026-09-06/checkpoint-10")
-policy, value = model.inference([observation], [legals_mask])
+model = model_lib.Model.build_model(
+    cfg["nn_model"], game.observation_tensor_shape(),
+    game.num_distinct_actions(), nn_width=cfg["nn_width"],
+    nn_depth=cfg["nn_depth"], weight_decay=cfg["weight_decay"],
+    learning_rate=cfg["learning_rate"], path=run)
+model.load_checkpoint(10)          # by step number, not path
+
+state = game.new_initial_state()
+mask = np.zeros(game.num_distinct_actions(), np.bool_)
+mask[state.legal_actions()] = True
+value, policy = model.inference(
+    [np.asarray(state.observation_tensor(0), np.float32)], [mask])
 ```
 
 Pair it with `open_spiel.python.algorithms.alpha_zero.evaluator
