@@ -212,6 +212,9 @@ class BossMonsterState(pyspiel.State):
     self._round_effects = [set(), set()]
     for p in range(_NUM_PLAYERS):
       self._queue.append(("draw", p))
+      if (self._round == 1 and
+          _boss_ability(self._boss[p]) == "first_turn_extra_draw"):
+        self._queue.append(("draw", p))
     for _ in range(_NUM_PLAYERS):
       self._queue.append(("reveal",))
     for p in range(_NUM_PLAYERS):
@@ -265,6 +268,11 @@ class BossMonsterState(pyspiel.State):
           actions.append(1 + i)
       return sorted(actions)
     elif kind == "discard":
+      # A forced discard with nothing to discard (only reachable if the deck
+      # ran dry mid-Scrying Orb) just passes; a decision node must never have
+      # an empty action set.
+      if not hand:
+        return [_ACTION_PASS]
       return sorted(1 + i for i in range(len(hand)))
     raise ValueError(f"No legal player actions at step {step}")
 
@@ -336,13 +344,17 @@ class BossMonsterState(pyspiel.State):
         self._history_strings.append(f"p{p} casts nothing")
     elif kind == "discard":
       p = step[1]
-      i = action - 1
-      card = self._hands[p].pop(i)
-      self._build_discard.append(card)
-      self._history_strings.append(f"p{p} discards {self._card_of(*card).name}")
-      if len(self._hands[p]) <= self._hand_limit(p):
+      if action == _ACTION_PASS or not self._hands[p]:
         self._queue.popleft()
-      # else: leave the "discard" step at the front for another discard.
+      else:
+        i = action - 1
+        card = self._hands[p].pop(i)
+        self._build_discard.append(card)
+        self._history_strings.append(
+            f"p{p} discards {self._card_of(*card).name}")
+        if len(self._hands[p]) <= self._hand_limit(p):
+          self._queue.popleft()
+        # else: leave the "discard" step at the front for another discard.
     else:
       raise ValueError(f"Unexpected step kind {kind}")
     self._advance()
@@ -582,13 +594,16 @@ class BossMonsterObserver:
     self.dict["opp_hand_count"][0] = len(state._hands[1 - player]) / float(
         _HAND_MAX)
 
+    # Both dungeons, from the observing player's perspective: index 0 is
+    # always the observer's own dungeon, index 1 the opponent's.
     rooms = self.dict["rooms"]
-    for p in range(_NUM_PLAYERS):
+    for rel in range(_NUM_PLAYERS):
+      p = player if rel == 0 else 1 - player
       for i, rid in enumerate(state._rooms[p][:self._max_rooms]):
         room = data.ROOM_TEMPLATES[rid]
-        rooms[p, i, 0] = 1.0
-        rooms[p, i, 1 + room.cls] = 1.0
-        rooms[p, i, 1 + _NUM_CLASSES] = room.damage / 5.0
+        rooms[rel, i, 0] = 1.0
+        rooms[rel, i, 1 + room.cls] = 1.0
+        rooms[rel, i, 1 + _NUM_CLASSES] = room.damage / 5.0
 
     waiting = self.dict["waiting"]
     for i, hid in enumerate(state._waiting[:self._max_waiting]):

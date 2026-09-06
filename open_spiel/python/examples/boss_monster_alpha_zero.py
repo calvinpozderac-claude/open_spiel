@@ -12,14 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Train an AlphaZero agent on `python_boss_monster`.
+"""Train an AlphaZero agent on Boss Monster.
 
 This mirrors `open_spiel/python/examples/alpha_zero.py` but is pre-wired for
-the Boss Monster game implemented in
-`open_spiel/python/games/boss_monster.py`. Because Boss Monster is a
-Python-only game it must be imported (registered) before
-`pyspiel.load_game` can find it -- that's the only real difference from the
-generic example.
+Boss Monster. It defaults to the C++ implementation
+(`open_spiel/games/boss_monster/`, game name "boss_monster"), which is the
+one to train on. Measured with
+`open_spiel/python/examples/boss_monster_benchmark.py` on this repo: the C++
+state is ~280x faster to `clone()` (the per-simulation cost MCTS pays), which
+works out to ~2.7x more MCTS moves/second end to end. The gap between those
+two numbers is Python: OpenSpiel's MCTS driver and the pybind boundary are
+still interpreted, and are now the bottleneck. Pass
+`--game=python_boss_monster` to train against the Python implementation
+instead (the two are kept action-for-action identical; see
+`open_spiel/python/tests/boss_monster_equivalence_test.py`).
 
 Notes for training this particular game:
   * Boss Monster has hidden information (each player's hand). AlphaZero's
@@ -28,18 +34,18 @@ Notes for training this particular game:
     common and pragmatic simplification for card games -- not a faithful
     imperfect-information solver. Treat the resulting policy as a strong
     heuristic bot, not a game-theoretically sound one.
-  * Games are Python-only, so self-play actors are much slower per-game than
-    OpenSpiel's C++ games (see the module docstring in `boss_monster.py`).
-    Start with small `max_simulations`/`actors` values to sanity check the
-    pipeline before scaling up.
-  * Run `python3 open_spiel/python/games/boss_monster_test.py` first if
-    you've modified the game -- it runs OpenSpiel's own API-conformance
-    checks (`pyspiel.random_sim_test`) plus a random-rollout smoke test.
+  * Boss Monster games are long (tens of decisions per player plus a chance
+    node for every card drawn or Hero revealed), so `temperature_drop` is
+    set much higher than the Tic-Tac-Toe default.
+  * Run the tests first if you've modified the game:
+      ./build/games/boss_monster_test                       # C++
+      python3 open_spiel/python/games/boss_monster_test.py  # Python
+      python3 open_spiel/python/tests/boss_monster_equivalence_test.py
 
 Example:
   python3 open_spiel/python/examples/boss_monster_alpha_zero.py \
-      --path=/tmp/boss_monster_az --actors=2 --evaluators=1 \
-      --max_simulations=20 --max_steps=50
+      --path=/tmp/boss_monster_az --actors=3 --evaluators=1 \
+      --max_simulations=50 --max_steps=200
 """
 
 from absl import app
@@ -58,9 +64,11 @@ flags.DEFINE_enum(
     "What type of flax api should be used for training?",
 )
 
-flags.DEFINE_string("game", "python_boss_monster", "Name of the game.")
+flags.DEFINE_string(
+    "game", "boss_monster",
+    "Name of the game: 'boss_monster' (C++, fast) or 'python_boss_monster'.")
 flags.DEFINE_float("uct_c", 1.41, "UCT's exploration constant.")
-flags.DEFINE_integer("max_simulations", 30, "How many simulations to run.")
+flags.DEFINE_integer("max_simulations", 50, "How many simulations to run.")
 flags.DEFINE_integer("train_batch_size", 2**6, "Batch size for learning.")
 flags.DEFINE_integer(
     "replay_buffer_size",
@@ -95,7 +103,7 @@ flags.DEFINE_integer("nn_width", 2**7, "How wide should the network be.")
 flags.DEFINE_integer("nn_depth", 2, "How deep should the network be.")
 flags.DEFINE_string("path", None, "Where to save checkpoints.")
 flags.DEFINE_integer("checkpoint_freq", 25, "Save a checkpoint every N steps.")
-flags.DEFINE_integer("actors", 2, "How many actors to run.")
+flags.DEFINE_integer("actors", 3, "How many actors to run.")
 flags.DEFINE_integer("evaluators", 1, "How many evaluators to run.")
 flags.DEFINE_integer(
     "evaluation_window", 30, "How many games to average results over."

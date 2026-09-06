@@ -259,6 +259,7 @@ set(PYTHON_TESTS ${PYTHON_TESTS}
   environments/cliff_walking_test.py
   games/ant_foraging_test.py
   games/block_dominoes_test.py
+  games/boss_monster_test.py
   games/chat_game_test.py
   games/chat_games/envs/base_envs/base_envs_test.py
   games/data_test.py
@@ -280,6 +281,7 @@ set(PYTHON_TESTS ${PYTHON_TESTS}
   mfg/games/dynamic_routing_test.py
   mfg/games/normal_form_game_test.py
   tests/mfg_implementation_test/mfg_test.py
+  tests/boss_monster_equivalence_test.py
   tests/bot_test.py
   tests/game_transforms_test.py
   tests/games_bargaining_test.py

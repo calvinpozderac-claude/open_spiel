@@ -18,6 +18,8 @@ set(GAME_SOURCES
   blackjack/blackjack.h
   blotto/blotto.cc
   blotto/blotto.h
+  boss_monster/boss_monster.cc
+  boss_monster/boss_monster.h
   breakthrough/breakthrough.cc
   breakthrough/breakthrough.h
   bridge/bridge.cc
@@ -371,6 +373,10 @@ add_test(blackjack_test blackjack_test)
 add_executable(blotto_test blotto/blotto_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
 add_test(blotto_test blotto_test)
+
+add_executable(boss_monster_test boss_monster/boss_monster_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(boss_monster_test boss_monster_test)
 
 add_executable(breakthrough_test breakthrough/breakthrough_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)

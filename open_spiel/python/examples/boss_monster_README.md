@@ -1,21 +1,41 @@
 # Boss Monster on OpenSpiel
 
-A 2-player Python implementation of Brotherwise Games' [*Boss Monster: The
+A 2-player implementation of Brotherwise Games' [*Boss Monster: The
 Dungeon-Building Card Game*](https://boardgamegeek.com/boardgame/131835/boss-monster-the-dungeon-building-card-game)
-(base set), registered with OpenSpiel as `python_boss_monster`, plus a
-browser-playable server and an AlphaZero training entry point.
+(base set), plus a browser-playable server and an AlphaZero training entry
+point.
+
+There are **two implementations of the same game**, kept action-for-action
+identical and cross-checked against each other by a test:
+
+| Game name | Language | Use it for |
+|---|---|---|
+| `boss_monster` | C++ | Training / search. ~280x faster `clone()`. |
+| `python_boss_monster` | Python | Reading and modifying the rules. |
 
 ## Files
 
 | File | Purpose |
 |---|---|
+| `open_spiel/games/boss_monster/boss_monster.{h,cc}` | **C++ game engine** (game name `boss_monster`). |
+| `open_spiel/games/boss_monster/boss_monster_test.cc` | C++ unit tests. |
 | `open_spiel/python/games/boss_monster_data.py` | Card/boss data + a detailed sourcing note. |
-| `open_spiel/python/games/boss_monster.py` | The game engine (`pyspiel.Game`/`pyspiel.State`). |
-| `open_spiel/python/games/boss_monster_test.py` | Unit tests, incl. OpenSpiel's `pyspiel.random_sim_test`. |
+| `open_spiel/python/games/boss_monster.py` | Python game engine (`python_boss_monster`). |
+| `open_spiel/python/games/boss_monster_test.py` | Python unit tests, incl. `pyspiel.random_sim_test`. |
+| `open_spiel/python/tests/boss_monster_equivalence_test.py` | Asserts the C++ and Python games agree step for step. |
+| `open_spiel/python/examples/boss_monster_benchmark.py` | Measures the C++ vs Python speedup. |
 | `open_spiel/python/examples/boss_monster_server.py` | Flask server + browser UI for 2 humans. |
 | `open_spiel/python/examples/boss_monster_ngrok.py` | Runs the server behind an ngrok tunnel. |
 | `open_spiel/python/examples/boss_monster_colab.ipynb` | Colab notebook wrapping the above. |
 | `open_spiel/python/examples/boss_monster_alpha_zero.py` | AlphaZero training entry point. |
+
+The C++ port is a transliteration of the Python engine, down to the action
+encoding and the chance-node numbering, so the same action sequence drives
+both to the same state. `boss_monster_equivalence_test.py` plays random games
+through both at once and asserts that legal actions, chance outcomes,
+observation tensors, observation strings and returns match at every single
+step, for every boss pairing. That test is what keeps them from drifting; run
+it after changing either one.
 
 ## IMPORTANT: how faithful is this to the real game?
 
@@ -59,16 +79,33 @@ sides, one Spell effect resolves automatically (no extra targeting
 sub-decisions), and games are capped at 40 rounds (ties broken by
 Souls-minus-Wounds) so self-play always terminates.
 
-## Running the tests
+## Building and running the tests
+
+The C++ game needs OpenSpiel built from source (the PyPI wheel won't have
+it). From the repo root:
 
 ```bash
-python3 open_spiel/python/games/boss_monster_test.py
+./install.sh                      # one-time: fetches abseil, pybind11, dds
+mkdir -p build
+BUILD_TYPE=Release cmake -S open_spiel -B build \
+    -DPython3_EXECUTABLE=$(which python3) -DCMAKE_CXX_COMPILER=$(which g++)
+cmake --build build --parallel $(nproc) --target pyspiel boss_monster_test
+export PYTHONPATH=$PWD:$PWD/build/python
 ```
 
-This runs a random-rollout smoke test plus OpenSpiel's own
-`pyspiel.random_sim_test` API-conformance checker (also exercised with
-`serialize=True`, and with an MCTS bot playing full self-play games, to
-confirm the game works correctly under tree search).
+Then:
+
+```bash
+./build/games/boss_monster_test                              # C++ tests
+python3 open_spiel/python/games/boss_monster_test.py         # Python tests
+python3 open_spiel/python/tests/boss_monster_equivalence_test.py  # C++ == Python
+python3 open_spiel/python/examples/boss_monster_benchmark.py      # speed
+```
+
+Between them these run OpenSpiel's own `pyspiel.random_sim_test`
+API-conformance checker (with `serialize=True`), full random playouts, MCTS
+self-play (which exercises `Clone()` hard, as tree search does), every boss
+ability, and the C++/Python equivalence check.
 
 ## Playing it yourself (2 players)
 
@@ -102,24 +139,28 @@ prompted.
 ## Training an AlphaZero agent
 
 ```bash
-pip install flax jax  # AlphaZero's neural-net dependencies
+pip install "jax[cpu]" flax chex optax   # AlphaZero's neural-net deps
 python3 open_spiel/python/examples/boss_monster_alpha_zero.py \
-    --path=/tmp/boss_monster_az --actors=2 --evaluators=1 \
-    --max_simulations=20 --max_steps=50
+    --path=/tmp/boss_monster_az --actors=3 --evaluators=1 \
+    --max_simulations=50 --max_steps=500
 ```
 
 The game satisfies what OpenSpiel's `alpha_zero.py` needs
 (`Dynamics.SEQUENTIAL`, `RewardModel.TERMINAL`, a full `observation_tensor`
-per player) and was smoke-tested end-to-end with an `MCTSBot` self-play
-loop. Two caveats worth knowing before you invest serious compute:
+per player), and the whole pipeline (actors → replay buffer → learner →
+checkpoint) has been run end to end on the C++ game. Notes before you invest
+serious compute:
 
 1. **Hidden information.** Boss Monster has private hands; AlphaZero's MCTS
    clones the *entire* state, including the opponent's hand, during tree
    search. That's a standard "determinized"/perfect-information-Monte-Carlo
    simplification for card games, not a game-theoretically sound solver —
    treat the trained policy as a strong heuristic bot.
-2. **Speed.** This is a pure-Python game (see the performance note at the
-   top of `boss_monster.py`), so self-play actors will be much slower
-   per-game than OpenSpiel's C++ games. Start with small
-   `max_simulations`/`actors` to validate the pipeline before scaling up,
-   and consider porting the hot path to C++ if you want to train seriously.
+2. **Where the time goes.** The C++ port removed the game engine as the
+   bottleneck (~280x on `clone()`), but OpenSpiel's MCTS driver and the
+   pybind boundary are still Python, so end-to-end search is "only" ~2.7x
+   faster. If you need more, the next step is the C++ AlphaZero
+   (`open_spiel/algorithms/alpha_zero_torch`, requires libtorch), which
+   keeps the whole search loop in C++.
+3. **`--eval_levels=1` crashes** with a `ZeroDivisionError` inside
+   upstream `alpha_zero.py`. Use 2 or more.
