@@ -1,0 +1,3 @@
+# The repo-root .gitignore excludes "checkpoint*"; these saved runs are
+# deliberate, committed artifacts, so re-include them here.
+!checkpoint*
