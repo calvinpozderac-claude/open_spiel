@@ -21,6 +21,50 @@ First real run, on a 4-core CPU container. Config (also in `config.json`):
 Pace: **~1.85 minutes per learn step** (~1030 new states, ~24 self-play
 games), i.e. about 9.3 states/s of self-play across 3 actors.
 
+### Result after 20 steps: the loop works, the agent does not improve
+
+This is the honest headline, and it matters more than the loss curve.
+
+| | steps 1-5 | steps 16-20 |
+|---|---|---|
+| policy loss | 1.061 | 0.972 |
+| avg return vs MCTS-25 | -0.553 | -0.493 |
+| avg return vs MCTS-250 | -0.400 | -0.567 |
+
+Loss fell quickly over the first ~6 steps (1.575 → 1.21) and then **flat-lined
+for the next 14**. Strength against the MCTS baselines never went anywhere:
+it is roughly where it started, and against the stronger 250-simulation
+opponent it is slightly *worse*. Notably the step-1 evaluation (-0.27 /
+-0.17), taken with an essentially untrained network, is better than
+everything from steps 3-15. That is not a learning curve.
+
+Mechanically everything is fine — win split stays balanced (no first-player
+degeneracy), game lengths hold at ~40-46 moves, the value head is accurate
+late-game, and no policy mass leaks onto illegal actions. So this is not a
+broken pipeline; it is a pipeline that needs far more than 492 self-play
+games, and quite possibly a different approach. Candidate reasons, roughly
+in order of how much I'd bet on them:
+
+1. **Nowhere near enough data.** 20 steps is ~21K states / 492 games.
+   AlphaZero results are quoted in millions of games.
+2. **Hidden information is fought, not modeled.** MCTS here clones the full
+   state, so it searches *while seeing the opponent's hand*, and then trains
+   the network toward those policy targets — but the network's observation
+   deliberately hides that hand. It is being asked to regress targets that
+   depend on information it cannot see, which puts a hard floor under the
+   policy loss no matter how long it trains. A ~0.97 policy loss that will
+   not move is consistent with exactly this.
+3. **25 simulations is shallow** for 40+ move games, so the targets
+   themselves are weak and noisy.
+4. **Heavy stochasticity.** Every card draw and Hero reveal is a chance
+   node, so outcomes are high-variance and the value signal is noisy.
+
+If you want a genuinely strong Boss Monster agent, (2) is the one to take
+seriously: an information-set method (e.g. Deep CFR, R-NaD, or a
+determinized/ISMCTS variant) fits this game better than vanilla AlphaZero.
+AlphaZero here is best understood as a solid engineering baseline on top of
+a correct, fast game implementation.
+
 ### What the numbers looked like at step 10
 
 | metric | value |
