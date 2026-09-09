@@ -1,0 +1,4 @@
+[2026-09-05 03:54:33] === head-to-head: MM_long@50000 (additive_mle) vs MIXTURE@50000 (MLE-search/mix-target) -- 1000 sims/side, temp 64.0, 101 games ===
+[2026-09-05 04:26:12] MM_long score: 78.5/101 = 77.7%  [68.7%, 84.7%]  (1899s)
+[2026-09-05 04:26:12] MIXTURE score: 22.5/101 = 22.3%  [15.3%, 31.3%]
+[2026-09-05 04:26:12] === MM_long wins ===

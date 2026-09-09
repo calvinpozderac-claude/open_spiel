@@ -155,6 +155,46 @@ TARGET_EPS = 0.05
 TERMINAL_CONC = 100.0
 TERMINAL_EPS = 0.05
 
+# Leaf backup rule: mean (default, every run before 2026-08-29) or a Dirichlet
+# draw.  Set through set_search so spawned self-play workers inherit it.
+_BACKUP_SAMPLE = False
+
+# Concentration floor and starting bias, both set through set_search so spawned
+# workers inherit them.  _CONF_OFFSET is ADDED to softplus in _conf(), so alpha0
+# can never fall below it.
+#
+# Why a floor of 3 is the interesting value: alpha0 = 3 over three classes means
+# every alpha_i = 1, which is exactly the UNIFORM density on the simplex -- the
+# critical point between corner-peaked (alpha_i < 1) and interior-mode
+# (alpha_i > 1).  Below it the Dirichlet piles mass in the corners, which is
+# what makes Thompson selection degenerate: the mixture run's opening alpha0
+# collapsed to 0.15 (alpha_i ~ 0.05) and its opening play went nearly random.
+#
+# Defaults preserve every earlier run exactly: offset 0 and bias 1.4 give
+# alpha0 = softplus(1.4) = 1.62 at init, which is what MM_long, OLIVAW, SAMPLE
+# and MIXTURE all trained under.  These MUST stay 0/1.4 by default -- _conf is
+# used at inference too, so a global change would silently alter how every
+# saved checkpoint evaluates.
+_CONF_OFFSET = 0.0
+_HEAD_CONF_BIAS = 1.4
+
+# Minimum TOTAL concentration a training target may carry, applied by
+# _floor_conc (which SCALES the vector, preserving its direction).
+#
+# Flooring the TARGET is not the same as flooring the network's output, and the
+# difference is the whole ballgame.  conf_offset=3 welded the head to 3.00
+# permanently: early in training the net's means are wrong, the KL correctly
+# pushes concentration DOWN, raw drifts very negative, and because a floored
+# output keeps the KL finite there is no divergence to pull it back --
+# sigmoid(raw) -> 0 and the gradient dies.  Flooring the target instead leaves
+# _conf as pure softplus, so the KL still diverges like 1/conf if the net
+# undershoots, which is the restoring force (measured: a constant -2.0 gradient
+# from arbitrarily deep).  The net then settles at >= the floor because nothing
+# ever asks it for less, rather than because it cannot physically go lower.
+#
+# Default 0.15 (= 3 * TARGET_EPS) is the historical value every earlier run used.
+_TARGET_CONC_FLOOR = 3.0 * TARGET_EPS
+
 _SPIKE = np.full((3, 3), TERMINAL_EPS)
 _SPIKE[_WIN, _WIN] = _SPIKE[_DRAW, _DRAW] = _SPIKE[_LOSS, _LOSS] = TERMINAL_CONC
 
@@ -165,7 +205,9 @@ AGG_MEAN = 'mean'
 AGG_SUM = 'sum'
 AGG_ADDITIVE = 'additive'
 AGG_ADDITIVE_MLE = 'additive_mle'
-AGGREGATIONS = (AGG_MIXTURE, AGG_MEAN, AGG_SUM, AGG_ADDITIVE, AGG_ADDITIVE_MLE)
+AGG_AVGCONC = 'avgconc'
+AGGREGATIONS = (AGG_MIXTURE, AGG_MEAN, AGG_SUM, AGG_ADDITIVE, AGG_ADDITIVE_MLE,
+                AGG_AVGCONC)
 
 # ── 'additive_mle' tuning.  Speed is preferred to exactness here: the estimate
 # is a search statistic, not a reported quantity, and it moves slowly.
@@ -345,6 +387,21 @@ def observed_alpha(acc, mode):
         sa = acc[4]
         return np.array([max(sa[0], ALPHA_FLOOR), max(sa[1], ALPHA_FLOOR),
                          max(sa[2], ALPHA_FLOOR)])
+    if mode == AGG_AVGCONC:
+        # Direction = mean of the leaf mean-predictions (SM/n, equal-weighted).
+        # Concentration = mean of the leaf concentrations (SA.sum()/n).  Neither
+        # grows with visit count (both are averages, not sums) nor collapses on
+        # mean-disagreement (that only moves SM's DIRECTION, not the averaged
+        # concentration).  The leaf concentrations it averages already carry the
+        # TERMINAL_CONC spikes of proven nodes, so a subtree that resolves pulls
+        # the average up; an opening of soft leaves keeps it near the net's own
+        # confidence.
+        sm, sa = acc[1], acc[4]
+        conc = (sa[0] + sa[1] + sa[2]) / n
+        inv = 1.0 / n                              # SM/n sums to 1 by construction
+        return np.array([max(sm[0] * inv * conc, ALPHA_FLOOR),
+                         max(sm[1] * inv * conc, ALPHA_FLOOR),
+                         max(sm[2] * inv * conc, ALPHA_FLOOR)])
     SM, SQ, SV = acc[1], acc[2], acc[3]
     M = (SM[0] / n, SM[1] / n, SM[2] / n)
     if mode == AGG_MEAN:
@@ -413,6 +470,48 @@ def _payload(alpha):
     return ((m, q, v, a), (fm, fq, fv, fa))
 
 
+def _payload_leaf(alpha):
+    """Payload for a LEAF's own network belief — the one place a draw belongs.
+
+    With backup='sample' this returns a random draw from Dir(alpha) instead of
+    its mean, so what travels up the tree carries the leaf's uncertainty rather
+    than averaging it away.
+
+    Why this matters: under mean backup, `observed_alpha` fits a concentration
+    to the SPREAD of the backed-up means, so alpha0 measures agreement among
+    estimates, not certainty about the outcome.  In the opening every line
+    evaluates to roughly the same balanced vector, the means agree, and the fit
+    returns a large alpha0 — measured at 113 in the opening against 21 in the
+    early endgame, which is backwards.  Sampling makes agreement cost something.
+
+    Terminal spikes deliberately do NOT come through here (see _payload's other
+    callers): a solved outcome is not an estimate and must not be resampled —
+    it is also the only external anchor the tree has, so it is what should pull
+    endgame concentration up while sampling keeps the opening honest.
+
+    Three gammavariates rather than np.random.dirichlet: this is the hottest
+    path in the search, ~13k calls per game."""
+    if not _BACKUP_SAMPLE:
+        return _payload(alpha)
+    aw, ad, al = float(alpha[0]), float(alpha[1]), float(alpha[2])
+    g0 = random.gammavariate(aw if aw > 1e-9 else 1e-9, 1.0)
+    g1 = random.gammavariate(ad if ad > 1e-9 else 1e-9, 1.0)
+    g2 = random.gammavariate(al if al > 1e-9 else 1e-9, 1.0)
+    s = g0 + g1 + g2
+    if not (s > 0.0) or not math.isfinite(s):
+        return _payload(alpha)            # degenerate draw; fall back to mean
+    mw, md, ml = g0 / s, g1 / s, g2 / s
+    # alpha (SA) stays the leaf's real evidence strength; only the mean is drawn.
+    inv = 1.0 / (aw + ad + al + 1.0)
+    m = (mw, md, ml)
+    q = (mw * mw, md * md, ml * ml)
+    v = (mw * (1.0 - mw) * inv, md * (1.0 - md) * inv, ml * (1.0 - ml) * inv)
+    a = (aw, ad, al)
+    return ((m, q, v, a),
+            ((ml, md, mw), (q[2], q[1], q[0]), (v[2], v[1], v[0]),
+             (al, ad, aw)))
+
+
 def _acc_add(acc, pl):
     """Fold one payload into an accumulator.  O(1), pure scalar."""
     m, q, v, a = pl
@@ -448,10 +547,22 @@ _MLE_ACTIVE = False            # maintain the 'additive_mle' log-sums in _acc_ad
 
 
 def set_search(search_agg=None, target_agg=None, selection=None,
-               virtual_loss=None):
+               virtual_loss=None, backup=None, conf_offset=None,
+               head_conf_bias=None, target_conc_floor=None):
     """Configure the tree for this PROCESS.  Self-play workers call it themselves
     from their cfg so a spawned process matches the parent exactly."""
     global _SEARCH_AGG, _TARGET_AGG, _GAUSSIAN_SELECT, _VIRTUAL_LOSS, _MLE_ACTIVE
+    global _BACKUP_SAMPLE, _CONF_OFFSET, _HEAD_CONF_BIAS, _TARGET_CONC_FLOOR
+    if target_conc_floor is not None:
+        _TARGET_CONC_FLOOR = float(target_conc_floor)
+    if conf_offset is not None:
+        _CONF_OFFSET = float(conf_offset)
+    if head_conf_bias is not None:
+        _HEAD_CONF_BIAS = float(head_conf_bias)
+    if backup is not None:
+        if backup not in ('mean', 'sample'):
+            raise ValueError("backup must be 'mean' or 'sample'")
+        _BACKUP_SAMPLE = (backup == 'sample')
     if search_agg is not None:
         if search_agg not in AGGREGATIONS:
             raise ValueError(f'search_agg must be one of {AGGREGATIONS}')
@@ -652,7 +763,7 @@ def _backup(path, payloads):
 def _seed_leaf(leaf):
     """A freshly expanded node's first piece of evidence about itself is its own
     network belief, in its own perspective."""
-    _acc_add(leaf.nacc, _payload(leaf.v_alpha)[0])
+    _acc_add(leaf.nacc, _payload_leaf(leaf.v_alpha)[0])
 
 
 def _node_solved_outcome(node):
@@ -759,9 +870,9 @@ def make_target(root):
     ev = (vis > 0) | (root.term >= 0)
     ev_idx = np.nonzero(ev)[0].astype(np.int32)
     rows = [root.edge_target(int(i)) for i in ev_idx]
-    ev_alpha = (_floor_conc(np.asarray(rows, dtype=np.float64), 3.0 * TARGET_EPS)
+    ev_alpha = (_floor_conc(np.asarray(rows, dtype=np.float64), _TARGET_CONC_FLOOR)
                 .astype(np.float32) if rows else np.zeros((0, 3), np.float32))
-    v_obs = _floor_conc(root.state_target(), 3.0 * TARGET_EPS).astype(np.float32)
+    v_obs = _floor_conc(root.state_target(), _TARGET_CONC_FLOOR).astype(np.float32)
     return {'obs': root.obs, 'legal': root.legal.copy(), 'v_obs': v_obs,
             'ev_idx': ev_idx, 'ev_alpha': ev_alpha, 'played': -1,
             'next_obs': None, 'next_term': -1, 'z': np.float32(0.0),
@@ -1032,6 +1143,16 @@ class Config:
 
     # ── search ────────────────────────────────────────────────────────────────
     selection: str = 'dirichlet'      # exact draw | 'gaussian' approximation
+    backup: str = 'mean'              # 'mean' | 'sample': what a leaf
+                                      # contributes up the tree
+    conf_offset: float = 0.0          # added to softplus in _conf: a hard
+                                      # FLOOR on alpha0.  3.0 keeps every
+                                      # alpha_i >= 1 (never corner-peaked).
+    head_conf_bias: float = 1.4       # raw bias on the concentration slot at
+                                      # init; softplus(1.4) = 1.62
+    target_conc_floor: float = 0.15   # min total concentration a TARGET may
+                                      # carry (direction-preserving scale).
+                                      # 3.0 keeps every target alpha_i >= 1.
     virtual_loss: float = 1.0         # in-flight edge penalty on v ∈ [−1, 1]
     fast_sims: int = 100              # simulations for a `fast_prob` game
     full_sims: int = 400              # …and for the rest
@@ -1504,7 +1625,12 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
     game = _mp_load_game(cfg)
     set_game(game)
     set_search(cfg['search_agg'], cfg['target_agg'], cfg['selection'],
-               cfg['virtual_loss'])
+               cfg['virtual_loss'], cfg.get('backup', 'mean'),
+               cfg.get('conf_offset', 0.0), cfg.get('head_conf_bias', 1.4),
+               cfg.get('target_conc_floor', 0.15))
+    # stdlib random drives the sampled backup; seed it per worker so a
+    # sampled run is as reproducible as a mean one.
+    random.seed(cfg['seed'] + worker_id * 7919)
     rng = np.random.default_rng(cfg['seed'] + worker_id * 7919)
     eng = _SlotEngine(game, cfg, rng, cfg.get('checkpoint_dir'))
     curr_shared = cfg.get('curr_depth_shared')
@@ -1576,7 +1702,7 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                     a.children[b] = nd
         for i, path, node, idx in pending:
             child = node.children[idx]
-            _backup(path, _payload(child.v_alpha))
+            _backup(path, _payload_leaf(child.v_alpha))
             slots[i]['n'] += 1
         for i in idxs:
             s = slots[i]
@@ -1750,14 +1876,40 @@ if _HAS_TORCH:
             flat = head_ch * _OBS_SHAPE[1] * _OBS_SHAPE[2]
             self.v_out = nn.Linear(flat, 4)                  # 3 logits + 1 conc
             self.a_out = nn.Linear(flat, _NUM_ACTIONS * 4)   # …per action
-            # Untrained net: exactly uniform outcome beliefs with WEAK confidence
-            # (α₀ = softplus(1.4) ≈ 1.62), so search dominates the prior from
+            # Untrained net: NEAR-uniform outcome beliefs with WEAK confidence
+            # (α₀ ≈ softplus(1.4) ≈ 1.62), so search dominates the prior from
             # generation 0 instead of chasing a random initialisation.
-            nn.init.zeros_(self.v_out.weight); nn.init.zeros_(self.a_out.weight)
+            #
+            # The output weights carry a small random component rather than
+            # being exactly zero.  Zero weights made every position and every
+            # move bit-identical — measured spread across positions was 5.96e-08,
+            # exactly one float32 ulp — which is worse than it sounds: identical
+            # leaf evaluations give the backed-up means EXACTLY zero variance, so
+            # additive_mle reads total agreement and fits its largest possible
+            # concentration (α₀ = 205 at 220 sims) for a position the network has
+            # never seen.  The inflated-opening-confidence problem starts here.
+            #
+            # The scale is small on purpose: enough to make positions
+            # distinguishable, not enough to express an opinion search must undo.
+            nn.init.normal_(self.v_out.weight, std=_HEAD_INIT_STD)
+            nn.init.normal_(self.a_out.weight, std=_HEAD_INIT_STD)
+            # A given draw leaves the fresh net a mild outcome preference —
+            # seed 0 measures p(win) 0.378 against p(loss) 0.289 over 200
+            # positions — because the head features share a dominant direction,
+            # so w_c . h keeps a consistent sign per class.  That is a property
+            # of h, not of the weights: neither centring the three rows against
+            # each other nor tying win = -loss removes it (both were tried and
+            # measured; the second merely mirrors the bias).  It is a random
+            # per-seed prior of a few percent that the outcome cross-entropy
+            # trains away early, so it is left alone rather than papered over.
             with torch.no_grad():
-                self.v_out.bias.zero_(); self.v_out.bias[3] = 1.4
+                # _HEAD_CONF_BIAS defaults to 1.4 -> softplus = 1.62, the
+                # value every run before 2026-09-01 started from.  With a
+                # non-zero _CONF_OFFSET the caller lowers this so the starting
+                # alpha0 lands just above the floor rather than on top of it.
+                self.v_out.bias.zero_(); self.v_out.bias[3] = _HEAD_CONF_BIAS
                 self.a_out.bias.view(_NUM_ACTIONS, 4).zero_()
-                self.a_out.bias.view(_NUM_ACTIONS, 4)[:, 3] = 1.4
+                self.a_out.bias.view(_NUM_ACTIONS, 4)[:, 3] = _HEAD_CONF_BIAS
 
         def forward(self, x):
             h = self.head(self.body(self.stem(x)))
@@ -1768,6 +1920,9 @@ if _HAS_TORCH:
     # Above this, softplus(x) and x differ by log1p(exp(-x)) — 2e-9 at x=20,
     # far below fp32 resolution at that magnitude — so the two are the same
     # number and only one of them can overflow.
+    # Output-layer init scale. Small: it breaks symmetry, it is not a prior.
+    _HEAD_INIT_STD = 0.01
+
     _CONF_LINEAR = 20.0
 
     def _conf(raw):
@@ -1785,8 +1940,41 @@ if _HAS_TORCH:
         then writes NaN into every weight.  Clamping the input rather than the
         OUTPUT also keeps the gradient clean: torch.where alone would still
         differentiate the dead branch and multiply inf by zero."""
-        safe = _softplus(raw.clamp(max=_CONF_LINEAR))
-        return torch.where(raw > _CONF_LINEAR, raw, safe).clamp_min(ALPHA_FLOOR)
+        # softplus computed accurately in BOTH tails, so no floor is needed.
+        # PyTorch's log1p(exp(x)) form underflows to an exact 0 near x = -17 in
+        # fp32 -- 1 + 2e-9 rounds to 1.0 -- and lgamma(0) then NaNs the loss.
+        # The crossover must sit ABOVE that underflow point, not at it: fp32
+        # log1p dies near x = -16.6, so branching at -20 would still route -17
+        # through the dying form.  At -10 the two forms agree to ~1e-9 and exp
+        # stays representable down to x ~ -87.  This is not a clamp: the value
+        # is the true softplus, just not computed through a cancellation.
+        # clamp the tail at the SAME point as the where-condition: sharing a
+        # boundary with 0.0 made torch.where hand back a zero gradient at
+        # exactly raw = 0, a needless dead point in the middle of the range.
+        tail = torch.exp(raw.clamp(max=-10.0))
+        body = _softplus(raw.clamp(min=-10.0, max=_CONF_LINEAR))
+        safe = torch.where(raw < -10.0, tail, body)
+        # NO lower clamp.  softplus is already strictly positive, and
+        # `.clamp_min(ALPHA_FLOOR)` made the floor an ABSORBING state: below
+        # raw ~ -20 softplus underflows past 1e-9, the clamp pins the output,
+        # and d(conf)/d(raw) becomes exactly 0 — a dead-ReLU trap the head can
+        # never climb out of.  That is what killed the first sampled-backup
+        # run: its action concentration sat at exactly 0.00000 against targets
+        # asking for 0.33-0.60, with no gradient to correct it.
+        #
+        # Removing the clamp is safe *because* of how the KL behaves: dKL/dconf
+        # grows like 1/conf as conf -> 0 while d(conf)/d(raw) = sigmoid(raw)
+        # ~ conf, so the product stays O(1) and the head is always pulled back.
+        # The clamp destroyed exactly that product.
+        #
+        # Residual risk is fp32 underflow to a true 0 at raw < ~-104, which
+        # would NaN lgamma.  The O(1) restoring gradient means training has to
+        # travel a very long way to get there, and _assert_finite_sd still
+        # refuses to persist a poisoned network.
+        # + _CONF_OFFSET (default 0.0) puts a hard FLOOR under alpha0 without
+        # clamping: the gradient stays alive everywhere because softplus is
+        # still the only thing being differentiated.
+        return _CONF_OFFSET + torch.where(raw > _CONF_LINEAR, raw, safe)
 
     # ── lgamma / digamma with a DirectML-friendly fallback ────────────────────
     # The closed-form Dirichlet KL's only expensive pieces are lgamma (the log
@@ -2312,7 +2500,7 @@ if _HAS_TORCH:
                         _seed_leaf(child)
                         node.children[idx] = child
                 for path, st, (node, idx) in pending:
-                    _backup(path, _payload(node.children[idx].v_alpha))
+                    _backup(path, _payload_leaf(node.children[idx].v_alpha))
                     sims += 1
             return sims
 
@@ -2543,7 +2731,7 @@ if _HAS_TORCH:
                     else:
                         a.children[b] = node
             for i, path, node, idx in pending:
-                _backup(path, _payload(node.children[idx].v_alpha))
+                _backup(path, _payload_leaf(node.children[idx].v_alpha))
                 self.slots[i]['n'] += 1
             for i, s in enumerate(self.slots):
                 if s['root'] is None:
@@ -3042,6 +3230,9 @@ if _HAS_TORCH:
             curr_mcts_tail=cfg.curr_mcts_tail,
             search_agg=cfg.search_agg, target_agg=cfg.target_agg,
             selection=cfg.selection, virtual_loss=cfg.virtual_loss,
+            backup=cfg.backup, conf_offset=cfg.conf_offset,
+            head_conf_bias=cfg.head_conf_bias,
+            target_conc_floor=cfg.target_conc_floor,
             adaptive_kl_eps=cfg.adaptive_kl_eps,
             adaptive_check_every=cfg.adaptive_check_every,
             adaptive_mode=cfg.adaptive_mode, alloc_scale=cfg.alloc_scale,
@@ -3084,7 +3275,8 @@ if _HAS_TORCH:
         device, backend = pick_device(cfg.device_preference)
         set_game(game)
         set_search(cfg.search_agg, cfg.target_agg, cfg.selection,
-                   cfg.virtual_loss)
+                   cfg.virtual_loss, cfg.backup,
+                   cfg.conf_offset, cfg.head_conf_bias, cfg.target_conc_floor)
         set_backend(backend, device)
         random.seed(cfg.seed); np.random.seed(cfg.seed)
         torch.manual_seed(cfg.seed)

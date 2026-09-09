@@ -1,1 +1,6 @@
 [wrap] launch Wed, Aug 19, 2026 11:27:44 PM
+[2026-08-23 08:53:56] WRAPPER: wrapper started (pid 5144), resuming MM_long
+[2026-08-23 08:53:56] WRAPPER: launching run_mm_long process
+[2026-08-27 03:32:13] WRAPPER: process exited with code 0 -- re-checking after a pause
+[2026-08-27 03:32:18] WRAPPER: sentinel found -- MM_long complete, exiting wrapper
+[2026-08-27 03:32:18] WRAPPER: wrapper done

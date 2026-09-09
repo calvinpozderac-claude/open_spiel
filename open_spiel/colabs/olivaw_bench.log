@@ -1,0 +1,73 @@
+[2026-08-28 20:51:37] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-28 20:56:41] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-28 21:01:46] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-28 21:06:50] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-28 21:11:54] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-28 21:16:59] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-28 21:22:04] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-28 21:27:09] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-28 21:32:13] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-28 21:37:17] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-28 21:42:21] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-28 21:47:25] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 02:31:11] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 02:31:13]   === benchmarking ep 5000 ===
+[2026-08-29 02:36:36]     ep 5000 vs Edax L1:  95.1% [85.4%, 98.5%]  n=51  (322s)
+[2026-08-29 02:50:19]     ep 5000 vs Edax L2:   2.0% [0.3%, 10.3%]  n=51  (824s)
+[2026-08-29 03:04:08]     ep 5000 vs Edax L3:   2.0% [0.3%, 10.3%]  n=51  (829s)
+[2026-08-29 03:17:58]     ep 5000 vs Edax L4:   0.0% [0.0%, 7.0%]  n=51  (830s)
+[2026-08-29 03:17:58]   BENCHMARK ep 5000: L1 95%  L2 2%  L3 2%  L4 0%  (rating 1.48)
+[2026-08-29 03:32:58] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 03:48:01] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 04:03:04] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 04:18:06] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 04:33:09] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 04:48:12] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 05:03:14] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 05:18:17] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 05:33:19] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 05:48:22] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 05:48:24]   === benchmarking ep 10000 ===
+[2026-08-29 06:01:45]     ep 10000 vs Edax L1:  82.4% [69.7%, 90.4%]  n=51  (801s)
+[2026-08-29 06:15:00]     ep 10000 vs Edax L2:  38.2% [26.2%, 51.9%]  n=51  (796s)
+[2026-08-29 06:28:27]     ep 10000 vs Edax L3:   9.8% [4.3%, 21.0%]  n=51  (806s)
+[2026-08-29 06:42:26]     ep 10000 vs Edax L4:   4.9% [1.5%, 14.6%]  n=51  (839s)
+[2026-08-29 06:42:26]   BENCHMARK ep 10000: L1 82%  L2 38%  L3 10%  L4 5%  (rating 1.73)
+[2026-08-29 06:57:26] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 07:12:29] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 07:27:31] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 07:42:34] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 07:57:37] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 08:12:39] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 08:27:42] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 08:42:44] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 08:57:47] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 09:12:50] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 09:27:54] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 09:42:57] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 09:42:59]   === benchmarking ep 15000 ===
+[2026-08-29 09:56:38]     ep 15000 vs Edax L1:  78.4% [65.4%, 87.5%]  n=51  (819s)
+[2026-08-29 10:10:17]     ep 15000 vs Edax L2:  52.9% [39.5%, 65.9%]  n=51  (820s)
+[2026-08-29 10:23:59]     ep 15000 vs Edax L3:   8.8% [3.7%, 19.7%]  n=51  (822s)
+[2026-08-29 10:38:20]     ep 15000 vs Edax L4:  11.8% [5.5%, 23.4%]  n=51  (861s)
+[2026-08-29 10:38:20]   BENCHMARK ep 15000: L1 78%  L2 53%  L3 9%  L4 12%  (rating 2.07)
+[2026-08-29 10:53:21] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 11:08:24] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 11:23:26] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 11:38:29] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 11:53:32] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 12:08:36] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 12:23:38] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 12:38:41] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 12:53:43] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 13:08:46] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 13:23:49] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 13:38:52] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 13:53:54] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins
+[2026-08-29 13:53:56]   === benchmarking ep 20000 ===
+[2026-08-29 14:07:31]     ep 20000 vs Edax L1:  78.4% [65.4%, 87.5%]  n=51  (815s)
+[2026-08-29 14:22:12]     ep 20000 vs Edax L2:  57.8% [44.2%, 70.4%]  n=51  (881s)
+[2026-08-29 14:38:39]     ep 20000 vs Edax L3:  16.7% [8.9%, 29.1%]  n=51  (987s)
+[2026-08-29 14:52:22]     ep 20000 vs Edax L4:   8.8% [3.7%, 19.7%]  n=51  (824s)
+[2026-08-29 14:52:23]   BENCHMARK ep 20000: L1 78%  L2 58%  L3 17%  L4 9%  (rating 2.19)
+[2026-08-29 15:07:26] watching othello_benchmark/bench_OLIVAW: 1000 sims both sides, 51 games/level, every 5000 eps, climbing until Edax wins

@@ -1,0 +1,6 @@
+[2026-08-29 15:17:15] === SAMPLE backup: 50000 eps, 10 blocks x 32 ch, 100/400 sims (mean 220) -> othello_benchmark/bench_SAMPLE ===
+[2026-08-29 15:17:15]     backup=sample descent_temp=1 | lr 2e-03 -> cosine over 50000 -> floor 4.0e-05 | batch 1024 x 1 step/ep | buffer 300k | temp_threshold 20, greedy after | pool 0.0 | elo 16 games/pair vs all previous
+[2026-08-29 15:17:17] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-08-29 15:17:17] device=privateuseone:0 backend=directml | params=330,632 | search_agg=additive_mle target_agg=additive_mle | start_ep=1
+[2026-08-29 16:15:38] ep   1000 | loss 143.06 (klv 0.85 kla 62.57 cev 0.662 cea 1.134 cons 30.56) | sh klv 1% kla 87% cev 0% cea 1% cons 11% | conc(pred/tgt) v 0.3/66.7 a 0.0/22.8 | unsolved (37% of batch) v 0.34/9.59 a 0.00/3.02 | dr 4% ply 61 buf 180k aux 119502 | lr 2.00e-03 | vs 0 (no-MCTS) W18 D0 L12
+[2026-08-29 16:15:38]          perf: 0.29 games/s | wait(sp) 89% train 11% | NNbatch 64 (50 fwd/s)

@@ -1,0 +1,6 @@
+[2026-09-01 08:13:44] === MIXTURE agg: 50000 eps, 10 blocks x 32 ch, 100/400 sims (mean 220) -> othello_benchmark/bench_MIXTURE_floor3 ===
+[2026-09-01 08:13:44]     search_agg=mixture target_agg=mixture backup=mean | ALPHA0 FLOOR 3 (starts at 3.50, bias -0.4328) | descent_temp=1 | lr 2e-03 -> cosine over 50000 -> floor 4.0e-05 | batch 1024 x 1 step/ep | buffer 300k | temp_threshold 20, greedy after | pool 0.0 | elo 16 games/pair vs all previous
+[2026-09-01 08:13:45] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-09-01 08:13:45] device=privateuseone:0 backend=directml | params=330,632 | search_agg=mixture target_agg=mixture | start_ep=1
+[2026-09-01 08:49:43] ep   1000 | loss 9.55 (klv 4.22 kla 1.79 cev 0.532 cea 0.731 cons 0.95) | sh klv 44% kla 38% cev 6% cea 8% cons 5% | conc(pred/tgt) v 3.0/57.7 a 3.0/17.3 | unsolved (48% of batch) v 3.01/11.95 a 3.00/4.62 | dr 3% ply 60 buf 128k aux 67812 | lr 2.00e-03 | vs 0 (no-MCTS) W17 D1 L12
+[2026-09-01 08:49:43]          perf: 0.47 games/s | wait(sp) 81% train 19% | NNbatch 117 (49 fwd/s)

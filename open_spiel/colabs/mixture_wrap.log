@@ -1,0 +1,5 @@
+[2026-08-30 16:04:52] WRAPPER: wrapper started (pid 25720)
+[2026-08-30 16:04:52] WRAPPER: launching run_mixture process
+[2026-08-31 22:03:34] WRAPPER: process exited with code 0 -- re-checking after a pause
+[2026-08-31 22:03:39] WRAPPER: sentinel found -- run complete, exiting wrapper
+[2026-08-31 22:03:39] WRAPPER: wrapper done

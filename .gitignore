@@ -1,6 +1,14 @@
 # auxiliary inputs
 checkpoints
 checkpoint*
+*_checkpoints
+*_checkpoints_*
+*_ckpt
+*_ckpt_*
+open_spiel/colabs/c4_benchmark/
+open_spiel/colabs/othello_benchmark/
+.venv312/
+.claude/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

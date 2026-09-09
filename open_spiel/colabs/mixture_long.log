@@ -1,0 +1,16 @@
+[2026-08-31 23:31:38] === MIXTURE_long: MM_long config, mixture aggregation -> othello_benchmark/bench_MIXTURE_long ===
+[2026-08-31 23:31:38]     parity verified: the ONLY fields differing from run_mm_long are ['checkpoint_dir', 'search_agg', 'target_agg']
+[2026-08-31 23:31:38]     50000 eps | 3 blocks x 32 ch | sims 1000/1000@1.0 | batch 256 x 4 steps/ep | buffer 150k | pool 0.2/0.5 | temp_thr 30 late 8.0 descent None | lr 2e-03 -> 4.0e-05 | backup=mean
+[2026-08-31 23:31:40] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-08-31 23:31:40] device=privateuseone:0 backend=directml | params=194,832 | search_agg=mixture target_agg=mixture | start_ep=1
+[2026-09-01 01:13:09] ep   1000 | loss 1.99 (klv 0.47 kla 0.25 cev 0.352 cea 0.616 cons 0.09) | sh klv 24% kla 25% cev 18% cea 31% cons 2% | conc(pred/tgt) v 3.7/75.8 a 0.9/26.5 | unsolved (28% of batch) v 1.31/14.10 a 0.54/2.90 | dr 2% ply 61 buf 150k aux 131100 | lr 2.00e-03 | vs 0 (no-MCTS) W20 D1 L9
+[2026-09-01 01:13:09]          perf: 0.16 games/s | wait(sp) 93% train 7% | NNbatch 134 (59 fwd/s)
+[2026-09-01 02:54:44] ep   2000 | loss 2.30 (klv 0.88 kla 0.25 cev 0.307 cea 0.569 cons 0.11) | sh klv 38% kla 21% cev 13% cea 25% cons 2% | conc(pred/tgt) v 12.9/74.2 a 1.9/24.8 | unsolved (30% of batch) v 3.05/13.86 a 0.55/2.56 | dr 1% ply 61 buf 150k aux 254548 | lr 1.99e-03 | vs 0 (no-MCTS) W19 D1 L10
+[2026-09-01 02:54:44]          perf: 0.16 games/s | wait(sp) 93% train 7% | NNbatch 131 (59 fwd/s)
+[2026-09-01 04:35:26] ep   3000 | loss 1.90 (klv 0.57 kla 0.23 cev 0.270 cea 0.530 cons 0.12) | sh klv 30% kla 25% cev 14% cea 28% cons 3% | conc(pred/tgt) v 25.4/75.5 a 3.6/26.4 | unsolved (30% of batch) v 6.89/18.19 a 0.82/4.16 | dr 2% ply 61 buf 150k aux 382738 | lr 1.98e-03 | vs 0 (no-MCTS) W21 D0 L9
+[2026-09-01 04:35:26]          perf: 0.17 games/s | wait(sp) 93% train 7% | NNbatch 130 (59 fwd/s)
+[2026-09-01 06:18:05] ep   4000 | loss 1.86 (klv 0.46 kla 0.30 cev 0.247 cea 0.518 cons 0.08) | sh klv 25% kla 32% cev 13% cea 28% cons 2% | conc(pred/tgt) v 35.2/76.8 a 6.0/29.0 | unsolved (28% of batch) v 7.72/16.70 a 1.06/4.27 | dr 2% ply 61 buf 150k aux 524744 | lr 1.97e-03 | vs 0 (no-MCTS) W20 D0 L10
+[2026-09-01 06:18:05]          perf: 0.16 games/s | wait(sp) 93% train 7% | NNbatch 130 (59 fwd/s)
+[2026-09-01 08:00:26] ep   5000 | loss 1.64 (klv 0.38 kla 0.20 cev 0.270 cea 0.547 cons 0.09) | sh klv 23% kla 24% cev 16% cea 33% cons 3% | conc(pred/tgt) v 31.0/74.3 a 5.5/26.8 | unsolved (29% of batch) v 5.08/12.25 a 0.66/2.79 | dr 2% ply 61 buf 150k aux 672549 | lr 1.95e-03
+[2026-09-01 08:00:26]          DEEP Elo@64: 5000=1099  random=954  0=946
+[2026-09-01 08:00:26]          perf: 0.16 games/s | wait(sp) 93% train 7% | NNbatch 130 (59 fwd/s)

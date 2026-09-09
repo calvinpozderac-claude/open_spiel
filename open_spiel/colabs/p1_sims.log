@@ -1,0 +1,24 @@
+[2026-09-08 01:42:17] === P1 SIMS: resume ep40000 -> 48000, full_sims 400->1000 (mean sims 220->460) -> othello_benchmark/bench_HYBRID_p1_sims ===
+[2026-09-08 01:42:19] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-09-08 01:42:19]   (no optimizer state in the checkpoint — starting Adam moments from zero)
+[2026-09-08 01:42:19] resumed at ep 40000
+[2026-09-08 01:42:19] device=privateuseone:0 backend=directml | params=330,632 | search_agg=additive_mle target_agg=avgconc | start_ep=40001
+[2026-09-08 03:04:44] ep  41000 | loss 2.09 (klv 0.32 kla 0.31 cev 0.323 cea 0.626 cons 0.40) | sh klv 15% kla 30% cev 15% cea 30% cons 10% | conc(pred/tgt) v 33.5/71.7 a 11.2/29.5 | unsolved (36% of batch) v 11.21/22.22 a 6.79/11.26 | dr 3% ply 61 buf 169k aux 109111 | lr 1.94e-04 | vs 40000 (no-MCTS) W13 D1 L16
+[2026-09-08 03:04:44]          perf: 0.21 games/s | wait(sp) 92% train 8% | NNbatch 87 (56 fwd/s)
+[2026-09-08 04:32:11] ep  42000 | loss 1.75 (klv 0.26 kla 0.26 cev 0.299 cea 0.603 cons 0.13) | sh klv 15% kla 30% cev 17% cea 34% cons 4% | conc(pred/tgt) v 36.9/73.4 a 11.6/29.7 | unsolved (34% of batch) v 12.68/20.96 a 6.92/10.34 | dr 2% ply 61 buf 300k aux 223813 | lr 1.62e-04 | vs 40000 (no-MCTS) W14 D3 L13
+[2026-09-08 04:32:11]          perf: 0.19 games/s | wait(sp) 92% train 8% | NNbatch 86 (56 fwd/s)
+[2026-09-08 05:59:08] ep  43000 | loss 1.78 (klv 0.26 kla 0.29 cev 0.302 cea 0.581 cons 0.09) | sh klv 15% kla 33% cev 17% cea 33% cons 3% | conc(pred/tgt) v 36.0/71.3 a 11.3/28.4 | unsolved (37% of batch) v 12.41/21.36 a 6.76/10.20 | dr 2% ply 61 buf 300k aux 336227 | lr 1.34e-04 | vs 40000 (no-MCTS) W11 D0 L19
+[2026-09-08 05:59:08]          perf: 0.19 games/s | wait(sp) 92% train 8% | NNbatch 86 (53 fwd/s)
+[2026-09-08 07:21:26] ep  44000 | loss 1.94 (klv 0.31 kla 0.30 cev 0.313 cea 0.648 cons 0.15) | sh klv 16% kla 31% cev 16% cea 33% cons 4% | conc(pred/tgt) v 36.3/73.2 a 11.3/29.2 | unsolved (34% of batch) v 12.86/21.09 a 6.61/9.70 | dr 3% ply 60 buf 300k aux 450907 | lr 1.09e-04 | vs 40000 (no-MCTS) W22 D0 L8
+[2026-09-08 07:21:26]          perf: 0.20 games/s | wait(sp) 92% train 8% | NNbatch 87 (56 fwd/s)
+[2026-09-08 08:44:49] ep  45000 | loss 1.85 (klv 0.33 kla 0.31 cev 0.291 cea 0.565 cons 0.09) | sh klv 18% kla 33% cev 16% cea 30% cons 3% | conc(pred/tgt) v 36.8/74.4 a 11.4/30.3 | unsolved (32% of batch) v 12.58/20.21 a 6.70/10.00 | dr 3% ply 61 buf 300k aux 564506 | lr 8.84e-05
+[2026-09-08 08:44:49]          DEEP Elo@64: 45000=1228  40000=1078  random=823
+[2026-09-08 08:44:49]          perf: 0.20 games/s | wait(sp) 92% train 8% | NNbatch 87 (56 fwd/s)
+[2026-09-08 10:06:35] ep  46000 | loss 1.94 (klv 0.31 kla 0.30 cev 0.319 cea 0.634 cons 0.16) | sh klv 16% kla 31% cev 17% cea 33% cons 4% | conc(pred/tgt) v 36.8/70.6 a 10.8/28.4 | unsolved (35% of batch) v 10.50/16.75 a 5.95/8.78 | dr 3% ply 60 buf 300k aux 677701 | lr 7.11e-05 | vs 45000 (no-MCTS) W16 D1 L13
+[2026-09-08 10:06:35]          perf: 0.20 games/s | wait(sp) 90% train 8% | NNbatch 87 (55 fwd/s)
+[2026-09-08 11:26:57] ep  47000 | loss 1.91 (klv 0.34 kla 0.29 cev 0.332 cea 0.604 cons 0.10) | sh klv 18% kla 31% cev 17% cea 32% cons 3% | conc(pred/tgt) v 34.3/72.2 a 11.1/29.7 | unsolved (36% of batch) v 11.42/22.25 a 6.16/10.22 | dr 3% ply 60 buf 300k aux 783512 | lr 5.76e-05 | vs 45000 (no-MCTS) W14 D2 L14
+[2026-09-08 11:26:57]          perf: 0.21 games/s | wait(sp) 92% train 8% | NNbatch 86 (56 fwd/s)
+[2026-09-08 12:49:57] ep  48000 | loss 1.88 (klv 0.31 kla 0.29 cev 0.318 cea 0.615 cons 0.08) | sh klv 17% kla 31% cev 17% cea 33% cons 2% | conc(pred/tgt) v 35.4/72.7 a 11.2/30.6 | unsolved (34% of batch) v 13.15/20.00 a 6.43/10.53 | dr 4% ply 61 buf 300k aux 901528 | lr 4.79e-05 | vs 45000 (no-MCTS) W14 D1 L15
+[2026-09-08 12:49:57]          perf: 0.20 games/s | wait(sp) 92% train 8% | NNbatch 87 (56 fwd/s)
+[2026-09-08 12:49:58] === done in 40060s ===
+[2026-09-08 12:49:58] P1SIMS DONE

@@ -1,0 +1,24 @@
+[2026-09-08 12:50:51] === P1 EXPLORE: resume ep40000 -> 48000, temp_threshold 20->30 -> othello_benchmark/bench_HYBRID_p1_explore ===
+[2026-09-08 12:50:53] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-09-08 12:50:53]   (no optimizer state in the checkpoint — starting Adam moments from zero)
+[2026-09-08 12:50:53] resumed at ep 40000
+[2026-09-08 12:50:53] device=privateuseone:0 backend=directml | params=330,632 | search_agg=additive_mle target_agg=avgconc | start_ep=40001
+[2026-09-08 13:33:04] ep  41000 | loss 3.51 (klv 1.77 kla 0.36 cev 0.365 cea 0.598 cons 0.09) | sh klv 50% kla 21% cev 10% cea 17% cons 1% | conc(pred/tgt) v 33.2/61.3 a 10.1/22.4 | unsolved (49% of batch) v 14.42/21.64 a 7.13/10.58 | dr 2% ply 60 buf 121k aux 61460 | lr 1.94e-04 | vs 40000 (no-MCTS) W12 D1 L17
+[2026-09-08 13:33:04]          perf: 0.40 games/s | wait(sp) 83% train 17% | NNbatch 94 (50 fwd/s)
+[2026-09-08 14:15:26] ep  42000 | loss 1.65 (klv 0.22 kla 0.20 cev 0.348 cea 0.624 cons 0.12) | sh klv 13% kla 24% cev 21% cea 38% cons 4% | conc(pred/tgt) v 36.6/61.7 a 11.0/22.5 | unsolved (47% of batch) v 13.25/18.63 a 6.95/9.46 | dr 3% ply 60 buf 250k aux 129886 | lr 1.62e-04 | vs 40000 (no-MCTS) W8 D0 L22
+[2026-09-08 14:15:26]          perf: 0.39 games/s | wait(sp) 83% train 16% | NNbatch 93 (50 fwd/s)
+[2026-09-08 14:56:39] ep  43000 | loss 1.69 (klv 0.27 kla 0.21 cev 0.362 cea 0.595 cons 0.11) | sh klv 16% kla 24% cev 21% cea 35% cons 3% | conc(pred/tgt) v 34.2/61.8 a 10.8/23.0 | unsolved (48% of batch) v 13.84/20.98 a 7.14/10.10 | dr 3% ply 61 buf 300k aux 197712 | lr 1.34e-04 | vs 40000 (no-MCTS) W7 D1 L22
+[2026-09-08 14:56:39]          perf: 0.40 games/s | wait(sp) 83% train 17% | NNbatch 93 (50 fwd/s)
+[2026-09-08 15:36:05] ep  44000 | loss 2.14 (klv 0.66 kla 0.22 cev 0.371 cea 0.625 cons 0.09) | sh klv 31% kla 20% cev 17% cea 29% cons 2% | conc(pred/tgt) v 34.8/62.1 a 10.5/23.1 | unsolved (47% of batch) v 12.46/20.03 a 6.77/10.01 | dr 2% ply 61 buf 300k aux 259696 | lr 1.09e-04 | vs 40000 (no-MCTS) W13 D0 L17
+[2026-09-08 15:36:05]          perf: 0.42 games/s | wait(sp) 82% train 17% | NNbatch 94 (50 fwd/s)
+[2026-09-08 16:19:24] ep  45000 | loss 1.68 (klv 0.23 kla 0.21 cev 0.371 cea 0.608 cons 0.09) | sh klv 14% kla 25% cev 22% cea 36% cons 3% | conc(pred/tgt) v 32.3/61.9 a 10.5/23.0 | unsolved (47% of batch) v 12.31/19.66 a 7.38/10.56 | dr 3% ply 61 buf 300k aux 323409 | lr 8.84e-05
+[2026-09-08 16:19:24]          DEEP Elo@64: 45000=1174  40000=1147  random=808
+[2026-09-08 16:19:24]          perf: 0.40 games/s | wait(sp) 83% train 17% | NNbatch 93 (50 fwd/s)
+[2026-09-08 16:59:52] ep  46000 | loss 1.70 (klv 0.21 kla 0.22 cev 0.375 cea 0.639 cons 0.07) | sh klv 12% kla 26% cev 22% cea 38% cons 2% | conc(pred/tgt) v 32.5/61.2 a 10.3/22.1 | unsolved (48% of batch) v 12.57/19.20 a 7.08/9.91 | dr 2% ply 61 buf 300k aux 385863 | lr 7.11e-05 | vs 45000 (no-MCTS) W17 D0 L13
+[2026-09-08 16:59:52]          perf: 0.39 games/s | wait(sp) 79% train 17% | NNbatch 94 (49 fwd/s)
+[2026-09-08 17:41:58] ep  47000 | loss 2.02 (klv 0.62 kla 0.21 cev 0.355 cea 0.573 cons 0.09) | sh klv 31% kla 21% cev 18% cea 28% cons 2% | conc(pred/tgt) v 33.0/63.3 a 11.1/23.8 | unsolved (47% of batch) v 13.97/22.40 a 7.61/11.04 | dr 2% ply 61 buf 300k aux 452319 | lr 5.76e-05 | vs 45000 (no-MCTS) W13 D2 L15
+[2026-09-08 17:41:58]          perf: 0.40 games/s | wait(sp) 83% train 16% | NNbatch 93 (50 fwd/s)
+[2026-09-08 18:24:02] ep  48000 | loss 1.71 (klv 0.24 kla 0.19 cev 0.393 cea 0.651 cons 0.08) | sh klv 14% kla 23% cev 23% cea 38% cons 2% | conc(pred/tgt) v 32.7/59.9 a 10.1/21.6 | unsolved (49% of batch) v 12.02/18.01 a 6.65/9.31 | dr 3% ply 61 buf 300k aux 517243 | lr 4.79e-05 | vs 45000 (no-MCTS) W11 D3 L16
+[2026-09-08 18:24:02]          perf: 0.40 games/s | wait(sp) 83% train 16% | NNbatch 93 (50 fwd/s)
+[2026-09-08 18:24:03] === done in 19992s ===
+[2026-09-08 18:24:03] P1EXPLORE DONE

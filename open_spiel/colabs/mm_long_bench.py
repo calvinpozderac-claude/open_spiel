@@ -30,7 +30,13 @@ import time
 
 import numpy as np
 
-CKPT_DIR = 'othello_benchmark/bench_MM_long'
+# Configured by environment so a second run can reuse this protocol unchanged.
+# It MUST be the environment rather than module globals a wrapper overwrites:
+# _play_level spawns a multiprocessing.Pool, Windows starts those with 'spawn',
+# and each child re-imports this module fresh -- an override assigned in the
+# parent would be silently lost in the workers, which would then score the
+# WRONG run's checkpoints. Defaults reproduce the MM_long run exactly.
+CKPT_DIR = os.environ.get('BENCH_CKPT_DIR', 'othello_benchmark/bench_MM_long')
 # latest.pt is rewritten every quick_eval_every (1000) episodes, whereas
 # bench_<ep>.pt only lands every deep_eval_every (5000). Snapshotting latest.pt
 # gives 5x the benchmark resolution with no restart and no lost episodes.
@@ -38,10 +44,11 @@ CKPT_DIR = 'othello_benchmark/bench_MM_long'
 # The snapshots go in a SEPARATE directory on purpose: _pool_labels() scans the
 # training checkpoint dir to pick frozen self-play opponents, so dropping extra
 # bench_<ep>.pt files in there would silently change the training distribution.
-SNAP_DIR = 'othello_benchmark/bench_MM_long_snaps'
-BENCH_EVERY = 1000
-RESULTS = 'mm_long_bench.json'
-LOG = 'mm_long_bench.log'
+SNAP_DIR = os.environ.get('BENCH_SNAP_DIR',
+                          'othello_benchmark/bench_MM_long_snaps')
+BENCH_EVERY = int(os.environ.get('BENCH_EVERY', '1000'))
+RESULTS = os.environ.get('BENCH_RESULTS', 'mm_long_bench.json')
+LOG = os.environ.get('BENCH_LOG', 'mm_long_bench.log')
 SIMS = 1000
 GAMES_PER_LEVEL = 51        # 17 x 3 workers, so the split is exact
 OUR_TEMP = 64.0
@@ -112,7 +119,18 @@ def _worker(args):
     import policy_screen as ps
     import edax_bot as eb
 
-    net = c4.load_benchmark_net(SNAP_DIR, label, ad.MM_SIG)
+    # Read the architecture off the checkpoint. ad.MM_SIG is (32, 3, 8), which
+    # is bench_MM's shape; the OLIVAW run is 10 blocks and would raise here.
+    import re as _re
+    import torch as _torch
+    _sd = _torch.load(os.path.join(SNAP_DIR, f'bench_{label}.pt'),
+                      map_location='cpu', weights_only=True)
+    _sig = (int(_sd['stem.0.weight'].shape[0]),
+            len({int(m.group(1)) for k in _sd
+                 if (m := _re.match(r'body\.(\d+)\.', k))}),
+            int(_sd['head.0.weight'].shape[0]))
+    del _sd
+    net = c4.load_benchmark_net(SNAP_DIR, label, _sig)
     opp = _rung_opponent(eb, game, rung, seed)
     pol = dict(mode='value', k=0.0, sel_temp=OUR_TEMP)
     rng = np.random.default_rng(seed)
@@ -233,10 +251,23 @@ def main():
                                  edax_rating=rating, rungs=rungs)
             with open(RESULTS, 'w') as fh:
                 json.dump(done, fh, indent=2, sort_keys=True)
-            prof = '  '.join(f'{k} {v["score"]:.0%}'
-                             for k, v in sorted(
-                                 rungs.items(), key=lambda kv: float(kv[0][1:])))
-            _log(f'  BENCHMARK ep {ep}: Edax rating {rating:.2f}  |  {prof}')
+            ordered = sorted(rungs.items(), key=lambda kv: float(kv[0][1:]))
+            prof = '  '.join(f'{k} {v["score"]:.0%}' for k, v in ordered)
+            # The profile leads, not the rating. `rating` interpolates a 50%
+            # crossing, which assumes win rate falls as level rises -- and on
+            # ep17000 that assumption broke badly enough to matter: L3 11.8%
+            # (3 seed sets) against L4 38.6% made it report 2.14 off the L2->L3
+            # crossing while discarding a 38% L4 entirely. It is still written
+            # to the JSON for continuity with the earlier rows, but a scalar
+            # that silently drops the top rung should not be the headline.
+            scores = [v['score'] for _, v in ordered]
+            inverted = [f'{ordered[i][0]}<{ordered[i+1][0]}'
+                        for i in range(len(scores) - 1)
+                        if scores[i] + 0.10 < scores[i + 1]]
+            warn = (f'  ** NON-MONOTONE ({", ".join(inverted)}): rating '
+                    f'{rating:.2f} is not meaningful **' if inverted else
+                    f'  (rating {rating:.2f})')
+            _log(f'  BENCHMARK ep {ep}: {prof}{warn}')
         if once:
             return
         time.sleep(POLL_S)

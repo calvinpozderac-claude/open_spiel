@@ -1,0 +1,5 @@
+[2026-09-03 21:53:36] WRAPPER: wrapper started (pid 29920)
+[2026-09-03 21:53:36] WRAPPER: launching run_avgconc process
+[2026-09-05 03:53:18] WRAPPER: process exited with code 0 -- re-checking after a pause
+[2026-09-05 03:53:23] WRAPPER: sentinel found -- run complete, exiting wrapper
+[2026-09-05 03:53:23] WRAPPER: wrapper done
