@@ -221,8 +221,19 @@ AGG_SUM = 'sum'
 AGG_ADDITIVE = 'additive'
 AGG_ADDITIVE_MLE = 'additive_mle'
 AGG_AVGCONC = 'avgconc'
+# Path-attenuated confidence: each backup's contribution to a node's
+# concentration is min(leaf's own α₀, every selection-belief α₀ along the path
+# BELOW that node).  A confident leaf reached through exploratory (low-
+# confidence) moves backs up as low-confidence evidence — the "would we
+# actually get there" attenuation.  Direction is SM/n as in 'avgconc'.
+#   'pathsum'  concentration = Σ attenuated confidences → grows with visits
+#              (Thompson annealing; the SEARCH flavor)
+#   'pathavg'  concentration = mean attenuated confidence → budget-independent
+#              (the TARGET flavor)
+AGG_PATHSUM = 'pathsum'
+AGG_PATHAVG = 'pathavg'
 AGGREGATIONS = (AGG_MIXTURE, AGG_MEAN, AGG_SUM, AGG_ADDITIVE, AGG_ADDITIVE_MLE,
-                AGG_AVGCONC)
+                AGG_AVGCONC, AGG_PATHSUM, AGG_PATHAVG)
 
 # ── 'additive_mle' tuning.  Speed is preferred to exactness here: the estimate
 # is a search statistic, not a reported quantity, and it moves slowly.
@@ -402,6 +413,23 @@ def observed_alpha(acc, mode):
         sa = acc[4]
         return np.array([max(sa[0], ALPHA_FLOOR), max(sa[1], ALPHA_FLOOR),
                          max(sa[2], ALPHA_FLOOR)])
+    if mode == AGG_PATHSUM or mode == AGG_PATHAVG:
+        # Direction = mean of the backed-up leaf means (SM/n, like 'avgconc').
+        # Concentration = path-attenuated confidence (slot 8): each backup
+        # contributed min(leaf α₀, selection-belief α₀ of every edge below the
+        # node), so evidence reached through exploratory moves counts as
+        # low-confidence no matter how sure the leaf itself was.  'pathsum'
+        # sums (grows with visits → Thompson anneals: the SEARCH flavor);
+        # 'pathavg' averages (budget-independent: the TARGET flavor).
+        sc = acc[8]
+        if sc > 0.0:
+            sm = acc[1]
+            conc = sc if mode == AGG_PATHSUM else sc / n
+            inv = 1.0 / n
+            return np.array([max(sm[0] * inv * conc, ALPHA_FLOOR),
+                             max(sm[1] * inv * conc, ALPHA_FLOOR),
+                             max(sm[2] * inv * conc, ALPHA_FLOOR)])
+        mode = AGG_AVGCONC       # accumulator built without path tracking
     if mode == AGG_AVGCONC:
         # Direction = mean of the leaf mean-predictions (SM/n, equal-weighted).
         # Concentration = mean of the leaf concentrations (SA.sum()/n).  Neither
@@ -441,9 +469,11 @@ def _new_acc():
         [5] L    = sum log m      — 'additive_mle' sufficient statistic
         [6] A    = current MLE estimate
         [7] next refresh threshold
-    Slots 5-7 are only maintained when an 'additive_mle' rule is selected."""
+        [8] SC   = sum of PATH-ATTENUATED confidences — 'pathsum'/'pathavg'
+    Slots 5-7 are only maintained when an 'additive_mle' rule is selected;
+    slot 8 only when a path rule is (see _PATHCONF_ACTIVE / _backup)."""
     return [0.0, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0]
+            [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0, 0.0]
 
 
 def _dir_kl(a, b):
@@ -554,6 +584,7 @@ def _acc_add(acc, pl):
 # ══════════════════════════════════════════════════════════════════════════════
 _SEARCH_AGG = AGG_MIXTURE      # evidence rule used for SELECTION
 _TARGET_AGG = AGG_MIXTURE      # evidence rule used for TRAINING TARGETS
+_PATHCONF_ACTIVE = False       # maintain acc slot 8 (path-attenuated conf)?
 _GAUSSIAN_SELECT = False       # exact Dirichlet draw vs cached-moment Gaussian
 _VIRTUAL_LOSS = 1.0            # penalty on v for an in-flight edge
 _MLE_ACTIVE = False            # maintain the 'additive_mle' log-sums in _acc_add
@@ -568,6 +599,7 @@ def set_search(search_agg=None, target_agg=None, selection=None,
     from their cfg so a spawned process matches the parent exactly."""
     global _SEARCH_AGG, _TARGET_AGG, _GAUSSIAN_SELECT, _VIRTUAL_LOSS, _MLE_ACTIVE
     global _BACKUP_SAMPLE, _CONF_OFFSET, _HEAD_CONF_BIAS, _TARGET_CONC_FLOOR
+    global _PATHCONF_ACTIVE
     if target_conc_floor is not None:
         _TARGET_CONC_FLOOR = float(target_conc_floor)
     if conf_offset is not None:
@@ -593,6 +625,8 @@ def set_search(search_agg=None, target_agg=None, selection=None,
     if virtual_loss is not None:
         _VIRTUAL_LOSS = float(virtual_loss)
     _MLE_ACTIVE = AGG_ADDITIVE_MLE in (_SEARCH_AGG, _TARGET_AGG)
+    _PATHCONF_ACTIVE = bool({AGG_PATHSUM, AGG_PATHAVG}
+                            & {_SEARCH_AGG, _TARGET_AGG})
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -764,8 +798,34 @@ def _backup(path, payloads):
     from n_{i−1} share the SAME perspective, so one payload serves both.  The
     deepest edge on the path uses payloads[1] and it alternates upward from
     there.  O(depth) scalar work per simulation; the only array write is one
-    refreshed row of `alpha_sel` per level."""
+    refreshed row of `alpha_sel` per level.
+
+    Under a path rule (see AGG_PATHSUM), a running confidence `pc` climbs with
+    the walk: seeded at the leaf's own α₀ (perspective-invariant), min'd with
+    each edge's PRE-UPDATE selection-belief α₀ as it is crossed.  The EDGE
+    accumulator takes pc before its own edge's confidence is folded in (Q(s,a)
+    conditions on taking a; only the path BELOW a is uncertain), the NODE
+    accumulator after (reaching a from s is itself a choice)."""
     sel = 1
+    if _PATHCONF_ACTIVE:
+        a = payloads[0][3]
+        pc = a[0] + a[1] + a[2]
+        for node, idx in reversed(path):
+            node.vloss[idx] -= 1
+            pl = payloads[sel]
+            eacc = node.eacc[idx]
+            _acc_add(eacc, pl)
+            eacc[8] += pc
+            row = node.alpha_sel[idx]
+            ec = row[0] + row[1] + row[2]
+            if ec < pc:
+                pc = ec
+            nacc = node.nacc
+            _acc_add(nacc, pl)
+            nacc[8] += pc
+            node.refresh_edge(idx)
+            sel ^= 1
+        return
     for node, idx in reversed(path):
         node.vloss[idx] -= 1
         pl = payloads[sel]
@@ -777,8 +837,13 @@ def _backup(path, payloads):
 
 def _seed_leaf(leaf):
     """A freshly expanded node's first piece of evidence about itself is its own
-    network belief, in its own perspective."""
-    _acc_add(leaf.nacc, _payload_leaf(leaf.v_alpha)[0])
+    network belief, in its own perspective.  Under a path rule the path to
+    itself is empty, so the attenuated confidence is just its own α₀."""
+    pl = _payload_leaf(leaf.v_alpha)[0]
+    _acc_add(leaf.nacc, pl)
+    if _PATHCONF_ACTIVE:
+        a = pl[3]
+        leaf.nacc[8] += a[0] + a[1] + a[2]
 
 
 def _node_solved_outcome(node):
