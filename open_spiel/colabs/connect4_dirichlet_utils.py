@@ -1324,6 +1324,8 @@ class Config:
     # to uniform before the mean head finds its footing.
     edl_lambda: float = 1.0
     edl_anneal_eps: int = 10_000
+    dump_buffer_path: str = ''        # pickle the replay buffer here at the
+                                      # end of the run (loss_lab.py datasets)
     cons_frac: float = 1.0            # fraction of samples whose SUCCESSOR is
                                       # forwarded for the consistency term.  Each
                                       # one adds a row to a second forward block,
@@ -3694,6 +3696,21 @@ if _HAS_TORCH:
         finally:
             bar.close()
             self_play.shutdown()
+            # Offline loss experiments (loss_lab.py) train on a frozen buffer;
+            # dumping here (finally) also captures a partial buffer on an
+            # interrupted generation run.
+            if getattr(cfg, 'dump_buffer_path', ''):
+                import pickle
+                try:
+                    tmp = cfg.dump_buffer_path + '.tmp'
+                    with open(tmp, 'wb') as fh:
+                        pickle.dump(replay_buffer, fh,
+                                    protocol=pickle.HIGHEST_PROTOCOL)
+                    os.replace(tmp, cfg.dump_buffer_path)
+                    log(f'dumped {len(replay_buffer)} buffer samples -> '
+                        f'{cfg.dump_buffer_path}')
+                except Exception as e:
+                    log(f'  ! buffer dump failed: {type(e).__name__}: {e}')
         return hist
 
     # ══════════════════════════════════════════════════════════════════════════
