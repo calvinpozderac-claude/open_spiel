@@ -44,6 +44,21 @@ ARMS = {
     'HYB_noVd':  dict(dcea=2.0, evv=1.0, eva=1.0, cons=0.5),
     'DCE_only':  dict(dcev=1.0, dcea=2.0, cons=0.5),
     'HYB_heavy': dict(dcev=2.0, dcea=4.0, evv=1.0, eva=1.0, cons=0.5),
+    # Added after the first weak-data results: OLD beat HYB on everything,
+    # plausibly because full Dirichlet-KL distillation is implicitly
+    # confidence-weighted (spiky targets pull harder) where direction-only CE
+    # is not.  KL_EDL keeps that distillation but hands the grounded signal to
+    # the evidential pair; DKL_only isolates what OLD's cev/cea grounding buys.
+    'KL_EDL':    dict(klv=1.0, kla=2.0, evv=1.0, eva=1.0, cons=0.5),
+    'DKL_only':  dict(klv=1.0, kla=2.0, cons=0.5),
+    # From the weak-data decomposition: klv wins the STATE mean (OLD's MSE),
+    # dcea wins the ACTION ranking (DCE_only's top1, +3.5pt over kla), and eva
+    # COSTS ~5pt of top1 (HYB vs DCE_only).  So the candidate optimum is
+    # asymmetric per head; BEST_B keeps a light eva so the action conf head
+    # is not fully starved (it feeds search's alpha_p, which this offline lab
+    # cannot see).
+    'BEST_A':    dict(klv=1.0, dcea=2.0, evv=1.0, cons=0.5),
+    'BEST_B':    dict(klv=1.0, dcea=2.0, evv=1.0, eva=0.25, cons=0.5),
 }
 BATCH = 1024
 LR_PEAK, LR_WARM, LR_MINF = 2e-3, 100, 0.1

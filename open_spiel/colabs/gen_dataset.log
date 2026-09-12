@@ -1,0 +1,32 @@
+[2026-09-11 22:07:27] rewound othello_benchmark/dataset_weak_src to generation 10000 (optimizer state dropped, 0 Elo entries kept)
+[2026-09-11 22:07:27] === DATASET weak: HYBRID@10000 frozen, 1500 eps, search=pathsum target=avgconc -> othello_benchmark/dataset_weak.pkl ===
+[2026-09-11 22:07:30] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-09-11 22:07:30]   (no optimizer state in the checkpoint — starting Adam moments from zero)
+[2026-09-11 22:07:30] resumed at ep 10000
+[2026-09-11 22:07:30] device=privateuseone:0 backend=directml | params=330,632 | search_agg=pathsum target_agg=avgconc | start_ep=10001
+[2026-09-11 22:43:05] ep  11000 | loss 2.79 (evv 1.51 eva 1.21 regv 0.00 rega 0.00 cev 0.375 cea 0.549 cons 0.12) | lam 1.00 | sh evv 54% eva 44% reg 0% cons 2% | conc(pred/tgt) v 19.8/56.5 a 4.0/17.9 | unsolved (52% of batch) v 6.95/15.96 a 2.52/6.04 | dr 2% ply 61 buf 117k aux 57194 | lr 1.00e-12 | vs 10000 (no-MCTS) W1 D0 L1
+[2026-09-11 22:43:05]          perf: 0.47 games/s | wait(sp) 80% train 20% | NNbatch 116 (49 fwd/s)
+[2026-09-11 23:00:54] dumped 176689 buffer samples -> othello_benchmark/dataset_weak.pkl
+[2026-09-11 23:00:54] === dataset weak done in 3207s ===
+[2026-09-11 23:00:54] DATASET WEAK DONE
+[2026-09-12 01:44:37] rewound othello_benchmark/dataset_strong_src to generation 50000 (optimizer state dropped, 0 Elo entries kept)
+[2026-09-12 01:44:37] === DATASET strong: HYBRID@50000 frozen, 2000 eps, search=pathsum target=avgconc -> othello_benchmark/dataset_strong.pkl ===
+[2026-09-12 01:44:40] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-09-12 01:44:40]   (no optimizer state in the checkpoint — starting Adam moments from zero)
+[2026-09-12 01:44:40] resumed at ep 50000
+[2026-09-12 01:44:40] device=privateuseone:0 backend=directml | params=330,632 | search_agg=pathsum target_agg=avgconc | start_ep=50001
+[2026-09-12 02:19:29] ep  51000 | loss 2.84 (evv 1.29 eva 1.03 regv 0.16 rega 0.30 cev 0.393 cea 0.634 cons 0.10) | lam 1.00 | sh evv 46% eva 36% reg 16% cons 2% | conc(pred/tgt) v 33.1/58.5 a 9.8/21.0 | unsolved (50% of batch) v 10.48/17.31 a 6.13/9.00 | dr 3% ply 61 buf 118k aux 57887 | lr 1.00e-12 | vs 50000 (no-MCTS) W1 D0 L1
+[2026-09-12 02:19:29]          perf: 0.48 games/s | wait(sp) 79% train 21% | NNbatch 114 (49 fwd/s)
+[2026-09-12 09:40:41] rewound othello_benchmark/dataset_strong_src to generation 50000 (optimizer state dropped, 1 Elo entries kept)
+[2026-09-12 09:40:41] === DATASET strong: HYBRID@50000 frozen, 2000 eps, search=pathsum target=avgconc -> othello_benchmark/dataset_strong.pkl ===
+[2026-09-12 09:40:44] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-09-12 09:40:44]   (no optimizer state in the checkpoint — starting Adam moments from zero)
+[2026-09-12 09:40:44] resumed at ep 50000
+[2026-09-12 09:40:44] device=privateuseone:0 backend=directml | params=330,632 | search_agg=pathsum target_agg=avgconc | start_ep=50001
+[2026-09-12 10:15:34] ep  51000 | loss 3.06 (evv 1.45 eva 1.06 regv 0.19 rega 0.33 cev 0.422 cea 0.635 cons 0.08) | lam 1.00 | sh evv 47% eva 35% reg 17% cons 1% | conc(pred/tgt) v 29.8/57.3 a 9.2/20.0 | unsolved (52% of batch) v 11.54/18.43 a 6.60/9.14 | dr 3% ply 60 buf 118k aux 57713 | lr 1.00e-12 | vs 50000 (no-MCTS) W0 D0 L2
+[2026-09-12 10:15:34]          perf: 0.48 games/s | wait(sp) 79% train 20% | NNbatch 115 (49 fwd/s)
+[2026-09-12 10:51:30] ep  52000 | loss 2.96 (evv 1.38 eva 1.04 regv 0.18 rega 0.31 cev 0.414 cea 0.629 cons 0.09) | lam 1.00 | sh evv 47% eva 35% reg 17% cons 2% | conc(pred/tgt) v 31.3/58.4 a 10.0/21.1 | unsolved (52% of batch) v 13.52/20.21 a 6.85/10.15 | dr 2% ply 60 buf 240k aux 119637 | lr 1.00e-12 | vs 50000 (no-MCTS) W0 D0 L2
+[2026-09-12 10:51:30]          perf: 0.46 games/s | wait(sp) 80% train 20% | NNbatch 114 (49 fwd/s)
+[2026-09-12 10:51:38] dumped 240608 buffer samples -> othello_benchmark/dataset_strong.pkl
+[2026-09-12 10:51:38] === dataset strong done in 4257s ===
+[2026-09-12 10:51:38] DATASET STRONG DONE
