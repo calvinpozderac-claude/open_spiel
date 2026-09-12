@@ -82,3 +82,7 @@ open_spiel/.vs
 # workers can't pickle notebook-cell functions, so the worker module is
 # written out as a real file before spawning)
 boop_mp_worker.py
+
+# loss-lab datasets (regenerable via gen_dataset.py)
+open_spiel/colabs/othello_benchmark/dataset_*.pkl
+open_spiel/colabs/othello_benchmark/dataset_*_src/
