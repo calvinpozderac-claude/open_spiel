@@ -956,7 +956,11 @@ def make_target(root):
     return {'obs': root.obs, 'legal': root.legal.copy(), 'v_obs': v_obs,
             'ev_idx': ev_idx, 'ev_alpha': ev_alpha, 'played': -1,
             'next_obs': None, 'next_term': -1, 'z': np.float32(0.0),
-            'z_w': np.float32(1.0), 'solved': False, 'player': int(root.player)}
+            'z_w': np.float32(1.0), 'solved': False, 'player': int(root.player),
+            # ply / game length, stamped by finish_episode -- the z-KL loss
+            # scales its target concentration by how noisy z is at this point
+            # (see full_loss _z_conc).  -1 = solver/exact sample (skipped there).
+            'zply': -1, 'zlen': -1}
 
 
 def _floor_conc(alpha, min_total):
@@ -982,11 +986,17 @@ def finish_episode(samples, returns):
     `z` is the result from THAT position's mover's perspective — the target of
     both cross-entropy terms.  Solver-labelled samples already carry an exact
     proven z and are left alone."""
-    for s in samples:
+    # samples are one-per-ply in play order, so the index IS the ply and the
+    # length IS the game's ply count -- exactly what the z-KL concentration
+    # schedule needs (plies-to-go = n-1-i, and ply relative to temp_threshold).
+    n = len(samples)
+    for i, s in enumerate(samples):
         if s['solved']:
             continue
         s['z'] = np.float32(returns[s['player']])
         s['z_w'] = np.float32(1.0)
+        s['zply'] = i
+        s['zlen'] = n
     return samples
 
 
@@ -1325,6 +1335,14 @@ class Config:
     # to uniform before the mean head finds its footing.
     edl_lambda: float = 1.0
     edl_anneal_eps: int = 10_000
+    # z-KL grounding (zklv/zkla): concentration schedule for the game-outcome
+    # soft-target.  See full_loss._z_conc.  Only used if loss_weights has
+    # zklv/zkla.  ply_sat defaults to temp_threshold at run time if left None.
+    z_kl_sched: str = 'ply'           # 'const' | 'plies' | 'ply'
+    z_kl_cmax: float = 16.0           # concentration for a fully-reliable z
+    z_kl_cmin: float = 1.0            # ...for the noisiest (opening) z
+    z_kl_tau: float = 12.0            # plies-to-go decay constant ('plies')
+    z_kl_ply_sat: int = None          # ply where 'ply' saturates (None=temp_threshold)
     dump_buffer_path: str = ''        # pickle the replay buffer here at the
                                       # end of the run (loss_lab.py datasets)
     cons_frac: float = 1.0            # fraction of samples whose SUCCESSOR is
@@ -2266,13 +2284,42 @@ if _HAS_TORCH:
     #   evv/eva   evidential risk + annealed regulariser on the grounded outcome
     #             z (needs `lam`).  The lab found these regress; kept for the arm.
     #   cev/cea   plain CE of the MEAN against z (the original z-grounding).
+    #   zklv/zkla Dirichlet KL to a z SOFT-TARGET whose concentration scales
+    #             with how reliable z is at this position (see _z_conc): the
+    #             KL form of z-grounding, so z trains concentration too, not
+    #             just the mean.  Gated to self-play samples (solver z is
+    #             already a klv spike).  Needs `z_sched`.
     #   cons      TD self-consistency KL, Q(s,a*) ~ flip(V(s')).
-    # See loss-lab / search-target study memories for why the default is
-    # distillation-only.
     LOSS_COMPONENTS = ('klv', 'kla', 'dcev', 'dcea', 'evv', 'eva',
-                       'cev', 'cea', 'cons')
+                       'cev', 'cea', 'zklv', 'zkla', 'cons')
 
-    def full_loss(out, out2, meta, weights, kl_normalize=False, lam=0.0):
+    # softened one-hot eps for the z soft-target mean.
+    Z_KL_EPS = 0.02
+
+    def _z_conc(meta, sched):
+        """Per-sample concentration c_z for the z soft-target, on device.
+
+        `sched` = (mode, cmax, cmin, tau, ply_sat).  z is one Monte-Carlo
+        sample of the position value; its reliability rises toward the terminal
+        (fewer, and after temp_threshold near-greedy, continuation moves), so
+        c_z should too:
+          'const'  c_z = cmax (isolates the KL form from any scheduling)
+          'plies'  c_z = cmin + (cmax-cmin)*exp(-plies_to_go/tau)   distance
+          'ply'    c_z = cmin + (cmax-cmin)*clip(ply/ply_sat,0,1)   injected
+                   noise -- saturates when temperature moves stop (ply>=ply_sat)
+        """
+        mode, cmax, cmin, tau, ply_sat = sched
+        ply, ln = meta['z_ply'], meta['z_len']
+        if mode == 'const':
+            return torch.full_like(ply, float(cmax))
+        if mode == 'plies':
+            ptg = (ln - 1.0 - ply).clamp_min(0.0)
+            return cmin + (cmax - cmin) * torch.exp(-ptg / max(tau, 1e-6))
+        frac = (ply / max(ply_sat, 1)).clamp(0.0, 1.0)      # 'ply'
+        return cmin + (cmax - cmin) * frac
+
+    def full_loss(out, out2, meta, weights, kl_normalize=False, lam=0.0,
+                  z_sched=('ply', 16.0, 1.0, 12.0, 20)):
         """Weighted combination of loss components on one batch.
 
         `out`  = network outputs for the batch positions              (B rows)
@@ -2280,6 +2327,7 @@ if _HAS_TORCH:
                  term needs, or None when nothing in the batch has one (B2 rows)
         `weights` = dict {component: weight}; only nonzero entries are computed.
         `lam`  = current (annealed) evidence-regulariser coefficient (evv/eva).
+        `z_sched` = (mode, cmax, cmin, tau, ply_sat) for zklv/zkla (see _z_conc).
         Returns (total, parts-dict-of-floats)."""
         w = weights
         def wt(name):
@@ -2368,6 +2416,26 @@ if _HAS_TORCH:
             L['cea'] = (pw * ce_a).sum() / pwn
             total = total + wt('cea') * L['cea']
 
+        # ── z as a KL target with reliability-scaled concentration ────────────
+        # Unlike cev/cea (CE on a one-hot, which trains only the mean), the KL
+        # to Dir(c_z * m_z) also pulls predicted CONCENTRATION toward c_z, and
+        # c_z scales with how trustworthy z is here (_z_conc).  Gated to
+        # self-play samples: solver z is already a klv spike, so including it
+        # would double-count.
+        if wt('zklv') or wt('zkla'):
+            m_z = Z_KL_EPS + (1.0 - 3.0 * Z_KL_EPS) * y            # (B,3), sums~1
+            cz = _z_conc(meta, z_sched)                            # (B,)
+            tgt_z = (cz.unsqueeze(-1) * m_z).clamp_min(ALPHA_FLOOR)
+        if wt('zklv'):
+            zwv = zw * meta['unsolved']                            # self-play only
+            L['zklv'] = ((zwv * _dir_kl_rows(tgt_z, v_alpha)).sum()
+                         / zwv.sum().clamp_min(1.0))
+            total = total + wt('zklv') * L['zklv']
+        if wt('zkla'):
+            # pw already excludes solver samples (played_w=0 there).
+            L['zkla'] = ((pw * _dir_kl_rows(tgt_z, q_played)).sum() / pwn)
+            total = total + wt('zkla') * L['zkla']
+
         # ── consistency: Q(s,a*) must match the resulting state's flipped value ─
         if wt('cons'):
             cw = meta['cons_w']
@@ -2416,7 +2484,7 @@ if _HAS_TORCH:
             # Stack every computed loss component (0.0 for absent ones) plus the
             # concentration diagnostics into ONE host transfer.
             comp_names = ('klv', 'kla', 'dcev', 'dcea', 'evv', 'eva',
-                          'regv', 'rega', 'cev', 'cea', 'cons')
+                          'regv', 'rega', 'cev', 'cea', 'zklv', 'zkla', 'cons')
             zero = total.detach() * 0.0
             comp_vals = [L.get(n, zero) for n in comp_names]
             diag = torch.stack([total, *comp_vals,
@@ -2443,6 +2511,8 @@ if _HAS_TORCH:
         v_obs = np.empty((B, 3), np.float32)
         z_idx = np.zeros(B, np.int64)
         z_w = np.zeros(B, np.float32)
+        z_ply = np.zeros(B, np.float32)
+        z_len = np.ones(B, np.float32)
         unsolved = np.zeros(B, np.float32)
         played = np.zeros(B, np.int64)
         played_w = np.zeros(B, np.float32)
@@ -2467,6 +2537,8 @@ if _HAS_TORCH:
             unsolved[i] = 0.0 if s['solved'] else 1.0
             z_w[i] = s['z_w']
             z_idx[i] = _Z_CORNER[int(round(float(s['z'])))]
+            z_ply[i] = float(s.get('zply', -1))
+            z_len[i] = float(s.get('zlen', -1))
             p = int(s['played'])
             if p >= 0:
                 played[i] = p
@@ -2494,7 +2566,8 @@ if _HAS_TORCH:
         # and is faster everywhere else too.
         i64 = np.concatenate([pad_act.reshape(-1), z_idx, played, cons_row])
         f32 = np.concatenate([ev_alpha.reshape(-1), v_obs.reshape(-1), z_w,
-                              played_w, cons_w, cons_term.reshape(-1), unsolved])
+                              played_w, cons_w, cons_term.reshape(-1), unsolved,
+                              z_ply, z_len])
         b8 = np.concatenate([pad_mask.reshape(-1), ev_mask.reshape(-1),
                              cons_isnn])
         ti = torch.from_numpy(i64).to(device)
@@ -2513,6 +2586,8 @@ if _HAS_TORCH:
             'cons_w':    tf[BK * 3 + B * 5:BK * 3 + B * 6],
             'cons_term': tf[BK * 3 + B * 6:BK * 3 + B * 9].view(B, 3),
             'unsolved':  tf[BK * 3 + B * 9:BK * 3 + B * 10],
+            'z_ply':     tf[BK * 3 + B * 10:BK * 3 + B * 11],
+            'z_len':     tf[BK * 3 + B * 11:BK * 3 + B * 12],
             'pad_mask':  tb[:BK].view(B, K),
             'ev_mask':   tb[BK:2 * BK].view(B, K),
             'cons_isnn': tb[2 * BK:2 * BK + B],
@@ -2541,7 +2616,8 @@ if _HAS_TORCH:
 
     def train_step(network, optimizer, batch, device, weights, grad_clip=1.0,
                    model_lock=None, kl_normalize=False, with_consistency=True,
-                   cons_frac=1.0, rng=None, lam=0.0):
+                   cons_frac=1.0, rng=None, lam=0.0,
+                   z_sched=('ply', 16.0, 1.0, 12.0, 20)):
         """One optimiser step, loss computed entirely ON-DEVICE for every backend.
 
         The consistency term needs the successor position's state belief, so the
@@ -2568,7 +2644,7 @@ if _HAS_TORCH:
                         if obs2 else None)
                 optimizer.zero_grad()
                 loss, parts = full_loss(out, out2, meta, weights, kl_normalize,
-                                        lam=lam)
+                                        lam=lam, z_sched=z_sched)
                 loss.backward()
                 gnorm = torch.nn.utils.clip_grad_norm_(network.parameters(),
                                                        grad_clip)
@@ -3270,7 +3346,7 @@ if _HAS_TORCH:
     # checkpoint has exactly the columns the plots and the eval line expect.
     _HIST_KEYS = ('ep', 'loss', 'klv', 'kla', 'dcev', 'dcea',
                   'evv', 'eva', 'regv', 'rega', 'cev', 'cea',
-                  'cons', 'draw_pct',
+                  'zklv', 'zkla', 'cons', 'draw_pct',
                   'plies', 'buf', 'aux', 'elo', 'quick_ep', 'q_w', 'q_d', 'q_l',
                   'cv_p', 'cv_t', 'ca_p', 'ca_t', 'uv_p', 'uv_t', 'ua_p',
                   'ua_t', 'unsolved', 'solved', 'solved_ep')
@@ -3602,6 +3678,8 @@ if _HAS_TORCH:
         lw = cfg.resolved_loss_weights()
         with_cons = lw.get('cons', 0.0) > 0.0
         has_edl = bool(lw.get('evv', 0.0) or lw.get('eva', 0.0))
+        z_sched = (cfg.z_kl_sched, cfg.z_kl_cmax, cfg.z_kl_cmin, cfg.z_kl_tau,
+                   cfg.z_kl_ply_sat if cfg.z_kl_ply_sat else cfg.temp_threshold)
         step_fails = 0
         step_rng = np.random.default_rng(cfg.seed + 991)
         try:
@@ -3634,7 +3712,7 @@ if _HAS_TORCH:
                                 kl_normalize=cfg.kl_normalize,
                                 with_consistency=with_cons,
                                 cons_frac=cfg.cons_frac, rng=step_rng,
-                                lam=lam)
+                                lam=lam, z_sched=z_sched)
                         except RuntimeError as e:
                             # Losing one step in thousands costs nothing; losing
                             # a multi-hour run to a transient device fault costs
@@ -3670,7 +3748,7 @@ if _HAS_TORCH:
                 ml = lambda k: float(np.mean(accs[k])) if accs[k] else float('nan')
                 hist['ep'].append(ep); hist['loss'].append(ml('loss'))
                 for k in ('klv', 'kla', 'dcev', 'dcea', 'evv', 'eva',
-                          'regv', 'rega', 'cev', 'cea', 'cons',
+                          'regv', 'rega', 'cev', 'cea', 'zklv', 'zkla', 'cons',
                           'cv_p', 'cv_t', 'ca_p', 'ca_t',
                           'uv_p', 'uv_t', 'ua_p', 'ua_t', 'unsolved'):
                     hist[k].append(ml(k))
@@ -3690,7 +3768,7 @@ if _HAS_TORCH:
                 # appear; the evidential regulariser rides on evv/eva at λ.
                 comp = {}
                 for n in ('klv', 'kla', 'dcev', 'dcea', 'evv', 'eva',
-                          'cev', 'cea', 'cons'):
+                          'cev', 'cea', 'zklv', 'zkla', 'cons'):
                     if lw.get(n):
                         comp[n] = lw[n] * ml(n)
                 if lw.get('evv') or lw.get('eva'):
@@ -3717,7 +3795,8 @@ if _HAS_TORCH:
                 # Show the trained components; cev/cea always (diagnostics).
                 trained = ' '.join(
                     f'{n} {ml(n):.3f}' for n in
-                    ('klv', 'kla', 'dcev', 'dcea', 'evv', 'eva', 'cons')
+                    ('klv', 'kla', 'dcev', 'dcea', 'evv', 'eva',
+                     'zklv', 'zkla', 'cons')
                     if lw.get(n))
                 lam_s = f'| lam {lam:.2f} ' if (lw.get('evv') or lw.get('eva')) else ''
                 diag = (f'loss {ml("loss"):.2f} ({trained} | '
