@@ -1309,12 +1309,13 @@ class Config:
     lr_min_factor: float = 0.10
     weight_decay: float = 1e-4
     grad_clip: float = 1.0
-    # (evv, eva, cons): evidential state risk, evidential action risk (played
-    # move only), consistency.  The evidence regulariser has no separate weight
-    # — it rides on the first two, scaled by the annealed edl_lambda below.
-    # Watch the printed `sh` shares: if one term sits near 100% the others have
-    # effectively stopped training.
-    loss_weights: tuple = (1.0, 1.0, 0.5)
+    # dict {component: weight}; see full_loss.LOSS_COMPONENTS for the menu.
+    # Default = the loss-lab winner: pure search-belief distillation (klv+kla)
+    # + consistency, NO grounded-outcome terms.  For a legacy tuple (evv, eva,
+    # cons) or (klv, kla, cev, cea, cons) `resolved_loss_weights()` maps it to
+    # a dict.  Watch the printed `sh` shares: if one term sits near 100% the
+    # others have effectively stopped training.
+    loss_weights: dict = None         # None -> the distillation default below
     # Evidence-regulariser coefficient λ on KL(Dir(α̃)‖Dir(1,1,1)).  λ sets the
     # exchange rate between observations and evidence — larger λ, lower
     # equilibrium α₀ everywhere — so absolute concentration scale is a function
@@ -1379,6 +1380,28 @@ class Config:
         if self.selfplay_workers > 0:
             return self.selfplay_workers
         return min(8, max(2, (os.cpu_count() or 8) - 2))
+
+    def resolved_loss_weights(self):
+        """loss_weights -> {component: weight} dict.
+
+        None       -> the loss-lab winner (pure distillation + consistency).
+        dict       -> used as-is.
+        3-tuple    -> legacy (evv, eva, cons)               [claude/nll runs].
+        5-tuple    -> legacy (klv, kla, cev, cea, cons)     [original runs].
+        Old checkpoints saved a tuple in cfg; this keeps them loadable."""
+        lw = self.loss_weights
+        if lw is None:
+            return {'klv': 1.0, 'kla': 2.0, 'cons': 0.5}
+        if isinstance(lw, dict):
+            return {k: float(v) for k, v in lw.items() if v}
+        lw = tuple(lw)
+        if len(lw) == 3:
+            names = ('evv', 'eva', 'cons')
+        elif len(lw) == 5:
+            names = ('klv', 'kla', 'cev', 'cea', 'cons')
+        else:
+            raise ValueError(f'unrecognised loss_weights tuple: {lw}')
+        return {n: float(v) for n, v in zip(names, lw) if v}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2232,14 +2255,36 @@ if _HAS_TORCH:
             kl = kl / target.sum(-1).clamp_min(1.0)
         return kl
 
+    # The component menu full_loss knows how to build.  `weights` is a dict
+    # {name: w}; a component is computed and added iff its weight is nonzero.
+    #   klv/kla   Dirichlet KL to the backed-up search beliefs (v_obs/ev_alpha),
+    #             concentration-COUPLED — the confidence-weighting (spiky
+    #             targets pull harder) is what makes the distilled α₀ calibrated.
+    #             The loss-lab winner uses these two + cons only.
+    #   dcev/dcea direction-only CE to the same targets' MEANS — dense but
+    #             produces DEAD concentration (rho≈0); kept for ablations.
+    #   evv/eva   evidential risk + annealed regulariser on the grounded outcome
+    #             z (needs `lam`).  The lab found these regress; kept for the arm.
+    #   cev/cea   plain CE of the MEAN against z (the original z-grounding).
+    #   cons      TD self-consistency KL, Q(s,a*) ~ flip(V(s')).
+    # See loss-lab / search-target study memories for why the default is
+    # distillation-only.
+    LOSS_COMPONENTS = ('klv', 'kla', 'dcev', 'dcea', 'evv', 'eva',
+                       'cev', 'cea', 'cons')
+
     def full_loss(out, out2, meta, weights, kl_normalize=False, lam=0.0):
-        """Evidential losses on one batch (see the module header).
+        """Weighted combination of loss components on one batch.
 
         `out`  = network outputs for the batch positions              (B rows)
         `out2` = outputs for the SUCCESSOR positions the consistency
                  term needs, or None when nothing in the batch has one (B2 rows)
-        `lam`  = current (annealed) evidence-regulariser coefficient
+        `weights` = dict {component: weight}; only nonzero entries are computed.
+        `lam`  = current (annealed) evidence-regulariser coefficient (evv/eva).
         Returns (total, parts-dict-of-floats)."""
+        w = weights
+        def wt(name):
+            return float(w.get(name, 0.0))
+
         v_logits, v_conf_raw, a_logits, a_conf_raw = out
         act = meta['pad_act']                            # (B,K) long
         mask = meta['pad_mask']                          # (B,K) bool
@@ -2260,82 +2305,97 @@ if _HAS_TORCH:
         # One-hot of the observed outcome, by broadcast compare — scatter and
         # F.one_hot are both DirectML-fragile.
         y = (torch.arange(3, device=v_alpha.device).unsqueeze(0) == z1).float()
-
-        # (1) state head, evidential risk: E_{p∼Dir(α)}[−log p_z] = ψ(α₀)−ψ(α_z).
-        # Unlike CE on the mean this is concentration-sensitive — for the same
-        # mean, low α₀ costs more — and unlike the old state KL its target is a
-        # GROUNDED outcome, never a search-backed-up network belief.  Solver
-        # aux samples carry z too, so proofs sharpen the same way, no special
-        # casing.  NOTE this differentiates THROUGH ψ (backward needs ψ'): fine
-        # on both paths — native digamma's backward was probed, and the DML
-        # fallback is composed of primitives autograd can chain to any order.
-        a0v = v_alpha.sum(-1)
-        azv = v_alpha.gather(1, z1).squeeze(1)
-        L_evv = (zw * (_dg(a0v) - _dg(azv))).sum() / zwn
-
-        # (2) state head, evidence shrinkage: KL(Dir(α̃) ‖ Dir(1,1,1)) with the
-        # observed class exempted.  Evidence on outcomes that don't keep
-        # happening is taxed toward the uniform prior; evidence the data keeps
-        # re-earning is free.  `lam` is annealed by the caller.
-        #
-        # α̃ = 1 + (1−y)⊙relu(α−1), NOT the textbook y + (1−y)⊙α: EDL assumes
-        # α = 1 + evidence ≥ 1, but OUR α = conf·softmax can sit below 1, and
-        # KL to Dir(1,1,1) blows up for components < 1 — a correctly confident
-        # [50, .01, .01] would be penalised harder than a wrong one.  Defining
-        # evidence as the EXCESS over the uniform prior, relu(α−1), taxes only
-        # wrong-class confidence and leaves sub-uniform components alone.
-        ones3 = torch.ones_like(v_alpha)
-        tilde_v = 1.0 + (1.0 - y) * F.relu(v_alpha - 1.0)
-        L_regv = (zw * _dir_kl_rows(tilde_v, ones3)).sum() / zwn
-
-        # (3)+(4) the same pair on the action head, scored on the move actually
-        # played — the one edge with a grounded outcome.  Unplayed edges get no
-        # direct signal by design: no observation, no evidence, low α₀.  Aux
-        # samples have no played move (played_w = 0), so they don't enter.
         pw = meta['played_w'] * zw
         pwn = pw.sum().clamp_min(1.0)
         pl_idx = meta['played'].clamp_min(0)
         q_played = q_alpha.gather(
             1, pl_idx.view(-1, 1, 1).expand(-1, 1, 3)).squeeze(1)   # (B,3)
-        a0a = q_played.sum(-1)
-        aza = q_played.gather(1, z1).squeeze(1)
-        L_eva = (pw * (_dg(a0a) - _dg(aza))).sum() / pwn
-        tilde_a = 1.0 + (1.0 - y) * F.relu(q_played - 1.0)
-        L_rega = (pw * _dir_kl_rows(tilde_a, ones3)).sum() / pwn
+        evm = meta['ev_mask'].reshape(-1).float()
+        evn = evm.sum().clamp_min(1.0)
 
-        # (5) consistency: Q(s,a*) must match the resulting state's flipped
-        # value.  Kept as-is — a TD-style bootstrap is a different signal from
-        # evidence grounding, not another self-belief target.
-        cw = meta['cons_w']
-        tgt = meta['cons_term']                                     # terminal spikes
-        if out2 is not None:
-            v2_logits, v2_conf_raw, _a2l, _a2c = out2
-            v2 = (_conf(v2_conf_raw).unsqueeze(-1)
-                  * F.softmax(v2_logits, dim=-1)).clamp_min(ALPHA_FLOOR)
-            v2f = v2.detach()[:, [_LOSS, _DRAW, _WIN]]              # one ply up
-            rows = v2f.index_select(0, meta['cons_row'].clamp_min(0))
-            tgt = torch.where(meta['cons_isnn'].unsqueeze(-1), rows, tgt)
-        cons = _kl_terms(tgt.detach(), q_played, kl_normalize)
-        L_cons = (cw * cons).sum() / cw.sum().clamp_min(1.0)
+        total = v_logits.new_zeros(())
+        L = {}
 
-        w_evv, w_eva, w_cons = weights
-        total = (w_evv * (L_evv + lam * L_regv)
-                 + w_eva * (L_eva + lam * L_rega) + w_cons * L_cons)
+        # ── distillation: Dirichlet KL to the backed-up search beliefs ────────
+        if wt('klv'):
+            L['klv'] = _kl_terms(meta['v_obs'], v_alpha, kl_normalize).mean()
+            total = total + wt('klv') * L['klv']
+        if wt('kla'):
+            kla = _kl_terms(meta['ev_alpha'].reshape(-1, 3),
+                            q_alpha.reshape(-1, 3), kl_normalize)
+            L['kla'] = (kla * evm).sum() / evn
+            total = total + wt('kla') * L['kla']
+
+        # ── direction-only CE to the same targets' means (dead concentration) ─
+        if wt('dcev'):
+            m = meta['v_obs'] / meta['v_obs'].sum(-1, keepdim=True).clamp_min(1e-9)
+            L['dcev'] = -(m * v_logp).sum(-1).mean()
+            total = total + wt('dcev') * L['dcev']
+        if wt('dcea'):
+            ev = meta['ev_alpha'].reshape(-1, 3)
+            m = ev / ev.sum(-1, keepdim=True).clamp_min(1e-9)
+            ce = -(m * q_logp.reshape(-1, 3)).sum(-1)
+            L['dcea'] = (ce * evm).sum() / evn
+            total = total + wt('dcea') * L['dcea']
+
+        # ── evidential risk + shrinkage on the grounded outcome z ─────────────
+        # α̃ = 1 + (1−y)⊙relu(α−1): evidence is the EXCESS over the uniform
+        # prior, since our α = conf·softmax can sit below 1 (see the EDL memory).
+        if wt('evv'):
+            a0v = v_alpha.sum(-1)
+            azv = v_alpha.gather(1, z1).squeeze(1)
+            L['evv'] = (zw * (_dg(a0v) - _dg(azv))).sum() / zwn
+            tv = 1.0 + (1.0 - y) * F.relu(v_alpha - 1.0)
+            L['regv'] = (zw * _dir_kl_rows(tv, torch.ones_like(v_alpha))).sum() / zwn
+            total = total + wt('evv') * (L['evv'] + lam * L['regv'])
+        if wt('eva'):
+            a0a = q_played.sum(-1)
+            aza = q_played.gather(1, z1).squeeze(1)
+            L['eva'] = (pw * (_dg(a0a) - _dg(aza))).sum() / pwn
+            ta = 1.0 + (1.0 - y) * F.relu(q_played - 1.0)
+            L['rega'] = (pw * _dir_kl_rows(ta, torch.ones_like(q_played))).sum() / pwn
+            total = total + wt('eva') * (L['eva'] + lam * L['rega'])
+
+        # ── plain CE of the mean against z (the original z-grounding) ──────────
+        q_played_logp = q_logp.gather(
+            1, pl_idx.view(-1, 1, 1).expand(-1, 1, 3)).squeeze(1)   # (B,3)
+        if wt('cev'):
+            ce_v = -v_logp.gather(1, z1).squeeze(1)
+            L['cev'] = (zw * ce_v).sum() / zwn
+            total = total + wt('cev') * L['cev']
+        if wt('cea'):
+            ce_a = -q_played_logp.gather(1, z1).squeeze(1)
+            L['cea'] = (pw * ce_a).sum() / pwn
+            total = total + wt('cea') * L['cea']
+
+        # ── consistency: Q(s,a*) must match the resulting state's flipped value ─
+        if wt('cons'):
+            cw = meta['cons_w']
+            tgt = meta['cons_term']                                 # terminal spikes
+            if out2 is not None:
+                v2_logits, v2_conf_raw, _a2l, _a2c = out2
+                v2 = (_conf(v2_conf_raw).unsqueeze(-1)
+                      * F.softmax(v2_logits, dim=-1)).clamp_min(ALPHA_FLOOR)
+                v2f = v2.detach()[:, [_LOSS, _DRAW, _WIN]]          # one ply up
+                rows = v2f.index_select(0, meta['cons_row'].clamp_min(0))
+                tgt = torch.where(meta['cons_isnn'].unsqueeze(-1), rows, tgt)
+            cons = _kl_terms(tgt.detach(), q_played, kl_normalize)
+            L['cons'] = (cw * cons).sum() / cw.sum().clamp_min(1.0)
+            total = total + wt('cons') * L['cons']
+
         # Every reported scalar is stacked and pulled back in ONE .cpu() call —
         # a separate .item() per number is a full pipeline sync on DirectML.
         with torch.no_grad():
-            # cev/cea: CE of the MEAN prediction against z.  No longer trained
-            # on directly (the risk term subsumes them, and upper-bounds them:
-            # ψ(α₀)−ψ(α_z) ≥ −log m_z) but kept as diagnostics — every
-            # cross-run probe compares them.  As before they are NOT measured
-            # on the same populations: aux samples enter cev but not cea.
-            ce_v = -v_logp.gather(1, z1).squeeze(1)
-            L_cev = (zw * ce_v).sum() / zwn
-            q_played_logp = q_logp.gather(
-                1, pl_idx.view(-1, 1, 1).expand(-1, 1, 3)).squeeze(1)  # (B,3)
-            ce_a = -q_played_logp.gather(1, z1).squeeze(1)
-            L_cea = (pw * ce_a).sum() / pwn
-            evm = meta['ev_mask'].reshape(-1).float()
+            # cev/cea always reported as DIAGNOSTICS even when not trained on —
+            # every cross-run probe compares them.  NOT the same populations:
+            # aux samples enter cev but not cea.
+            if 'cev' not in L:
+                L['cev'] = (zw * -v_logp.gather(1, z1).squeeze(1)).sum() / zwn
+            if 'cea' not in L:
+                L['cea'] = (pw * -q_played_logp.gather(1, z1).squeeze(1)).sum() / pwn
+            evc = evm.sum().clamp_min(1.0)
+            qa_p = (q_alpha.reshape(-1, 3).sum(-1) * evm).sum() / evc
+            qa_t = (meta['ev_alpha'].reshape(-1, 3).sum(-1) * evm).sum() / evc
             evc = evm.sum().clamp_min(1.0)
             qa_p = (q_alpha.reshape(-1, 3).sum(-1) * evm).sum() / evc
             qa_t = (meta['ev_alpha'].reshape(-1, 3).sum(-1) * evm).sum() / evc
@@ -2353,14 +2413,19 @@ if _HAS_TORCH:
             uevc = uevm.sum().clamp_min(1.0)
             ua_p = (q_alpha.reshape(-1, 3).sum(-1) * uevm).sum() / uevc
             ua_t = (meta['ev_alpha'].reshape(-1, 3).sum(-1) * uevm).sum() / uevc
-            diag = torch.stack([
-                total, L_evv, L_eva, L_regv, L_rega, L_cev, L_cea, L_cons,
+            # Stack every computed loss component (0.0 for absent ones) plus the
+            # concentration diagnostics into ONE host transfer.
+            comp_names = ('klv', 'kla', 'dcev', 'dcea', 'evv', 'eva',
+                          'regv', 'rega', 'cev', 'cea', 'cons')
+            zero = total.detach() * 0.0
+            comp_vals = [L.get(n, zero) for n in comp_names]
+            diag = torch.stack([total, *comp_vals,
                 v_alpha.sum(1).mean(), meta['v_obs'].sum(1).mean(), qa_p, qa_t,
                 uv_p, uv_t, ua_p, ua_t, uns.mean(),
             ]).to('cpu', copy=False).tolist()
-        parts = dict(zip(('loss', 'evv', 'eva', 'regv', 'rega', 'cev', 'cea',
-                          'cons', 'cv_p', 'cv_t', 'ca_p', 'ca_t',
-                          'uv_p', 'uv_t', 'ua_p', 'ua_t', 'unsolved'), diag))
+        keys = ('loss', *comp_names, 'cv_p', 'cv_t', 'ca_p', 'ca_t',
+                'uv_p', 'uv_t', 'ua_p', 'ua_t', 'unsolved')
+        parts = dict(zip(keys, diag))
         return total, parts
 
     _Z_CORNER = {1: _WIN, 0: _DRAW, -1: _LOSS}
@@ -3203,7 +3268,8 @@ if _HAS_TORCH:
 
     # One definition of the history schema, so a rewound or back-filled
     # checkpoint has exactly the columns the plots and the eval line expect.
-    _HIST_KEYS = ('ep', 'loss', 'evv', 'eva', 'regv', 'rega', 'cev', 'cea',
+    _HIST_KEYS = ('ep', 'loss', 'klv', 'kla', 'dcev', 'dcea',
+                  'evv', 'eva', 'regv', 'rega', 'cev', 'cea',
                   'cons', 'draw_pct',
                   'plies', 'buf', 'aux', 'elo', 'quick_ep', 'q_w', 'q_d', 'q_l',
                   'cv_p', 'cv_t', 'ca_p', 'ca_t', 'uv_p', 'uv_t', 'ua_p',
@@ -3533,7 +3599,9 @@ if _HAS_TORCH:
         # first fills) — misleading exactly when you want to spot a real slowdown.
         bar_mark = (time.perf_counter(), self_play.stats['games']); inst_gs = 0.0
         prev_fwd = (self_play.fwd_calls, self_play.fwd_rows)
-        with_cons = cfg.loss_weights[2] > 0.0
+        lw = cfg.resolved_loss_weights()
+        with_cons = lw.get('cons', 0.0) > 0.0
+        has_edl = bool(lw.get('evv', 0.0) or lw.get('eva', 0.0))
         step_fails = 0
         step_rng = np.random.default_rng(cfg.seed + 991)
         try:
@@ -3541,7 +3609,8 @@ if _HAS_TORCH:
                 # Annealed evidence-regulariser coefficient (see Config).  A
                 # function of ep, not of optimizer steps, so a resume lands at
                 # exactly the λ it left off at.
-                lam = cfg.edl_lambda * min(1.0, ep / max(cfg.edl_anneal_eps, 1))
+                lam = (cfg.edl_lambda * min(1.0, ep / max(cfg.edl_anneal_eps, 1))
+                       if has_edl else 0.0)
                 network.eval()
                 a = time.perf_counter()
                 raw = next(episode_stream)     # blocks iff self-play can't keep up
@@ -3560,7 +3629,7 @@ if _HAS_TORCH:
                         try:
                             _lv, parts = train_step(
                                 network, optimizer, batch, device,
-                                cfg.loss_weights, cfg.grad_clip,
+                                lw, cfg.grad_clip,
                                 model_lock=model_lock,
                                 kl_normalize=cfg.kl_normalize,
                                 with_consistency=with_cons,
@@ -3600,7 +3669,8 @@ if _HAS_TORCH:
                 prev = dict(st)
                 ml = lambda k: float(np.mean(accs[k])) if accs[k] else float('nan')
                 hist['ep'].append(ep); hist['loss'].append(ml('loss'))
-                for k in ('evv', 'eva', 'regv', 'rega', 'cev', 'cea', 'cons',
+                for k in ('klv', 'kla', 'dcev', 'dcea', 'evv', 'eva',
+                          'regv', 'rega', 'cev', 'cea', 'cons',
                           'cv_p', 'cv_t', 'ca_p', 'ca_t',
                           'uv_p', 'uv_t', 'ua_p', 'ua_t', 'unsolved'):
                     hist[k].append(ml(k))
@@ -3614,14 +3684,18 @@ if _HAS_TORCH:
                         f'({100*ml("unsolved"):.0f}% of batch) '
                         f'v {ml("uv_p"):.2f}/{ml("uv_t"):.2f} '
                         f'a {ml("ua_p"):.2f}/{ml("ua_t"):.2f}')
-                # WEIGHTED share of the total loss per term — the number to tune
-                # loss_weights by.  If one term sits near 100% the others have
-                # effectively stopped training.  The regulariser pair is folded
-                # into one entry at its current annealed λ.
-                w_evv, w_eva, w_cons = cfg.loss_weights
-                comp = {'evv': w_evv * ml('evv'), 'eva': w_eva * ml('eva'),
-                        'reg': lam * (w_evv * ml('regv') + w_eva * ml('rega')),
-                        'cons': w_cons * ml('cons')}
+                # WEIGHTED share of the total loss per component — the number to
+                # tune loss_weights by.  If one term sits near 100% the others
+                # have effectively stopped training.  Only trained components
+                # appear; the evidential regulariser rides on evv/eva at λ.
+                comp = {}
+                for n in ('klv', 'kla', 'dcev', 'dcea', 'evv', 'eva',
+                          'cev', 'cea', 'cons'):
+                    if lw.get(n):
+                        comp[n] = lw[n] * ml(n)
+                if lw.get('evv') or lw.get('eva'):
+                    comp['reg'] = lam * (lw.get('evv', 0.0) * ml('regv')
+                                         + lw.get('eva', 0.0) * ml('rega'))
                 tot = sum(v for v in comp.values() if v == v) or float('nan')
                 share = 'sh ' + ' '.join(f'{k} {100 * v / tot:.0f}%'
                                          for k, v in comp.items())
@@ -3640,11 +3714,15 @@ if _HAS_TORCH:
                         self_play.set_curr_depth(
                             min(cfg.curr_max_depth, cd + cfg.curr_step))
                     curr_s = f' curr {self_play.curr_depth:.0f}'
-                diag = (f'loss {ml("loss"):.2f} (evv {ml("evv"):.2f} '
-                        f'eva {ml("eva"):.2f} regv {ml("regv"):.2f} '
-                        f'rega {ml("rega"):.2f} cev {ml("cev"):.3f} '
-                        f'cea {ml("cea"):.3f} cons {ml("cons"):.2f}) '
-                        f'| lam {lam:.2f} | {share} '
+                # Show the trained components; cev/cea always (diagnostics).
+                trained = ' '.join(
+                    f'{n} {ml(n):.3f}' for n in
+                    ('klv', 'kla', 'dcev', 'dcea', 'evv', 'eva', 'cons')
+                    if lw.get(n))
+                lam_s = f'| lam {lam:.2f} ' if (lw.get('evv') or lw.get('eva')) else ''
+                diag = (f'loss {ml("loss"):.2f} ({trained} | '
+                        f'cev {ml("cev"):.3f} cea {ml("cea"):.3f}) '
+                        f'{lam_s}| {share} '
                         f'| {conc} | dr {draw_pct:.0f}% ply {plies:.0f}{curr_s} '
                         f'buf {len(replay_buffer) // 1000}k aux {aux_total} '
                         f'| lr {optimizer.param_groups[0]["lr"]:.2e}')
@@ -3719,11 +3797,14 @@ if _HAS_TORCH:
     def plot_history(hist, title='ThompsonZero-C4 (Connect 4)'):
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots(2, 3, figsize=(17, 8)); fig.suptitle(title)
-        ax[0, 0].plot(hist['ep'], hist['evv'], label='state risk')
-        ax[0, 0].plot(hist['ep'], hist['eva'], label='action risk')
-        ax[0, 0].plot(hist['ep'], hist['regv'], label='state reg')
-        ax[0, 0].plot(hist['ep'], hist['rega'], label='action reg')
-        ax[0, 0].plot(hist['ep'], hist['cons'], label='consistency KL')
+        # Plot whichever loss components this run actually recorded (finite).
+        for key, lbl in (('klv', 'state KL'), ('kla', 'action KL'),
+                         ('dcev', 'state CE'), ('dcea', 'action CE'),
+                         ('evv', 'state risk'), ('eva', 'action risk'),
+                         ('cons', 'consistency')):
+            ser = hist.get(key) or []
+            if any(v == v for v in ser):     # at least one non-NaN
+                ax[0, 0].plot(hist['ep'], ser, label=lbl)
         ax[0, 0].set_title('Evidential losses'); ax[0, 0].legend(fontsize=8)
         ax[0, 1].plot(hist['ep'], hist['cev'], label='state CE')
         ax[0, 1].plot(hist['ep'], hist['cea'], label='action CE')
