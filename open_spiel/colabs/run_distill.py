@@ -18,7 +18,9 @@ import time
 
 import connect4_dirichlet_utils as c4
 
-NUM_EPISODES = 50000
+NUM_EPISODES = 10000       # capped at 10k for a fast head-to-head vs ZGROUND
+LR_DECAY_EPS = 50000       # keep the ORIGINAL 50k cosine so the schedule the
+                           # ep1-7000 checkpoints already saw stays continuous
 ROOT = 'othello_benchmark'
 CKPT = 'bench_DISTILL'
 LOG_PATH = os.path.join(os.path.dirname(__file__), 'distill.log')
@@ -50,7 +52,7 @@ def make_cfg():
         batch_size=1024, train_steps_per_ep=1, max_buffer=300_000,
         loss_weights={'klv': 1.0, 'kla': 2.0, 'cons': 0.5},
         lr_peak=2e-3, lr_warmup_eps=100,
-        lr_decay_eps=NUM_EPISODES, lr_min_factor=0.02,
+        lr_decay_eps=LR_DECAY_EPS, lr_min_factor=0.02,
         weight_decay=1e-4, grad_clip=1.0,
         quick_eval_every=1000, quick_eval_games=30,
         deep_eval_every=5000, eval_sims=64,
