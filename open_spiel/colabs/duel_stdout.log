@@ -1,0 +1,4 @@
+[2026-09-13 08:45:57] === DISTILL@10000 vs ZGROUND@10000 -- 400 sims/side, temp 64.0, 121 games (colors alternated) ===
+[2026-09-13 08:57:56] DISTILL score: 6.0/121 = 5.0%  [2.3%, 10.4%]  (719s)
+[2026-09-13 08:57:57] ZGROUND score: 115.0/121 = 95.0%  [89.6%, 97.7%]
+[2026-09-13 08:57:57] === ZGROUND wins ===

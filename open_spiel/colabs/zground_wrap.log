@@ -1,0 +1,5 @@
+[2026-09-13 02:52:44] WRAPPER: wrapper started (pid 3272)
+[2026-09-13 02:52:44] WRAPPER: launching run_zground process
+[2026-09-13 08:44:07] WRAPPER: process exited with code 0 -- re-checking after a pause
+[2026-09-13 08:44:12] WRAPPER: sentinel found -- run complete, exiting wrapper
+[2026-09-13 08:44:12] WRAPPER: wrapper done

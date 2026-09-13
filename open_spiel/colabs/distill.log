@@ -1,0 +1,31 @@
+[2026-09-12 20:48:58] === DISTILL from scratch: 50000 eps, loss={'klv': 1.0, 'kla': 2.0, 'cons': 0.5} search=pathsum target=avgconc -> othello_benchmark/bench_DISTILL ===
+[2026-09-12 20:48:59] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-09-12 20:48:59] device=privateuseone:0 backend=directml | params=330,632 | search_agg=pathsum target_agg=avgconc | start_ep=1
+[2026-09-12 21:25:19] ep   1000 | loss 0.69 (klv 0.330 kla 0.159 cons 0.083 | cev 0.630 cea 0.927) | sh klv 48% kla 46% cons 6% | conc(pred/tgt) v 2.2/50.6 a 0.9/11.7 | unsolved (56% of batch) v 1.08/12.06 a 0.80/2.61 | dr 3% ply 60 buf 103k aux 42660 | lr 2.00e-03 | vs 0 (no-MCTS) W15 D3 L12
+[2026-09-12 21:25:19]          perf: 0.47 games/s | wait(sp) 80% train 20% | NNbatch 117 (49 fwd/s)
+[2026-09-12 22:00:18] ep   2000 | loss 0.54 (klv 0.272 kla 0.120 cons 0.063 | cev 0.603 cea 0.892) | sh klv 50% kla 44% cons 6% | conc(pred/tgt) v 5.9/47.4 a 1.1/10.9 | unsolved (59% of batch) v 2.01/10.61 a 0.88/2.58 | dr 1% ply 60 buf 204k aux 83874 | lr 1.99e-03 | vs 0 (no-MCTS) W18 D2 L10
+[2026-09-12 22:00:18]          perf: 0.48 games/s | wait(sp) 79% train 21% | NNbatch 117 (48 fwd/s)
+[2026-09-12 22:34:30] ep   3000 | loss 0.54 (klv 0.246 kla 0.127 cons 0.076 | cev 0.573 cea 0.855) | sh klv 46% kla 47% cons 7% | conc(pred/tgt) v 8.0/47.4 a 1.2/11.1 | unsolved (59% of batch) v 2.30/10.30 a 0.84/2.55 | dr 2% ply 60 buf 300k aux 126805 | lr 1.98e-03 | vs 0 (no-MCTS) W18 D2 L10
+[2026-09-12 22:34:30]          perf: 0.49 games/s | wait(sp) 78% train 21% | NNbatch 117 (48 fwd/s)
+[2026-09-12 23:08:42] ep   4000 | loss 0.54 (klv 0.230 kla 0.139 cons 0.065 | cev 0.540 cea 0.812) | sh klv 43% kla 51% cons 6% | conc(pred/tgt) v 12.2/50.2 a 1.7/13.1 | unsolved (56% of batch) v 4.25/11.53 a 1.03/3.16 | dr 2% ply 61 buf 300k aux 174686 | lr 1.97e-03 | vs 0 (no-MCTS) W12 D1 L17
+[2026-09-12 23:08:42]          perf: 0.49 games/s | wait(sp) 78% train 21% | NNbatch 117 (48 fwd/s)
+[2026-09-12 23:45:58] ep   5000 | loss 0.46 (klv 0.190 kla 0.121 cons 0.060 | cev 0.539 cea 0.798) | sh klv 41% kla 52% cons 6% | conc(pred/tgt) v 16.6/48.5 a 2.4/12.6 | unsolved (59% of batch) v 5.01/12.71 a 1.23/3.42 | dr 2% ply 61 buf 300k aux 222124 | lr 1.95e-03
+[2026-09-12 23:45:58]          DEEP Elo@64: 5000=1156  random=935  0=929
+[2026-09-12 23:45:58]          perf: 0.47 games/s | wait(sp) 79% train 21% | NNbatch 118 (47 fwd/s)
+[2026-09-13 00:23:16] ep   6000 | loss 0.47 (klv 0.177 kla 0.132 cons 0.062 | cev 0.490 cea 0.796) | sh klv 38% kla 56% cons 7% | conc(pred/tgt) v 21.5/53.9 a 3.2/15.3 | unsolved (54% of batch) v 6.27/14.17 a 1.57/4.59 | dr 2% ply 60 buf 300k aux 270922 | lr 1.93e-03 | vs 5000 (no-MCTS) W15 D1 L14
+[2026-09-13 00:23:16]          perf: 0.43 games/s | wait(sp) 75% train 21% | NNbatch 123 (41 fwd/s)
+[2026-09-13 00:58:26] ep   7000 | loss 0.52 (klv 0.186 kla 0.152 cons 0.056 | cev 0.503 cea 0.771) | sh klv 36% kla 59% cons 5% | conc(pred/tgt) v 24.5/51.7 a 4.1/15.4 | unsolved (57% of batch) v 8.65/15.48 a 2.25/5.75 | dr 1% ply 60 buf 300k aux 322232 | lr 1.91e-03 | vs 5000 (no-MCTS) W14 D1 L15
+[2026-09-13 00:58:26]          perf: 0.47 games/s | wait(sp) 79% train 20% | NNbatch 117 (49 fwd/s)
+[2026-09-13 01:04:11] === DISTILL from scratch: 10000 eps, loss={'klv': 1.0, 'kla': 2.0, 'cons': 0.5} search=pathsum target=avgconc -> othello_benchmark/bench_DISTILL ===
+[2026-09-13 01:04:14] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-09-13 01:04:15] resumed at ep 7000
+[2026-09-13 01:04:15] device=privateuseone:0 backend=directml | params=330,632 | search_agg=pathsum target_agg=avgconc | start_ep=7001
+[2026-09-13 01:40:10] ep   8000 | loss 0.45 (klv 0.171 kla 0.115 cons 0.099 | cev 0.461 cea 0.738) | sh klv 38% kla 51% cons 11% | conc(pred/tgt) v 26.3/54.4 a 5.5/17.8 | unsolved (54% of batch) v 9.23/15.08 a 2.66/5.69 | dr 2% ply 61 buf 113k aux 53459 | lr 1.88e-03 | vs 5000 (no-MCTS) W17 D3 L10
+[2026-09-13 01:40:10]          perf: 0.47 games/s | wait(sp) 80% train 20% | NNbatch 116 (49 fwd/s)
+[2026-09-13 02:15:19] ep   9000 | loss 0.54 (klv 0.190 kla 0.158 cons 0.067 | cev 0.418 cea 0.665) | sh klv 35% kla 59% cons 6% | conc(pred/tgt) v 31.5/56.9 a 7.2/20.1 | unsolved (53% of batch) v 12.62/18.08 a 3.96/7.88 | dr 2% ply 61 buf 228k aux 107704 | lr 1.85e-03 | vs 5000 (no-MCTS) W17 D3 L10
+[2026-09-13 02:15:19]          perf: 0.47 games/s | wait(sp) 80% train 20% | NNbatch 116 (49 fwd/s)
+[2026-09-13 02:52:37] ep  10000 | loss 0.59 (klv 0.213 kla 0.174 cons 0.067 | cev 0.461 cea 0.738) | sh klv 36% kla 59% cons 6% | conc(pred/tgt) v 28.1/55.6 a 6.6/19.3 | unsolved (54% of batch) v 10.19/17.90 a 3.61/7.88 | dr 2% ply 60 buf 300k aux 163012 | lr 1.82e-03
+[2026-09-13 02:52:37]          DEEP Elo@64: 10000=1301  5000=1108  random=903  0=864
+[2026-09-13 02:52:37]          perf: 0.47 games/s | wait(sp) 80% train 20% | NNbatch 116 (49 fwd/s)
+[2026-09-13 02:52:38] === done in 6507s ===
+[2026-09-13 02:52:38] DISTILL DONE

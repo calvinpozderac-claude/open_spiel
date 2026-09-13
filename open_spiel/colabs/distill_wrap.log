@@ -1,0 +1,7 @@
+[2026-09-12 20:48:56] WRAPPER: wrapper started (pid 12372)
+[2026-09-12 20:48:56] WRAPPER: launching run_distill process
+[2026-09-13 01:04:03] WRAPPER: process exited with code 0 -- re-checking after a pause
+[2026-09-13 01:04:08] WRAPPER: launching run_distill process
+[2026-09-13 02:52:39] WRAPPER: process exited with code 0 -- re-checking after a pause
+[2026-09-13 02:52:44] WRAPPER: sentinel found -- run complete, exiting wrapper
+[2026-09-13 02:52:44] WRAPPER: wrapper done
