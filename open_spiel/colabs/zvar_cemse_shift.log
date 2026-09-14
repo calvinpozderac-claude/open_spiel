@@ -1,0 +1,15 @@
+[2026-09-14 11:39:08] === CEMSE_SHIFT from scratch: 10000 eps, loss={'klv': 1.0, 'kla': 2.0, 'cev': 1.0, 'cea': 1.0, 'mzcv': 1.0, 'mzca': 1.0, 'cons': 0.5} extra={'z_conc_grow_mode': 'shift', 'z_conc_grow_shift': 16.0} -> othello_benchmark/bench_CEMSE_SHIFT ===
+[2026-09-14 11:39:12] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-09-14 11:39:12] device=privateuseone:0 backend=directml | params=330,632 | search_agg=pathsum target_agg=avgconc | start_ep=1
+[2026-09-14 12:14:53] ep   1000 | loss 9.03 (klv 4.789 kla 0.433 mzcv 1.000 mzca 1.000 cons 0.372 | cev 0.491 cea 0.696) | sh klv 53% kla 10% cev 5% cea 8% mzcv 11% mzca 11% cons 2% | conc(pred/tgt) v 30.7/52.7 a 1.4/13.9 | unsolved (55% of batch) v 11.24/14.56 a 1.38/4.38 | dr 2% ply 60 buf 113k aux 53298 | lr 2.00e-03 | vs 0 (no-MCTS) W18 D1 L11
+[2026-09-14 12:14:53]          perf: 0.48 games/s | wait(sp) 79% train 21% | NNbatch 116 (48 fwd/s)
+[2026-09-14 12:49:12] ep   2000 | loss 21.59 (klv 17.205 kla 0.520 mzcv 1.000 mzca 1.000 cons 0.365 | cev 0.463 cea 0.695) | sh klv 80% kla 5% cev 2% cea 3% mzcv 5% mzca 5% cons 1% | conc(pred/tgt) v 126.7/57.1 a 1.6/20.2 | unsolved (53% of batch) v 38.64/18.83 a 1.40/7.76 | dr 1% ply 61 buf 240k aux 119299 | lr 1.99e-03 | vs 0 (no-MCTS) W17 D1 L12
+[2026-09-14 12:49:12]          perf: 0.49 games/s | wait(sp) 79% train 21% | NNbatch 116 (48 fwd/s)
+[2026-09-14 13:24:41] ep   3000 | loss 21.40 (klv 15.674 kla 1.122 mzcv 1.000 mzca 1.000 cons 0.715 | cev 0.429 cea 0.692) | sh klv 73% kla 10% cev 2% cea 3% mzcv 5% mzca 5% cons 2% | conc(pred/tgt) v 307.9/69.6 a 2.5/40.6 | unsolved (48% of batch) v 93.80/36.05 a 1.82/21.16 | dr 3% ply 61 buf 300k aux 194645 | lr 1.98e-03 | vs 0 (no-MCTS) W18 D0 L12
+[2026-09-14 13:24:41]          perf: 0.47 games/s | wait(sp) 80% train 20% | NNbatch 116 (49 fwd/s)
+[2026-09-14 13:58:56] ep   4000 | loss 91.28 (klv 38.277 kla 21.545 mzcv 1.000 mzca 1.000 cons 10.937 | cev 0.745 cea 1.696) | sh klv 42% kla 47% cev 1% cea 2% mzcv 1% mzca 1% cons 6% | conc(pred/tgt) v 492.6/79.6 a 0.8/64.2 | unsolved (43% of batch) v 112.97/51.97 a 0.15/37.84 | dr 2% ply 61 buf 300k aux 271631 | lr 1.97e-03 | vs 0 (no-MCTS) W17 D4 L9
+[2026-09-14 13:58:56]          perf: 0.49 games/s | wait(sp) 79% train 20% | NNbatch 112 (48 fwd/s)
+[2026-09-14 14:35:24] ep   5000 | loss 41.66 (klv 4.004 kla 15.283 mzcv 1.000 mzca 1.000 cons 7.140 | cev 0.458 cea 1.060) | sh klv 10% kla 73% cev 1% cea 3% mzcv 2% mzca 2% cons 9% | conc(pred/tgt) v 756.7/86.8 a 0.8/87.3 | unsolved (46% of batch) v 171.90/71.45 a 0.11/56.50 | dr 3% ply 61 buf 300k aux 336280 | lr 1.95e-03
+[2026-09-14 14:35:24]          DEEP Elo@64: 5000=1175  random=935  0=910
+[2026-09-14 14:35:24]          perf: 0.47 games/s | wait(sp) 80% train 20% | NNbatch 112 (49 fwd/s)
+[2026-09-14 14:36:36] CEMSE_SHIFT DONE (killed: a0 treadmill to 750, target a0+16 recedes -- self-referential)

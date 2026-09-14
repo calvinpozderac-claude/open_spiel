@@ -1,0 +1,15 @@
+[2026-09-14 08:33:29] === CEMSE_DOUBLE from scratch: 10000 eps, loss={'klv': 1.0, 'kla': 2.0, 'cev': 1.0, 'cea': 1.0, 'mzcv': 1.0, 'mzca': 1.0, 'cons': 0.5} extra={'z_conc_grow_mode': 'double'} -> othello_benchmark/bench_CEMSE_DOUBLE ===
+[2026-09-14 08:33:33] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-09-14 08:33:33] device=privateuseone:0 backend=directml | params=330,632 | search_agg=pathsum target_agg=avgconc | start_ep=1
+[2026-09-14 09:09:43] ep   1000 | loss 77.12 (klv 36.033 kla 0.439 mzcv 38.775 mzca 0.003 cons 0.283 | cev 0.552 cea 0.736) | sh klv 47% kla 1% cev 1% cea 1% mzcv 50% mzca 0% cons 0% | conc(pred/tgt) v 51.9/53.8 a 0.8/14.7 | unsolved (54% of batch) v 18.73/13.78 a 0.80/4.43 | dr 3% ply 60 buf 115k aux 54714 | lr 2.00e-03 | vs 0 (no-MCTS) W19 D4 L7
+[2026-09-14 09:09:43]          perf: 0.47 games/s | wait(sp) 80% train 20% | NNbatch 116 (49 fwd/s)
+[2026-09-14 09:44:57] ep   2000 | loss 6290.12 (klv 1093.348 kla 34.186 mzcv 5092.618 mzca 0.001 cons 39.029 | cev 0.853 cea 15.419) | sh klv 17% kla 1% cev 0% cea 0% mzcv 81% mzca 0% cons 0% | conc(pred/tgt) v 1081.6/143.6 a 0.1/212.8 | unsolved (38% of batch) v 1188.69/215.91 a 0.09/239.45 | dr 6% ply 60 buf 300k aux 187450 | lr 1.99e-03 | vs 0 (no-MCTS) W7 D1 L22
+[2026-09-14 09:44:57]          perf: 0.47 games/s | wait(sp) 80% train 19% | NNbatch 109 (49 fwd/s)
+[2026-09-14 10:20:38] ep   3000 | loss 175225.83 (klv 12500.131 kla 36.827 mzcv 162620.625 mzca 0.000 cons 20.852 | cev 3.234 cea 17.768) | sh klv 7% kla 0% cev 0% cea 0% mzcv 93% mzca 0% cons 0% | conc(pred/tgt) v 6452.2/642.9 a 0.0/1639.1 | unsolved (31% of batch) v 6456.09/1842.49 a 0.00/2135.50 | dr 8% ply 61 buf 300k aux 296783 | lr 1.98e-03 | vs 0 (no-MCTS) W13 D3 L14
+[2026-09-14 10:20:38]          perf: 0.47 games/s | wait(sp) 81% train 18% | NNbatch 103 (50 fwd/s)
+[2026-09-14 10:58:31] ep   4000 | loss 1539867.00 (klv 27804.076 kla 29.587 mzcv 1511966.500 mzca 0.000 cons 16.358 | cev 4.100 cea 25.080) | sh klv 2% kla 0% cev 0% cea 0% mzcv 98% mzca 0% cons 0% | conc(pred/tgt) v 19673.9/2702.4 a 0.0/6654.1 | unsolved (38% of batch) v 19680.19/6932.83 a 0.00/8034.61 | dr 5% ply 61 buf 300k aux 377788 | lr 1.97e-03 | vs 0 (no-MCTS) W18 D0 L12
+[2026-09-14 10:58:31]          perf: 0.44 games/s | wait(sp) 82% train 18% | NNbatch 100 (48 fwd/s)
+[2026-09-14 11:37:55] ep   5000 | loss 5467904.00 (klv 27352.611 kla 24.520 mzcv 5440470.000 mzca 0.000 cons 14.988 | cev 2.164 cea 22.585) | sh klv 1% kla 0% cev 0% cea 0% mzcv 99% mzca 0% cons 0% | conc(pred/tgt) v 37319.7/6433.3 a 0.0/15759.6 | unsolved (39% of batch) v 37321.72/16192.36 a 0.00/18725.51 | dr 4% ply 61 buf 300k aux 473665 | lr 1.95e-03
+[2026-09-14 11:37:55]          DEEP Elo@64: 5000=1118  0=978  random=923
+[2026-09-14 11:37:55]          perf: 0.44 games/s | wait(sp) 82% train 18% | NNbatch 100 (50 fwd/s)
+[2026-09-14 11:38:48] CEMSE_DOUBLE DONE (killed: alpha0 runaway to 37k, multiplicative growth unstable)
