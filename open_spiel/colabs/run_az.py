@@ -16,9 +16,9 @@ import time
 
 import connect4_alphazero_utils as az
 
-NUM_EPISODES = 5000
-ROOT = 'othello_benchmark'
-CKPT = 'bench_AZ_MATCH'
+NUM_EPISODES = 50000       # extended from 5000; resumes from the ep5000 ckpt.
+ROOT = 'othello_benchmark'  # lr_decay_eps is already 50000, so the cosine is
+CKPT = 'bench_AZ_MATCH'     # continuous -- this is one 50k run, not a restart.
 LOG_PATH = os.path.join(os.path.dirname(__file__), 'az_match.log')
 
 
