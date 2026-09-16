@@ -1,0 +1,16 @@
+[2026-09-15 18:05:59] === ALLMSE_ADMLE_AVGCONC: 5000 eps, search=additive_mle target=avgconc loss=allmse -> othello_benchmark/bench_ALLMSE_ADMLE_AVGCONC ===
+[2026-09-15 18:06:02] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-09-15 18:06:02] device=privateuseone:0 backend=directml | params=330,632 | search_agg=additive_mle target_agg=avgconc | start_ep=1
+[2026-09-15 18:48:54] ep   1000 | loss 5.33 (dcev 0.488 dcea 0.809 mkcv 0.285 mkca 2.281 cons 2.333 | cev 0.474 cea 0.813) | sh dcev 9% dcea 30% cev 9% cea 15% mkcv 2% mkca 13% cons 22% | conc(pred/tgt) v 80.6/80.1 a 31.3/43.6 | unsolved (31% of batch) v 34.13/34.60 a 17.19/21.80 | dr 9% ply 60 buf 202k aux 142068 | lr 2.00e-03 | vs 0 (no-MCTS) W20 D1 L9
+[2026-09-15 18:48:54]          perf: 0.40 games/s | wait(sp) 84% train 16% | NNbatch 94 (49 fwd/s)
+[2026-09-15 19:29:12] ep   2000 | loss 3.71 (dcev 0.450 dcea 0.725 mkcv 0.132 mkca 0.569 cons 0.839 | cev 0.428 cea 0.753) | sh dcev 12% dcea 39% cev 12% cea 20% mkcv 1% mkca 5% cons 11% | conc(pred/tgt) v 86.9/84.2 a 46.3/52.2 | unsolved (25% of batch) v 38.91/37.17 a 25.86/28.57 | dr 9% ply 61 buf 300k aux 306500 | lr 1.99e-03 | vs 0 (no-MCTS) W12 D1 L17
+[2026-09-15 19:29:12]          perf: 0.41 games/s | wait(sp) 85% train 15% | NNbatch 92 (52 fwd/s)
+[2026-09-15 20:07:37] ep   3000 | loss 5.60 (dcev 0.405 dcea 0.693 mkcv 0.103 mkca 0.421 cons 4.963 | cev 0.386 cea 0.787) | sh dcev 7% dcea 25% cev 7% cea 14% mkcv 1% mkca 2% cons 44% | conc(pred/tgt) v 85.9/84.3 a 50.4/54.9 | unsolved (29% of batch) v 48.20/45.10 a 32.22/34.43 | dr 9% ply 61 buf 300k aux 457322 | lr 1.98e-03 | vs 0 (no-MCTS) W26 D0 L4
+[2026-09-15 20:07:37]          perf: 0.43 games/s | wait(sp) 84% train 15% | NNbatch 91 (52 fwd/s)
+[2026-09-15 20:48:16] ep   4000 | loss 3.98 (dcev 0.395 dcea 0.675 mkcv 0.096 mkca 0.380 cons 2.236 | cev 0.360 cea 0.612) | sh dcev 10% dcea 34% cev 9% cea 15% mkcv 1% mkca 3% cons 28% | conc(pred/tgt) v 86.3/85.9 a 54.5/58.6 | unsolved (27% of batch) v 48.92/47.61 a 35.54/38.00 | dr 9% ply 61 buf 300k aux 610475 | lr 1.97e-03 | vs 0 (no-MCTS) W25 D1 L4
+[2026-09-15 20:48:16]          perf: 0.41 games/s | wait(sp) 85% train 15% | NNbatch 89 (52 fwd/s)
+[2026-09-15 21:31:51] ep   5000 | loss 7.21 (dcev 0.390 dcea 0.638 mkcv 0.106 mkca 0.855 cons 8.427 | cev 0.377 cea 0.660) | sh dcev 5% dcea 18% cev 5% cea 9% mkcv 0% mkca 4% cons 58% | conc(pred/tgt) v 85.5/87.4 a 54.0/63.3 | unsolved (27% of batch) v 48.75/53.75 a 35.67/44.57 | dr 9% ply 61 buf 300k aux 767510 | lr 1.95e-03
+[2026-09-15 21:31:51]          DEEP Elo@64: 5000=1252  0=935  random=878
+[2026-09-15 21:31:51]          perf: 0.40 games/s | wait(sp) 85% train 14% | NNbatch 88 (52 fwd/s)
+[2026-09-15 21:31:52] === done in 12354s ===
+[2026-09-15 21:31:52] ALLMSE_ADMLE_AVGCONC DONE

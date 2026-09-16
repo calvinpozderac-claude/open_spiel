@@ -1,0 +1,16 @@
+[2026-09-16 03:52:23] === AZ_MATCH (standard AlphaZero): 5000 eps, 10x32, c_puct=1.5, 100/400 sims -> othello_benchmark/bench_AZ_MATCH ===
+[2026-09-16 03:52:27] Self-play: 4 WORKER PROCESSES x 16 games
+[2026-09-16 03:52:27] device=privateuseone:0 backend=directml | params=229,058 | ALPHAZERO | start_ep=1
+[2026-09-16 04:21:10] ep   1000 | loss 0.957 (pol 0.742 val 0.214) | tgt_ent 0.56 |v| 0.82 | dr 6% ply 61 buf 196k | lr 2.00e-03 | vs last ckpt (no-MCTS) W23 D1 L6
+[2026-09-16 04:21:10]          perf: 0.59 games/s | wait(sp) 86% train 14% | NNbatch 201 (34 fwd/s)
+[2026-09-16 04:49:06] ep   2000 | loss 0.887 (pol 0.658 val 0.228) | tgt_ent 0.51 |v| 0.82 | dr 5% ply 61 buf 300k | lr 1.99e-03 | vs last ckpt (no-MCTS) W24 D0 L6
+[2026-09-16 04:49:06]          perf: 0.60 games/s | wait(sp) 84% train 15% | NNbatch 202 (34 fwd/s)
+[2026-09-16 05:15:52] ep   3000 | loss 0.766 (pol 0.576 val 0.189) | tgt_ent 0.45 |v| 0.84 | dr 5% ply 61 buf 300k | lr 1.98e-03 | vs last ckpt (no-MCTS) W29 D0 L1
+[2026-09-16 05:15:52]          perf: 0.62 games/s | wait(sp) 83% train 16% | NNbatch 199 (34 fwd/s)
+[2026-09-16 05:42:32] ep   4000 | loss 0.781 (pol 0.555 val 0.226) | tgt_ent 0.42 |v| 0.85 | dr 5% ply 61 buf 300k | lr 1.97e-03 | vs last ckpt (no-MCTS) W25 D0 L5
+[2026-09-16 05:42:32]          perf: 0.62 games/s | wait(sp) 83% train 16% | NNbatch 200 (34 fwd/s)
+[2026-09-16 06:09:24] ep   5000 | loss 0.672 (pol 0.499 val 0.172) | tgt_ent 0.38 |v| 0.87 | dr 5% ply 61 buf 300k | lr 1.95e-03
+[2026-09-16 06:09:24]          DEEP Elo@64: 5000=1130  random=870
+[2026-09-16 06:09:24]          perf: 0.62 games/s | wait(sp) 83% train 16% | NNbatch 195 (35 fwd/s)
+[2026-09-16 06:09:24] === done in 8221s ===
+[2026-09-16 06:09:24] AZ_MATCH DONE

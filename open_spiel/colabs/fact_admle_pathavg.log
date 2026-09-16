@@ -1,0 +1,16 @@
+[2026-09-16 00:22:52] === ALLMSE_ADMLE_PATHAVG: 5000 eps, search=additive_mle target=pathavg loss=allmse -> othello_benchmark/bench_ALLMSE_ADMLE_PATHAVG ===
+[2026-09-16 00:22:55] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-09-16 00:22:55] device=privateuseone:0 backend=directml | params=330,632 | search_agg=additive_mle target_agg=pathavg | start_ep=1
+[2026-09-16 01:06:09] ep   1000 | loss 5.80 (dcev 0.531 dcea 0.917 mkcv 0.395 mkca 4.144 cons 1.493 | cev 0.487 cea 0.839) | sh dcev 9% dcea 32% cev 8% cea 14% mkcv 2% mkca 21% cons 13% | conc(pred/tgt) v 70.3/70.0 a 14.3/28.2 | unsolved (36% of batch) v 24.19/15.63 a 7.89/8.23 | dr 8% ply 60 buf 167k aux 107162 | lr 2.00e-03 | vs 0 (no-MCTS) W21 D0 L9
+[2026-09-16 01:06:09]          perf: 0.39 games/s | wait(sp) 85% train 15% | NNbatch 92 (53 fwd/s)
+[2026-09-16 01:46:18] ep   2000 | loss 5.97 (dcev 0.568 dcea 0.888 mkcv 1.042 mkca 3.782 cons 1.816 | cev 0.482 cea 0.786) | sh dcev 10% dcea 30% cev 8% cea 13% mkcv 5% mkca 19% cons 15% | conc(pred/tgt) v 74.5/69.6 a 15.8/28.4 | unsolved (36% of batch) v 34.52/15.82 a 8.85/7.99 | dr 4% ply 60 buf 300k aux 213613 | lr 1.99e-03 | vs 0 (no-MCTS) W18 D1 L11
+[2026-09-16 01:46:18]          perf: 0.42 games/s | wait(sp) 84% train 15% | NNbatch 91 (52 fwd/s)
+[2026-09-16 02:27:50] ep   3000 | loss 7.26 (dcev 0.617 dcea 0.919 mkcv 0.646 mkca 2.121 cons 5.304 | cev 0.516 cea 0.808) | sh dcev 9% dcea 25% cev 7% cea 11% mkcv 3% mkca 9% cons 37% | conc(pred/tgt) v 69.1/68.7 a 17.8/27.2 | unsolved (37% of batch) v 20.23/14.47 a 6.34/7.31 | dr 6% ply 60 buf 300k aux 330791 | lr 1.98e-03 | vs 0 (no-MCTS) W14 D0 L16
+[2026-09-16 02:27:50]          perf: 0.40 games/s | wait(sp) 85% train 15% | NNbatch 90 (52 fwd/s)
+[2026-09-16 03:09:56] ep   4000 | loss 4.82 (dcev 0.485 dcea 0.866 mkcv 0.545 mkca 1.325 cons 1.882 | cev 0.399 cea 0.699) | sh dcev 10% dcea 36% cev 8% cea 15% mkcv 3% mkca 8% cons 20% | conc(pred/tgt) v 70.8/73.8 a 27.2/32.0 | unsolved (31% of batch) v 23.06/16.51 a 9.69/6.59 | dr 7% ply 60 buf 300k aux 467732 | lr 1.97e-03 | vs 0 (no-MCTS) W16 D0 L14
+[2026-09-16 03:09:56]          perf: 0.40 games/s | wait(sp) 85% train 14% | NNbatch 89 (52 fwd/s)
+[2026-09-16 03:52:18] ep   5000 | loss 7.56 (dcev 0.493 dcea 0.809 mkcv 0.316 mkca 0.859 cons 7.894 | cev 0.427 cea 0.728) | sh dcev 7% dcea 21% cev 6% cea 10% mkcv 1% mkca 3% cons 52% | conc(pred/tgt) v 73.1/75.8 a 27.1/35.1 | unsolved (31% of batch) v 19.17/21.98 a 6.36/10.07 | dr 8% ply 60 buf 300k aux 607006 | lr 1.95e-03
+[2026-09-16 03:52:18]          DEEP Elo@64: 5000=1194  0=961  random=910
+[2026-09-16 03:52:18]          perf: 0.41 games/s | wait(sp) 85% train 15% | NNbatch 88 (51 fwd/s)
+[2026-09-16 03:52:18] === done in 12567s ===
+[2026-09-16 03:52:18] ALLMSE_ADMLE_PATHAVG DONE

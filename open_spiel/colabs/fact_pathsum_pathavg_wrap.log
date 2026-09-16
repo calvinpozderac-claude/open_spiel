@@ -1,0 +1,5 @@
+[2026-09-15 21:31:59] WRAPPER: wrapper started (pid 16668) cell=pathsum_pathavg
+[2026-09-15 21:31:59] WRAPPER: launching run_factorial pathsum_pathavg
+[2026-09-16 00:22:44] WRAPPER: process exited (0) -- re-checking after pause
+[2026-09-16 00:22:49] WRAPPER: sentinel found -- exiting
+[2026-09-16 00:22:49] WRAPPER: wrapper done

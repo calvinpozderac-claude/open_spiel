@@ -1,0 +1,5 @@
+[2026-09-15 18:05:56] WRAPPER: wrapper started (pid 29196) cell=admle_avgconc
+[2026-09-15 18:05:56] WRAPPER: launching run_factorial admle_avgconc
+[2026-09-15 21:31:53] WRAPPER: process exited (0) -- re-checking after pause
+[2026-09-15 21:31:58] WRAPPER: sentinel found -- exiting
+[2026-09-15 21:31:58] WRAPPER: wrapper done

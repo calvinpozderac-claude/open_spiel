@@ -1,0 +1,5 @@
+[2026-09-16 00:22:49] WRAPPER: wrapper started (pid 19988) cell=admle_pathavg
+[2026-09-16 00:22:49] WRAPPER: launching run_factorial admle_pathavg
+[2026-09-16 03:52:19] WRAPPER: process exited (0) -- re-checking after pause
+[2026-09-16 03:52:24] WRAPPER: sentinel found -- exiting
+[2026-09-16 03:52:24] WRAPPER: wrapper done
