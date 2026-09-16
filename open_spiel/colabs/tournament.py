@@ -26,30 +26,55 @@ OUR_TEMP = 64.0
 N_WORKERS = 4
 OUT = 'tournament.json'
 
-# (name, dir, label, search_agg) -- each net deploys the search it trained with.
+# (name, dir, label, engine, param) -- each net deploys the search it trained
+# with.  engine 'thompson' -> param is the Dirichlet search_agg (c4 module);
+# engine 'az' -> param is c_puct (connect4_alphazero_utils, PUCT + policy/value).
 PARTICIPANTS = [
-    ('allmse',        'othello_benchmark/bench_ALLMSE',                '5000', 'pathsum'),
-    ('allmse_admle',  'othello_benchmark/bench_ALLMSE_ADMLE_AVGCONC',  '5000', 'additive_mle'),
-    ('allmse_pathav', 'othello_benchmark/bench_ALLMSE_PATHSUM_PATHAVG','5000', 'pathsum'),
-    ('allmse_ad_pav', 'othello_benchmark/bench_ALLMSE_ADMLE_PATHAVG',  '5000', 'additive_mle'),
-    ('ZGROUND',       'othello_benchmark/bench_ZGROUND',               '5000', 'pathsum'),
-    ('HYBRID',        'othello_benchmark/bench_HYBRID',                '5000', 'additive_mle'),
-    ('DISTILL',       'othello_benchmark/bench_DISTILL',               '5000', 'pathsum'),
+    ('allmse',        'othello_benchmark/bench_ALLMSE',                '5000', 'thompson', 'pathsum'),
+    ('allmse_admle',  'othello_benchmark/bench_ALLMSE_ADMLE_AVGCONC',  '5000', 'thompson', 'additive_mle'),
+    ('allmse_pathav', 'othello_benchmark/bench_ALLMSE_PATHSUM_PATHAVG','5000', 'thompson', 'pathsum'),
+    ('allmse_ad_pav', 'othello_benchmark/bench_ALLMSE_ADMLE_PATHAVG',  '5000', 'thompson', 'additive_mle'),
+    ('ZGROUND',       'othello_benchmark/bench_ZGROUND',               '5000', 'thompson', 'pathsum'),
+    ('HYBRID',        'othello_benchmark/bench_HYBRID',                '5000', 'thompson', 'additive_mle'),
+    ('DISTILL',       'othello_benchmark/bench_DISTILL',               '5000', 'thompson', 'pathsum'),
+    ('AZ',            'othello_benchmark/bench_AZ_MATCH',              '5000', 'az',       1.5),
 ]
 GAMES = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1] != 'report' else 100
 SIMS = int(sys.argv[2]) if len(sys.argv) > 2 else 400
 
 
+def _load(engine, d, label, c4, az):
+    mod = az if engine == 'az' else c4
+    return mod.load_benchmark_net(d, label, SIG)
+
+
+def _move(engine, param, net, game, state, rng, c4, az):
+    """One greedy eval move from `net` using its own engine."""
+    if engine == 'az':
+        az.set_search(c_puct=float(param))
+        bot = az.AZMCTSBot(game, net, 'cpu', SIMS, batch_size=16,
+                           random_state=rng, noise_frac=0.0)
+        root = bot.mcts_search(state)
+        return az.root_pick(root, rng, sample=False)     # visit-count argmax
+    c4.set_search(search_agg=param, target_agg=param)
+    bot = c4.C4MCTSBot(game, net, 'cpu', SIMS, batch_size=16,
+                       temp=OUR_TEMP, random_state=rng)
+    root = bot.mcts_search(state)
+    return c4.root_pick(root, rng, thompson=False, temp=OUR_TEMP)
+
+
 def _worker(args):
-    (an, ad, al, aagg), (bn, bd, bl, bagg), n_games, seed, a_first = args
+    ((an, ad, al, aeng, aparam), (bn, bd, bl, beng, bparam),
+     n_games, seed, a_first) = args
     import torch
     torch.set_num_threads(1)
     import connect4_dirichlet_utils as c4
+    import connect4_alphazero_utils as az
     game = c4.load_game('othello')
     c4.set_game(game)
     c4.set_search(selection='dirichlet', virtual_loss=1.0)
-    net_a = c4.load_benchmark_net(ad, al, SIG)
-    net_b = c4.load_benchmark_net(bd, bl, SIG)
+    net_a = _load(aeng, ad, al, c4, az)
+    net_b = _load(beng, bd, bl, c4, az)
     rng = np.random.default_rng(seed)
     a_pts = 0.0
     for gi in range(n_games):
@@ -58,13 +83,10 @@ def _worker(args):
             a_seat = 1 - a_seat
         st = game.new_initial_state()
         while not st.is_terminal():
-            is_a = (st.current_player() == a_seat)
-            net, agg = (net_a, aagg) if is_a else (net_b, bagg)
-            c4.set_search(search_agg=agg, target_agg=agg)
-            bot = c4.C4MCTSBot(game, net, 'cpu', SIMS, batch_size=16,
-                               temp=OUR_TEMP, random_state=rng)
-            root = bot.mcts_search(st)
-            mv = c4.root_pick(root, rng, thompson=False, temp=OUR_TEMP)
+            if st.current_player() == a_seat:
+                mv = _move(aeng, aparam, net_a, game, st, rng, c4, az)
+            else:
+                mv = _move(beng, bparam, net_b, game, st, rng, c4, az)
             st.apply_action(int(mv))
         r = st.returns()[a_seat]
         a_pts += 1.0 if r > 0 else (0.0 if r < 0 else 0.5)
@@ -156,11 +178,12 @@ def report(parts=None, wins=None, games=None):
     order = np.argsort(-elo)
     tot_pts = wins.sum(1)
     tot_g = games.sum(1)
-    print(f'\n{"rank":<5}{"model":<15}{"Elo":>6}{"score":>9}{"win%":>7}   search')
+    print(f'\n{"rank":<5}{"model":<15}{"Elo":>6}{"score":>9}{"win%":>7}   engine/search')
     for rank, i in enumerate(order, 1):
         wp = tot_pts[i] / max(tot_g[i], 1)
+        eng = f'{parts[i][3]}:{parts[i][4]}'
         print(f'{rank:<5}{names[i]:<15}{elo[i]:>6.0f}'
-              f'{tot_pts[i]:>6.0f}/{tot_g[i]:<3.0f}{wp:>6.1%}   {parts[i][3]}')
+              f'{tot_pts[i]:>6.0f}/{tot_g[i]:<3.0f}{wp:>6.1%}   {eng}')
 
 
 if __name__ == '__main__':
