@@ -1,16 +1,105 @@
-[2026-09-16 03:52:23] === AZ_MATCH (standard AlphaZero): 5000 eps, 10x32, c_puct=1.5, 100/400 sims -> othello_benchmark/bench_AZ_MATCH ===
-[2026-09-16 03:52:27] Self-play: 4 WORKER PROCESSES x 16 games
-[2026-09-16 03:52:27] device=privateuseone:0 backend=directml | params=229,058 | ALPHAZERO | start_ep=1
-[2026-09-16 04:21:10] ep   1000 | loss 0.957 (pol 0.742 val 0.214) | tgt_ent 0.56 |v| 0.82 | dr 6% ply 61 buf 196k | lr 2.00e-03 | vs last ckpt (no-MCTS) W23 D1 L6
-[2026-09-16 04:21:10]          perf: 0.59 games/s | wait(sp) 86% train 14% | NNbatch 201 (34 fwd/s)
-[2026-09-16 04:49:06] ep   2000 | loss 0.887 (pol 0.658 val 0.228) | tgt_ent 0.51 |v| 0.82 | dr 5% ply 61 buf 300k | lr 1.99e-03 | vs last ckpt (no-MCTS) W24 D0 L6
-[2026-09-16 04:49:06]          perf: 0.60 games/s | wait(sp) 84% train 15% | NNbatch 202 (34 fwd/s)
-[2026-09-16 05:15:52] ep   3000 | loss 0.766 (pol 0.576 val 0.189) | tgt_ent 0.45 |v| 0.84 | dr 5% ply 61 buf 300k | lr 1.98e-03 | vs last ckpt (no-MCTS) W29 D0 L1
-[2026-09-16 05:15:52]          perf: 0.62 games/s | wait(sp) 83% train 16% | NNbatch 199 (34 fwd/s)
-[2026-09-16 05:42:32] ep   4000 | loss 0.781 (pol 0.555 val 0.226) | tgt_ent 0.42 |v| 0.85 | dr 5% ply 61 buf 300k | lr 1.97e-03 | vs last ckpt (no-MCTS) W25 D0 L5
-[2026-09-16 05:42:32]          perf: 0.62 games/s | wait(sp) 83% train 16% | NNbatch 200 (34 fwd/s)
-[2026-09-16 06:09:24] ep   5000 | loss 0.672 (pol 0.499 val 0.172) | tgt_ent 0.38 |v| 0.87 | dr 5% ply 61 buf 300k | lr 1.95e-03
-[2026-09-16 06:09:24]          DEEP Elo@64: 5000=1130  random=870
-[2026-09-16 06:09:24]          perf: 0.62 games/s | wait(sp) 83% train 16% | NNbatch 195 (35 fwd/s)
-[2026-09-16 06:09:24] === done in 8221s ===
-[2026-09-16 06:09:24] AZ_MATCH DONE
+[2026-09-16 17:50:50] === AZ_MATCH (standard AlphaZero): 50000 eps, 10x32, c_puct=1.5, 100/400 sims -> othello_benchmark/bench_AZ_MATCH ===
+[2026-09-16 17:50:54] Self-play: 4 WORKER PROCESSES x 16 games
+[2026-09-16 17:50:54] resumed at ep 5000
+[2026-09-16 17:50:54] device=privateuseone:0 backend=directml | params=229,058 | ALPHAZERO | start_ep=5001
+[2026-09-16 18:18:35] ep   6000 | loss 0.691 (pol 0.531 val 0.160) | tgt_ent 0.42 |v| 0.88 | dr 4% ply 61 buf 250k | lr 1.93e-03 | vs last ckpt (no-MCTS) W18 D0 L12
+[2026-09-16 18:18:35]          perf: 0.61 games/s | wait(sp) 85% train 15% | NNbatch 192 (36 fwd/s)
+[2026-09-16 18:45:21] ep   7000 | loss 0.711 (pol 0.520 val 0.191) | tgt_ent 0.40 |v| 0.86 | dr 6% ply 61 buf 300k | lr 1.91e-03 | vs last ckpt (no-MCTS) W19 D0 L11
+[2026-09-16 18:45:21]          perf: 0.62 games/s | wait(sp) 83% train 16% | NNbatch 195 (34 fwd/s)
+[2026-09-16 19:12:29] ep   8000 | loss 0.680 (pol 0.519 val 0.161) | tgt_ent 0.41 |v| 0.87 | dr 5% ply 61 buf 300k | lr 1.88e-03 | vs last ckpt (no-MCTS) W23 D0 L7
+[2026-09-16 19:12:29]          perf: 0.61 games/s | wait(sp) 84% train 15% | NNbatch 195 (35 fwd/s)
+[2026-09-16 19:39:51] ep   9000 | loss 0.652 (pol 0.507 val 0.145) | tgt_ent 0.40 |v| 0.87 | dr 6% ply 61 buf 300k | lr 1.85e-03 | vs last ckpt (no-MCTS) W19 D0 L11
+[2026-09-16 19:39:51]          perf: 0.61 games/s | wait(sp) 84% train 15% | NNbatch 196 (35 fwd/s)
+[2026-09-16 20:08:25] ep  10000 | loss 0.671 (pol 0.515 val 0.155) | tgt_ent 0.41 |v| 0.87 | dr 6% ply 61 buf 300k | lr 1.82e-03
+[2026-09-16 20:08:25]          DEEP Elo@64: 10000=1193  5000=1122  random=814
+[2026-09-16 20:08:25]          perf: 0.60 games/s | wait(sp) 84% train 15% | NNbatch 192 (35 fwd/s)
+[2026-09-16 20:34:46] ep  11000 | loss 0.685 (pol 0.527 val 0.158) | tgt_ent 0.41 |v| 0.86 | dr 6% ply 61 buf 300k | lr 1.78e-03 | vs last ckpt (no-MCTS) W15 D0 L15
+[2026-09-16 20:34:46]          perf: 0.61 games/s | wait(sp) 80% train 15% | NNbatch 189 (36 fwd/s)
+[2026-09-16 21:01:23] ep  12000 | loss 0.683 (pol 0.516 val 0.167) | tgt_ent 0.40 |v| 0.88 | dr 6% ply 61 buf 300k | lr 1.74e-03 | vs last ckpt (no-MCTS) W21 D1 L8
+[2026-09-16 21:01:23]          perf: 0.63 games/s | wait(sp) 83% train 16% | NNbatch 190 (36 fwd/s)
+[2026-09-16 21:29:07] ep  13000 | loss 0.640 (pol 0.461 val 0.179) | tgt_ent 0.37 |v| 0.88 | dr 5% ply 61 buf 300k | lr 1.70e-03 | vs last ckpt (no-MCTS) W16 D0 L14
+[2026-09-16 21:29:07]          perf: 0.60 games/s | wait(sp) 84% train 15% | NNbatch 189 (36 fwd/s)
+[2026-09-16 21:55:27] ep  14000 | loss 0.710 (pol 0.530 val 0.180) | tgt_ent 0.43 |v| 0.88 | dr 5% ply 61 buf 300k | lr 1.65e-03 | vs last ckpt (no-MCTS) W11 D0 L19
+[2026-09-16 21:55:27]          perf: 0.63 games/s | wait(sp) 83% train 16% | NNbatch 196 (34 fwd/s)
+[2026-09-16 22:24:30] ep  15000 | loss 0.654 (pol 0.488 val 0.165) | tgt_ent 0.38 |v| 0.88 | dr 7% ply 61 buf 300k | lr 1.60e-03
+[2026-09-16 22:24:30]          DEEP Elo@64: 15000=1250  10000=1191  5000=1100  random=783
+[2026-09-16 22:24:30]          perf: 0.61 games/s | wait(sp) 84% train 15% | NNbatch 193 (35 fwd/s)
+[2026-09-16 22:49:34] ep  16000 | loss 0.707 (pol 0.520 val 0.187) | tgt_ent 0.42 |v| 0.85 | dr 6% ply 61 buf 300k | lr 1.55e-03 | vs last ckpt (no-MCTS) W16 D0 L14
+[2026-09-16 22:49:34]          perf: 0.62 games/s | wait(sp) 77% train 16% | NNbatch 190 (35 fwd/s)
+[2026-09-16 23:16:50] ep  17000 | loss 0.634 (pol 0.475 val 0.158) | tgt_ent 0.38 |v| 0.88 | dr 4% ply 61 buf 300k | lr 1.50e-03 | vs last ckpt (no-MCTS) W20 D3 L7
+[2026-09-16 23:16:50]          perf: 0.61 games/s | wait(sp) 84% train 15% | NNbatch 188 (36 fwd/s)
+[2026-09-16 23:44:03] ep  18000 | loss 0.624 (pol 0.446 val 0.177) | tgt_ent 0.36 |v| 0.88 | dr 6% ply 61 buf 300k | lr 1.44e-03 | vs last ckpt (no-MCTS) W11 D1 L18
+[2026-09-16 23:44:03]          perf: 0.61 games/s | wait(sp) 84% train 15% | NNbatch 191 (35 fwd/s)
+[2026-09-17 00:11:17] ep  19000 | loss 0.632 (pol 0.465 val 0.167) | tgt_ent 0.37 |v| 0.88 | dr 4% ply 61 buf 300k | lr 1.39e-03 | vs last ckpt (no-MCTS) W16 D0 L14
+[2026-09-17 00:11:17]          perf: 0.61 games/s | wait(sp) 83% train 15% | NNbatch 187 (36 fwd/s)
+[2026-09-17 00:40:18] ep  20000 | loss 0.724 (pol 0.540 val 0.184) | tgt_ent 0.43 |v| 0.85 | dr 5% ply 61 buf 300k | lr 1.33e-03
+[2026-09-17 00:40:18]          DEEP Elo@64: 20000=1334  15000=1235  5000=1155  10000=1083  random=766
+[2026-09-17 00:40:18]          perf: 0.62 games/s | wait(sp) 83% train 16% | NNbatch 189 (36 fwd/s)
+[2026-09-17 01:05:36] ep  21000 | loss 0.650 (pol 0.499 val 0.151) | tgt_ent 0.40 |v| 0.87 | dr 7% ply 61 buf 300k | lr 1.27e-03 | vs last ckpt (no-MCTS) W14 D0 L16
+[2026-09-17 01:05:36]          perf: 0.61 games/s | wait(sp) 76% train 15% | NNbatch 189 (34 fwd/s)
+[2026-09-17 01:31:54] ep  22000 | loss 0.722 (pol 0.537 val 0.185) | tgt_ent 0.43 |v| 0.87 | dr 7% ply 61 buf 300k | lr 1.21e-03 | vs last ckpt (no-MCTS) W16 D0 L14
+[2026-09-17 01:31:54]          perf: 0.63 games/s | wait(sp) 83% train 16% | NNbatch 189 (35 fwd/s)
+[2026-09-17 01:59:03] ep  23000 | loss 0.638 (pol 0.457 val 0.180) | tgt_ent 0.37 |v| 0.88 | dr 5% ply 61 buf 300k | lr 1.15e-03 | vs last ckpt (no-MCTS) W13 D0 L17
+[2026-09-17 01:59:03]          perf: 0.61 games/s | wait(sp) 83% train 16% | NNbatch 190 (36 fwd/s)
+[2026-09-17 02:26:33] ep  24000 | loss 0.620 (pol 0.476 val 0.144) | tgt_ent 0.37 |v| 0.89 | dr 6% ply 61 buf 300k | lr 1.09e-03 | vs last ckpt (no-MCTS) W17 D1 L12
+[2026-09-17 02:26:33]          perf: 0.61 games/s | wait(sp) 84% train 15% | NNbatch 185 (37 fwd/s)
+[2026-09-17 02:55:38] ep  25000 | loss 0.653 (pol 0.468 val 0.185) | tgt_ent 0.38 |v| 0.87 | dr 6% ply 61 buf 300k | lr 1.02e-03
+[2026-09-17 02:55:38]          DEEP Elo@64: 25000=1303  15000=1293  20000=1264  5000=1169  10000=1130  random=748
+[2026-09-17 02:55:38]          perf: 0.63 games/s | wait(sp) 83% train 16% | NNbatch 190 (35 fwd/s)
+[2026-09-17 03:21:15] ep  26000 | loss 0.629 (pol 0.478 val 0.151) | tgt_ent 0.37 |v| 0.88 | dr 4% ply 61 buf 300k | lr 9.63e-04 | vs last ckpt (no-MCTS) W7 D0 L23
+[2026-09-17 03:21:15]          perf: 0.59 games/s | wait(sp) 74% train 15% | NNbatch 186 (34 fwd/s)
+[2026-09-17 03:48:17] ep  27000 | loss 0.644 (pol 0.495 val 0.149) | tgt_ent 0.41 |v| 0.86 | dr 5% ply 61 buf 300k | lr 9.01e-04 | vs last ckpt (no-MCTS) W15 D0 L15
+[2026-09-17 03:48:17]          perf: 0.62 games/s | wait(sp) 83% train 16% | NNbatch 188 (36 fwd/s)
+[2026-09-17 04:14:21] ep  28000 | loss 0.620 (pol 0.451 val 0.169) | tgt_ent 0.35 |v| 0.87 | dr 4% ply 61 buf 300k | lr 8.40e-04 | vs last ckpt (no-MCTS) W14 D3 L13
+[2026-09-17 04:14:21]          perf: 0.64 games/s | wait(sp) 82% train 16% | NNbatch 185 (36 fwd/s)
+[2026-09-17 04:41:03] ep  29000 | loss 0.663 (pol 0.502 val 0.161) | tgt_ent 0.39 |v| 0.89 | dr 4% ply 61 buf 300k | lr 7.80e-04 | vs last ckpt (no-MCTS) W10 D0 L20
+[2026-09-17 04:41:03]          perf: 0.62 games/s | wait(sp) 83% train 16% | NNbatch 186 (36 fwd/s)
+[2026-09-17 05:10:58] ep  30000 | loss 0.596 (pol 0.444 val 0.152) | tgt_ent 0.35 |v| 0.88 | dr 6% ply 61 buf 300k | lr 7.21e-04
+[2026-09-17 05:10:58]          DEEP Elo@64: 30000=1392  20000=1293  25000=1255  15000=1234  10000=1186  5000=1112
+[2026-09-17 05:10:58]          perf: 0.63 games/s | wait(sp) 83% train 16% | NNbatch 188 (36 fwd/s)
+[2026-09-17 05:36:01] ep  31000 | loss 0.634 (pol 0.477 val 0.156) | tgt_ent 0.38 |v| 0.86 | dr 6% ply 61 buf 300k | lr 6.63e-04 | vs last ckpt (no-MCTS) W12 D0 L18
+[2026-09-17 05:36:01]          perf: 0.58 games/s | wait(sp) 72% train 15% | NNbatch 186 (34 fwd/s)
+[2026-09-17 06:02:12] ep  32000 | loss 0.703 (pol 0.521 val 0.182) | tgt_ent 0.41 |v| 0.85 | dr 8% ply 61 buf 300k | lr 6.06e-04 | vs last ckpt (no-MCTS) W6 D3 L21
+[2026-09-17 06:02:12]          perf: 0.64 games/s | wait(sp) 83% train 16% | NNbatch 186 (36 fwd/s)
+[2026-09-17 06:28:05] ep  33000 | loss 0.720 (pol 0.526 val 0.194) | tgt_ent 0.43 |v| 0.85 | dr 7% ply 61 buf 300k | lr 5.51e-04 | vs last ckpt (no-MCTS) W18 D1 L11
+[2026-09-17 06:28:05]          perf: 0.64 games/s | wait(sp) 83% train 16% | NNbatch 185 (36 fwd/s)
+[2026-09-17 06:55:14] ep  34000 | loss 0.594 (pol 0.424 val 0.170) | tgt_ent 0.35 |v| 0.87 | dr 6% ply 61 buf 300k | lr 4.98e-04 | vs last ckpt (no-MCTS) W11 D0 L19
+[2026-09-17 06:55:14]          perf: 0.61 games/s | wait(sp) 83% train 16% | NNbatch 184 (37 fwd/s)
+[2026-09-17 07:25:54] ep  35000 | loss 0.638 (pol 0.471 val 0.167) | tgt_ent 0.37 |v| 0.86 | dr 4% ply 61 buf 300k | lr 4.46e-04
+[2026-09-17 07:25:54]          DEEP Elo@64: 35000=1357  30000=1337  25000=1315  20000=1293  15000=1245  10000=1226
+[2026-09-17 07:25:54]          perf: 0.62 games/s | wait(sp) 83% train 16% | NNbatch 183 (37 fwd/s)
+[2026-09-17 07:50:51] ep  36000 | loss 0.656 (pol 0.482 val 0.174) | tgt_ent 0.39 |v| 0.87 | dr 7% ply 61 buf 300k | lr 3.98e-04 | vs last ckpt (no-MCTS) W11 D1 L18
+[2026-09-17 07:50:51]          perf: 0.58 games/s | wait(sp) 71% train 15% | NNbatch 185 (33 fwd/s)
+[2026-09-17 08:18:09] ep  37000 | loss 0.635 (pol 0.479 val 0.155) | tgt_ent 0.40 |v| 0.86 | dr 5% ply 61 buf 300k | lr 3.51e-04 | vs last ckpt (no-MCTS) W15 D1 L14
+[2026-09-17 08:18:09]          perf: 0.61 games/s | wait(sp) 83% train 16% | NNbatch 182 (37 fwd/s)
+[2026-09-17 08:45:42] ep  38000 | loss 0.677 (pol 0.488 val 0.189) | tgt_ent 0.40 |v| 0.86 | dr 6% ply 61 buf 300k | lr 3.07e-04 | vs last ckpt (no-MCTS) W18 D0 L12
+[2026-09-17 08:45:42]          perf: 0.61 games/s | wait(sp) 82% train 16% | NNbatch 172 (38 fwd/s)
+[2026-09-17 09:13:10] ep  39000 | loss 0.648 (pol 0.480 val 0.168) | tgt_ent 0.38 |v| 0.87 | dr 7% ply 61 buf 300k | lr 2.67e-04 | vs last ckpt (no-MCTS) W15 D6 L9
+[2026-09-17 09:13:10]          perf: 0.61 games/s | wait(sp) 82% train 16% | NNbatch 171 (39 fwd/s)
+[2026-09-17 09:45:58] ep  40000 | loss 0.650 (pol 0.474 val 0.175) | tgt_ent 0.39 |v| 0.86 | dr 6% ply 61 buf 300k | lr 2.29e-04
+[2026-09-17 09:45:58]          DEEP Elo@64: 40000=1403  30000=1347  20000=1325  35000=1293  15000=1271  25000=1261
+[2026-09-17 09:45:58]          perf: 0.59 games/s | wait(sp) 84% train 15% | NNbatch 172 (39 fwd/s)
+[2026-09-17 10:11:26] ep  41000 | loss 0.607 (pol 0.444 val 0.163) | tgt_ent 0.36 |v| 0.87 | dr 6% ply 61 buf 300k | lr 1.94e-04 | vs last ckpt (no-MCTS) W15 D2 L13
+[2026-09-17 10:11:26]          perf: 0.56 games/s | wait(sp) 70% train 14% | NNbatch 176 (34 fwd/s)
+[2026-09-17 10:38:13] ep  42000 | loss 0.706 (pol 0.501 val 0.205) | tgt_ent 0.40 |v| 0.84 | dr 6% ply 61 buf 300k | lr 1.62e-04 | vs last ckpt (no-MCTS) W14 D2 L14
+[2026-09-17 10:38:13]          perf: 0.62 games/s | wait(sp) 83% train 16% | NNbatch 173 (39 fwd/s)
+[2026-09-17 11:06:19] ep  43000 | loss 0.668 (pol 0.471 val 0.197) | tgt_ent 0.38 |v| 0.85 | dr 5% ply 61 buf 300k | lr 1.34e-04 | vs last ckpt (no-MCTS) W16 D1 L13
+[2026-09-17 11:06:19]          perf: 0.59 games/s | wait(sp) 84% train 15% | NNbatch 173 (39 fwd/s)
+[2026-09-17 11:34:34] ep  44000 | loss 0.667 (pol 0.460 val 0.207) | tgt_ent 0.37 |v| 0.85 | dr 7% ply 61 buf 300k | lr 1.10e-04 | vs last ckpt (no-MCTS) W11 D0 L19
+[2026-09-17 11:34:34]          perf: 0.59 games/s | wait(sp) 84% train 15% | NNbatch 173 (39 fwd/s)
+[2026-09-17 12:06:59] ep  45000 | loss 0.704 (pol 0.507 val 0.197) | tgt_ent 0.41 |v| 0.84 | dr 6% ply 61 buf 300k | lr 8.85e-05
+[2026-09-17 12:06:59]          DEEP Elo@64: 30000=1403  45000=1385  40000=1378  10000=1306  20000=1290  35000=1274
+[2026-09-17 12:06:59]          perf: 0.61 games/s | wait(sp) 84% train 15% | NNbatch 174 (39 fwd/s)
+[2026-09-17 12:32:16] ep  46000 | loss 0.721 (pol 0.507 val 0.214) | tgt_ent 0.42 |v| 0.83 | dr 6% ply 61 buf 300k | lr 7.12e-05 | vs last ckpt (no-MCTS) W26 D0 L4
+[2026-09-17 12:32:16]          perf: 0.55 games/s | wait(sp) 68% train 15% | NNbatch 176 (33 fwd/s)
+[2026-09-17 12:59:24] ep  47000 | loss 0.622 (pol 0.442 val 0.180) | tgt_ent 0.37 |v| 0.83 | dr 6% ply 61 buf 300k | lr 5.77e-05 | vs last ckpt (no-MCTS) W15 D1 L14
+[2026-09-17 12:59:24]          perf: 0.61 games/s | wait(sp) 83% train 16% | NNbatch 171 (39 fwd/s)
+[2026-09-17 13:26:36] ep  48000 | loss 0.700 (pol 0.480 val 0.221) | tgt_ent 0.38 |v| 0.84 | dr 8% ply 61 buf 300k | lr 4.79e-05 | vs last ckpt (no-MCTS) W16 D3 L11
+[2026-09-17 13:26:36]          perf: 0.61 games/s | wait(sp) 82% train 16% | NNbatch 169 (40 fwd/s)
+[2026-09-17 13:52:52] ep  49000 | loss 0.663 (pol 0.461 val 0.202) | tgt_ent 0.38 |v| 0.84 | dr 6% ply 61 buf 300k | lr 4.20e-05 | vs last ckpt (no-MCTS) W15 D3 L12
+[2026-09-17 13:52:52]          perf: 0.63 games/s | wait(sp) 82% train 17% | NNbatch 171 (39 fwd/s)
+[2026-09-17 14:26:35] ep  50000 | loss 0.680 (pol 0.477 val 0.203) | tgt_ent 0.38 |v| 0.84 | dr 5% ply 61 buf 300k | lr 4.00e-05
+[2026-09-17 14:26:35]          DEEP Elo@64: 45000=1482  40000=1355  50000=1351  20000=1339  35000=1336  30000=1292
+[2026-09-17 14:26:35]          perf: 0.59 games/s | wait(sp) 83% train 16% | NNbatch 164 (41 fwd/s)
+[2026-09-17 14:26:40] === done in 74150s ===
+[2026-09-17 14:26:40] AZ_MATCH DONE
