@@ -49,13 +49,20 @@ def _load(engine, d, label, c4, az):
 
 
 def _move(engine, param, net, game, state, rng, c4, az):
-    """One greedy eval move from `net` using its own engine."""
+    """One eval move from `net` using its own engine.
+
+    AZ: PUCT is otherwise fully deterministic (no root noise, no stochastic
+    tie-break) -- greedy argmax collapses many "games" to the same handful of
+    trajectories (confirmed: az_ladder.json pairwise scores were all exact
+    multiples of 1/4). Sample from the visit distribution at temp=0.3, this
+    repo's own established standard-AlphaZero eval protocol (az_screen_pick.
+    log baseline), for real per-game variance while still close to greedy."""
     if engine == 'az':
         az.set_search(c_puct=float(param))
         bot = az.AZMCTSBot(game, net, 'cpu', SIMS, batch_size=16,
                            random_state=rng, noise_frac=0.0)
         root = bot.mcts_search(state)
-        return az.root_pick(root, rng, sample=False)     # visit-count argmax
+        return az.root_pick(root, rng, sample=True, temp=0.3)
     c4.set_search(search_agg=param, target_agg=param)
     bot = c4.C4MCTSBot(game, net, 'cpu', SIMS, batch_size=16,
                        temp=OUR_TEMP, random_state=rng)
