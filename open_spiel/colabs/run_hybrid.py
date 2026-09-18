@@ -33,7 +33,9 @@ import time
 
 import connect4_dirichlet_utils as c4
 
-NUM_EPISODES = 50000
+NUM_EPISODES = 100000      # extended past 50k; resumes from the ep50000 ckpt.
+LR_DECAY_EPS = 50000       # keep the ORIGINAL 50k cosine shape for 0-50k; the
+                           # 50k-100k extension trains at the (raised) floor LR.
 ROOT = 'othello_benchmark'
 CKPT = 'bench_HYBRID'
 LOG_PATH = os.path.join(os.path.dirname(__file__), 'hybrid.log')
@@ -65,7 +67,11 @@ def make_cfg():
         pool_prob=0.0, random_pool_frac=0.0,
         batch_size=1024, train_steps_per_ep=1, max_buffer=300_000,
         lr_peak=2e-3, lr_warmup_eps=100,
-        lr_decay_eps=NUM_EPISODES, lr_min_factor=0.02,
+        # floor raised 0.02 -> 0.10 (4e-5 -> 2e-4): the original cosine bottomed
+        # out at ep50000, so the 50k-100k extension would otherwise train at a
+        # near-dead 4e-5.  2e-4 is a gentle, active continuation LR (a 5x bump
+        # at resume, not the 25x jump a warm-restart-to-peak would cause).
+        lr_decay_eps=LR_DECAY_EPS, lr_min_factor=0.10,
         weight_decay=1e-4, grad_clip=1.0,
         quick_eval_every=1000, quick_eval_games=30,
         deep_eval_every=5000, eval_sims=64,
