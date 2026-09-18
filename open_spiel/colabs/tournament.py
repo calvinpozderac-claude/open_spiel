@@ -100,22 +100,58 @@ def _worker(args):
     return (an, bn), a_pts, n_games
 
 
-def fit_elo(names, wins, games, anchor=1500.0, iters=10000, lr=1.0):
-    """Bradley-Terry MLE -> Elo. wins[i][j] = points i scored vs j (of games)."""
+def fit_elo(names, wins, games, anchor=1500.0, iters=None, lr=None, reg=1.0):
+    """Bradley-Terry MAP -> Elo: minimise the ridge-penalised negative
+    log-likelihood with L-BFGS (exact, scale-free -- no hand-tuned iters/lr).
+
+    reg is a Gaussian prior VARIANCE in Elo^2 on each rating around `anchor`
+    (bigger reg = weaker prior = closer to raw MLE); default 1.0 is
+    deliberately tiny (stdev ~1 Elo) -- see why below.
+
+    Plain MLE (reg=inf i.e. no penalty) is only finite when every pairwise
+    score is strictly between 0 and games. If one group sweeps another (e.g.
+    a near-0/80 cross record -- exactly what happened AZ vs HYBRID here), the
+    true MLE gap is INFINITE: verified empirically, unregularised gradient
+    ascent drifted the fitted gap from ~190 to ~370 to ~560 Elo as iterations
+    went 10k->50k->200k, never converging. A ridge prior (equivalent to
+    Firth-type penalisation for separable logistic regression) makes the
+    posterior mode finite and well-defined, but the specific reg value then
+    directly sets how far "near-total domination" gets reported (see
+    az-vs-thompson-plateau memory for the reg-sweep this default was picked
+    from) -- report it alongside every fitted gap, and prefer citing the raw
+    empirical score (e.g. "3/2000, 99.85% [.15-2.4%] Wilson CI") for any
+    near-perfect-separation matchup rather than leaning on the point Elo."""
+    from scipy.optimize import minimize
     n = len(names)
-    r = np.full(n, anchor, float)
+    idx_i, idx_j, w_ij, g_ij = [], [], [], []
+    for i in range(n):
+        for j in range(n):
+            if i != j and games[i][j] > 0:
+                idx_i.append(i); idx_j.append(j)
+                w_ij.append(wins[i][j]); g_ij.append(games[i][j])
+    idx_i, idx_j = np.array(idx_i), np.array(idx_j)
+    w_ij, g_ij = np.array(w_ij), np.array(g_ij)
     S = 400.0 / np.log(10.0)
-    for _ in range(iters):
+
+    def nll_grad(r):
+        d = (r[idx_j] - r[idx_i]) / S
+        logp = -np.logaddexp(0.0, d)              # log sigmoid(-d) = log p_i_beats_j
+        logq = -np.logaddexp(0.0, -d)
+        nll = -(w_ij * logp + (g_ij - w_ij) * logq).sum()
+        p = 1.0 / (1.0 + np.exp(d))
+        dL = (w_ij - g_ij * p)                     # d(loglik)/d r_i, per row
         grad = np.zeros(n)
-        for i in range(n):
-            for j in range(n):
-                if i == j or games[i][j] == 0:
-                    continue
-                p = 1.0 / (1.0 + np.exp((r[j] - r[i]) / S))
-                grad[i] += (wins[i][j] - games[i][j] * p)
-        r += lr * grad / max(games.sum(), 1)
-        r -= r.mean() - anchor
-    return r
+        np.add.at(grad, idx_i, dL)
+        np.add.at(grad, idx_j, -dL)
+        pen = ((r - anchor) ** 2).sum() / (2 * reg)
+        pen_grad = (r - anchor) / reg
+        return nll + pen, -grad + pen_grad          # minimise -loglik + penalty
+
+    r0 = np.full(n, anchor, float)
+    res = minimize(nll_grad, r0, jac=True, method='L-BFGS-B',
+                   options=dict(maxiter=2000, ftol=1e-12, gtol=1e-10))
+    r = res.x
+    return r - r.mean() + anchor
 
 
 def main():
