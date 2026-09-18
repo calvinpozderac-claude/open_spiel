@@ -67,11 +67,14 @@ def make_cfg():
         pool_prob=0.0, random_pool_frac=0.0,
         batch_size=1024, train_steps_per_ep=1, max_buffer=300_000,
         lr_peak=2e-3, lr_warmup_eps=100,
-        # 50k-100k extension floor: 0.05 -> 1e-4. The first attempt at 0.10
-        # (2e-4) monotonically DEGRADED the opening value head over ep50k-60k
-        # (MSE_open 0.770->0.873), so reverted to ep50000 and halved the bump
-        # to 1e-4 (2.5x the original 4e-5 floor) -- gentler, per Calvin's call.
-        lr_decay_eps=LR_DECAY_EPS, lr_min_factor=0.05,
+        # 50k-100k extension floor: back to the FAITHFUL original, 0.02 (4e-5).
+        # Both 2e-4 and 1e-4 degraded the opening value head at ep50k-60k on
+        # nearly IDENTICAL trajectories (MSE_open ~0.77->~0.86-0.87 either way)
+        # -- halving the LR barely changed it, so this isn't an LR-magnitude
+        # problem. Reverted to ep50000 twice; this run isolates whether ANY
+        # active LR does this (faithful floor also degrades) or whether 4e-5
+        # is gentle enough to hold/improve (LR was the answer after all).
+        lr_decay_eps=LR_DECAY_EPS, lr_min_factor=0.02,
         weight_decay=1e-4, grad_clip=1.0,
         quick_eval_every=1000, quick_eval_games=30,
         deep_eval_every=5000, eval_sims=64,
