@@ -66,14 +66,19 @@ def make_cfg():
         worker_wave=4, n_parallel_games=16, wave_per_game=4,
         pool_prob=0.0, random_pool_frac=0.0,
         batch_size=1024, train_steps_per_ep=1, max_buffer=300_000,
+        # The ORIGINAL HYBRID loss, set EXPLICITLY. This script historically
+        # relied on the Config default, which was silently changed to
+        # distillation-only (no cev/cea) during the dict-loss refactor -- that
+        # dropped z-grounding on resume and degraded the opening value head
+        # (the "can't learn from a wiped buffer" symptom was really "training
+        # the wrong loss"). Never rely on the default for a run of record.
+        loss_weights={'klv': 1.0, 'kla': 2.0, 'cev': 1.0, 'cea': 1.0,
+                      'cons': 0.5},
         lr_peak=2e-3, lr_warmup_eps=100,
-        # 50k-100k extension floor: back to the FAITHFUL original, 0.02 (4e-5).
-        # Both 2e-4 and 1e-4 degraded the opening value head at ep50k-60k on
-        # nearly IDENTICAL trajectories (MSE_open ~0.77->~0.86-0.87 either way)
-        # -- halving the LR barely changed it, so this isn't an LR-magnitude
-        # problem. Reverted to ep50000 twice; this run isolates whether ANY
-        # active LR does this (faithful floor also degrades) or whether 4e-5
-        # is gentle enough to hold/improve (LR was the answer after all).
+        # 50k-100k extension at the FAITHFUL original floor, 0.02 (4e-5). The
+        # earlier LR sweep (2e-4/1e-4/4e-5) all "degraded" the opening -- but
+        # that was the z-grounding bug above, not the LR. With cev/cea restored
+        # this should hold/improve.
         lr_decay_eps=LR_DECAY_EPS, lr_min_factor=0.02,
         weight_decay=1e-4, grad_clip=1.0,
         quick_eval_every=1000, quick_eval_games=30,

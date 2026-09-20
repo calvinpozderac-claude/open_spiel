@@ -1407,14 +1407,21 @@ class Config:
     def resolved_loss_weights(self):
         """loss_weights -> {component: weight} dict.
 
-        None       -> the loss-lab winner (pure distillation + consistency).
+        None       -> the ORIGINAL recipe (klv, kla, cev, cea, cons) with
+                      z-grounding.  This is the historical default every run
+                      script that doesn't set loss_weights was written against,
+                      and the tournament winner.  (It was briefly changed to a
+                      distillation-only default while the dict refactor landed,
+                      which silently stripped cev/cea from run_hybrid.py et al.
+                      and degraded their opening value head -- never do that:
+                      the default must match what the existing scripts expect.)
         dict       -> used as-is.
         3-tuple    -> legacy (evv, eva, cons)               [claude/nll runs].
         5-tuple    -> legacy (klv, kla, cev, cea, cons)     [original runs].
         Old checkpoints saved a tuple in cfg; this keeps them loadable."""
         lw = self.loss_weights
         if lw is None:
-            return {'klv': 1.0, 'kla': 2.0, 'cons': 0.5}
+            return {'klv': 1.0, 'kla': 2.0, 'cev': 1.0, 'cea': 1.0, 'cons': 0.5}
         if isinstance(lw, dict):
             return {k: float(v) for k, v in lw.items() if v}
         lw = tuple(lw)
