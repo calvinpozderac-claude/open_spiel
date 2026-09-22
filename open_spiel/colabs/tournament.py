@@ -100,27 +100,36 @@ def _worker(args):
     return (an, bn), a_pts, n_games
 
 
-def fit_elo(names, wins, games, anchor=1500.0, iters=None, lr=None, reg=1.0):
+def fit_elo(names, wins, games, anchor=1500.0, iters=None, lr=None, reg=1.6e5):
     """Bradley-Terry MAP -> Elo: minimise the ridge-penalised negative
     log-likelihood with L-BFGS (exact, scale-free -- no hand-tuned iters/lr).
 
     reg is a Gaussian prior VARIANCE in Elo^2 on each rating around `anchor`
-    (bigger reg = weaker prior = closer to raw MLE); default 1.0 is
-    deliberately tiny (stdev ~1 Elo) -- see why below.
+    (bigger reg = weaker prior = closer to raw MLE). Default 1.6e5 = a prior
+    stdev of ~400 Elo -- weak enough to leave ordinary (non-degenerate) data
+    essentially unbiased, strong enough to keep near-separated data finite.
+
+    CAUGHT A LIVE BUG from this default: an earlier version defaulted to
+    reg=1.0 (stdev ~1 ELO), which crushes EVERY fit to within a few points of
+    `anchor` regardless of the data -- and report()'s call site didn't pass
+    reg explicitly, so the plain HYBRID 10k-100k ladder (fully non-degenerate,
+    win rates 8%-61%) silently came back as a dead-flat 1496-1501 band. Always
+    pass reg explicitly at a call site that cares about the number, don't rely
+    on the default staying sane.
 
     Plain MLE (reg=inf i.e. no penalty) is only finite when every pairwise
     score is strictly between 0 and games. If one group sweeps another (e.g.
-    a near-0/80 cross record -- exactly what happened AZ vs HYBRID here), the
-    true MLE gap is INFINITE: verified empirically, unregularised gradient
-    ascent drifted the fitted gap from ~190 to ~370 to ~560 Elo as iterations
-    went 10k->50k->200k, never converging. A ridge prior (equivalent to
-    Firth-type penalisation for separable logistic regression) makes the
-    posterior mode finite and well-defined, but the specific reg value then
-    directly sets how far "near-total domination" gets reported (see
-    az-vs-thompson-plateau memory for the reg-sweep this default was picked
-    from) -- report it alongside every fitted gap, and prefer citing the raw
-    empirical score (e.g. "3/2000, 99.85% [.15-2.4%] Wilson CI") for any
-    near-perfect-separation matchup rather than leaning on the point Elo."""
+    a near-0/80 cross record -- AZ vs HYBRID), the true MLE gap is INFINITE:
+    verified empirically, unregularised gradient ascent drifted the fitted gap
+    from ~190 to ~370 to ~560 Elo as iterations went 10k->50k->200k, never
+    converging. A ridge prior (equivalent to Firth-type penalisation for
+    separable logistic regression) makes the posterior mode finite and
+    well-defined, but the specific reg value then directly sets how far
+    "near-total domination" gets reported (see az-vs-thompson-plateau memory
+    for the reg-sweep the AZ-vs-HYBRID case needed) -- report reg alongside
+    any fitted gap for near-separated data, and prefer citing the raw
+    empirical score (e.g. "3/2000, 99.85% [.15-2.4%] Wilson CI") over the
+    point Elo whenever a pairwise record is at or near 0%/100%."""
     from scipy.optimize import minimize
     n = len(names)
     idx_i, idx_j, w_ij, g_ij = [], [], [], []
