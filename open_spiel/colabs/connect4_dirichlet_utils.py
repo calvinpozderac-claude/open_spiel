@@ -1247,6 +1247,28 @@ class Config:
     fast_sims: int = 100              # simulations for a `fast_prob` game
     full_sims: int = 400              # …and for the rest
     fast_prob: float = 0.75
+    # OLIVAW-style simulation RAMP (arXiv 2103.17228): they raised sims per move
+    # across generations (100 -> 200 -> 400) instead of holding a fixed mix, so
+    # cheap games explore early and expensive ones sharpen a net worth
+    # sharpening.  ((frac_of_run, sims), ...) ascending; empty = off, and then
+    # fast/full/fast_prob behave exactly as they always did.
+    #
+    # The stage is derived from games THIS WORKER has started over its own
+    # share of the run, not from a global episode counter, so it needs no extra
+    # IPC.  Consequence: a mid-run resume restarts the ramp at stage 0 -- pass
+    # `sims_ramp_offset` (the resumed start_ep) to correct for that.
+    sims_ramp: tuple = ()
+    sims_ramp_offset: int = 0
+    # OLIVAW's "doubling" trick: also train on positions the tree explored a
+    # LOT but never played.  Their pair is {s, (pi_s, q_s)} -- note q_s, the
+    # SEARCH value, not the game outcome z, because an off-path position has no
+    # outcome.  Here that means emitting make_target(child) with z_w = 0, which
+    # keeps the klv/kla distillation terms and drops the cev/cea z-grounding --
+    # exactly the (pi, q) semantics.  n>0 emits the n highest-visit UNPLAYED
+    # children per move (1 => the training set roughly doubles, as in the
+    # paper); 0 = off.
+    double_aux: int = 0
+    double_min_visits: int = 8        # skip children too thin to target
     temp_threshold: int = 12          # plies of full-temperature Thompson moves
     late_temp: float = 8.0            # after that, concentration ×this (≈ greedy)
     # How sharp the IN-TREE descent is, independent of root exploration.
@@ -1317,6 +1339,12 @@ class Config:
     lr_warmup_eps: int = 100
     lr_decay_eps: int = 8_000         # cosine horizon (decoupled from num_episodes)
     lr_min_factor: float = 0.10
+    # OLIVAW used a STEP schedule, not a cosine: 3e-3, then 1e-3 from gen 4/20,
+    # then 1e-4 from gen 11/20 -- i.e. the last ~45% of the run sits at a flat
+    # 1e-4, 2.5x above the 4e-5 our cosine floor reaches.  ((frac_of_run, lr),
+    # ...) ascending by frac; empty = off, keeping the cosine exactly as before.
+    # Warmup still applies for the first lr_warmup_eps either way.
+    lr_steps: tuple = ()
     weight_decay: float = 1e-4
     grad_clip: float = 1.0
     # dict {component: weight}; see full_loss.LOSS_COMPONENTS for the menu.
@@ -1676,7 +1704,22 @@ class _SlotEngine:
         cfg, rng = self.cfg, self.rng
         mode = _adaptive_mode(cfg)
         adaptive = mode is not None
-        if mode is None:
+        ramp = cfg.get('sims_ramp')
+        if ramp:
+            # OLIVAW's per-generation sims ramp.  Stage comes from games THIS
+            # worker has started against its own share of the run -- workers
+            # draw from one queue and finish at near-identical rates, so the
+            # local fraction tracks the global one closely enough to place two
+            # stage boundaries.  No extra IPC, and nothing to keep in sync.
+            self._ramp_started = getattr(self, '_ramp_started', 0) + 1
+            share = max(1.0, cfg['ramp_total_games'] / cfg['ramp_workers'])
+            f = cfg['ramp_offset_frac'] + min(1.0, self._ramp_started / share) \
+                * (1.0 - cfg['ramp_offset_frac'])
+            sims = ramp[0][1]
+            for thr, sv in ramp:
+                if f >= thr:
+                    sims = sv
+        elif mode is None:
             sims = (cfg['fast_sims'] if rng.random() < cfg['fast_prob']
                     else cfg['full_sims'])
         elif mode == 'kl':
@@ -1735,6 +1778,8 @@ class _SlotEngine:
         t['played'] = pidx
         t['sims_used'] = s['n']
         s['hist'].append(t)
+        if self.cfg.get('double_aux'):
+            self._emit_doubles(s, root, pidx)
         s['actions'].append(int(a))
         s['root'] = root.children[pidx]
         s['state'].apply_action(a)
@@ -1754,6 +1799,45 @@ class _SlotEngine:
             t['next_term'] = int(_WIN if r > 0 else (_LOSS if r < 0 else _DRAW))
         else:
             t['next_obs'] = make_obs(st)
+
+    def _emit_doubles(self, s, root, pidx):
+        """OLIVAW's doubling trick (arXiv 2103.17228, sec. III): also train on
+        the positions the tree explored heavily but did NOT play.  The search
+        already paid for them, so they are free data, and they are the
+        best-resolved targets in the tree by construction.
+
+        Their pair is {s, (pi_s, q_s)} -- q_s, the SEARCH value, not the game
+        outcome z, and that distinction is load-bearing: an unplayed line has
+        no outcome, so stamping this game's z on it would teach the value head
+        a result that never happened.  Here that is `z_w = 0`, which keeps the
+        klv/kla distillation terms (the pi/q half) and drops cev/cea
+        (the z half).  These live in s['aux'], which finish_episode never
+        touches, so nothing downstream can stamp z back on.
+
+        The paper sets a dynamic VISIT threshold chosen to make the training
+        set exactly twice the size; taking the `double_aux` highest-visit
+        unplayed children per move reaches the same 2x at double_aux=1 without
+        a global statistic to keep calibrated, and double_min_visits keeps out
+        children too thin to carry a meaningful target."""
+        vis = root.visits()
+        lo = self.cfg.get('double_min_visits', 8)
+        want = self.cfg['double_aux']
+        got = 0
+        for j in np.argsort(-vis):
+            j = int(j)
+            if vis[j] < lo:
+                break                 # sorted descending: nothing left qualifies
+            if j == pidx:
+                continue
+            child = root.children[j]
+            if child is None or child.obs is None:
+                continue
+            t = make_target(child)
+            t['z_w'] = np.float32(0.0)
+            s['aux'].append(t)
+            got += 1
+            if got >= want:
+                break
 
     def _apply_pool_move(self, s, a):
         s['root'] = _descend(s['root'], a)
@@ -3556,6 +3640,13 @@ if _HAS_TORCH:
             n_parallel=cfg.n_parallel_games, wave_per_game=cfg.wave_per_game,
             fast_sims=cfg.fast_sims, full_sims=cfg.full_sims,
             fast_prob=cfg.fast_prob, temp_threshold=cfg.temp_threshold,
+            sims_ramp=tuple(cfg.sims_ramp),
+            ramp_total_games=max(cfg.num_episodes - cfg.sims_ramp_offset, 1),
+            ramp_offset_frac=(cfg.sims_ramp_offset
+                              / max(cfg.num_episodes, 1)),
+            ramp_workers=max(cfg.resolved_workers()
+                             if cfg.use_workers else 1, 1),
+            double_aux=cfg.double_aux, double_min_visits=cfg.double_min_visits,
             late_temp=cfg.late_temp, descent_temp=cfg.descent_temp,
             max_plies=cfg.max_plies,
             pool_prob=cfg.pool_prob, random_pool_frac=cfg.random_pool_frac,
@@ -3637,6 +3728,15 @@ if _HAS_TORCH:
         def _lr(ep):
             if ep < cfg.lr_warmup_eps:
                 return ep / max(cfg.lr_warmup_eps, 1)
+            if cfg.lr_steps:
+                # OLIVAW step schedule: the LambdaLR factor multiplies lr_peak,
+                # so each entry's absolute lr becomes a factor of lr_peak.
+                f = ep / max(cfg.num_episodes, 1)
+                fac = 1.0
+                for thr, lr in cfg.lr_steps:
+                    if f >= thr:
+                        fac = lr / cfg.lr_peak
+                return fac
             f = min((ep - cfg.lr_warmup_eps)
                     / max(cfg.lr_decay_eps - cfg.lr_warmup_eps, 1), 1.0)
             return cfg.lr_min_factor + (1 - cfg.lr_min_factor) * 0.5 * (

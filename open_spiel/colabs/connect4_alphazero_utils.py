@@ -248,15 +248,55 @@ def root_value(root):
 def make_target(root):
     return {'obs': root.obs, 'legal': root.legal.copy(),
             'pi': visit_policy(root, 1.0).astype(np.float32),
-            'z': np.float32(0.0), 'player': int(root.player), 'solved': False}
+            'z': np.float32(0.0), 'player': int(root.player), 'solved': False,
+            'aux_q': False}
 
 
 def finish_episode(samples, returns):
     for s in samples:
-        if s.get('solved'):
-            continue          # already carries an exact proven outcome
+        if s.get('solved') or s.get('aux_q'):
+            continue          # exact proven outcome, or an off-path q target
         s['z'] = np.float32(returns[s['player']])
     return samples
+
+
+def emit_doubles(s, root, pidx, cfg):
+    """OLIVAW's doubling trick (arXiv 2103.17228, sec. III): also train on the
+    positions the tree explored heavily but did NOT play.  The search already
+    paid for them, and they are the best-resolved targets in the tree.
+
+    Their pair is {s, (pi_s, q_s)} -- q_s, the SEARCH value, not the game
+    outcome z, and that distinction is load-bearing: an unplayed line has no
+    outcome, so stamping this game's z on it would teach the value head a
+    result that never happened.  Here the sample carries z = root_value(child)
+    (the visit-weighted q) and `aux_q`, which finish_episode honours by leaving
+    that z alone.
+
+    The paper sets a dynamic VISIT threshold chosen to make the training set
+    exactly twice the size; taking the `double_aux` highest-visit unplayed
+    children per move reaches the same 2x at double_aux=1 without a global
+    statistic to keep calibrated, and double_min_visits keeps out children too
+    thin to carry a meaningful target."""
+    vis = root.N.astype(np.float64)
+    lo = cfg.get('double_min_visits', 8)
+    want = cfg['double_aux']
+    got = 0
+    for j in np.argsort(-vis):
+        j = int(j)
+        if vis[j] < lo:
+            break                   # sorted descending: nothing left qualifies
+        if j == pidx:
+            continue
+        child = root.children[j]
+        if child is None or child.obs is None:
+            continue
+        t = make_target(child)
+        t['z'] = np.float32(root_value(child))
+        t['aux_q'] = True
+        s['aux'].append(t)
+        got += 1
+        if got >= want:
+            break
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -282,6 +322,13 @@ class Config:
     fast_sims: int = 50
     full_sims: int = 150
     fast_prob: float = 0.75
+    # OLIVAW-style sims ramp / doubling trick -- see the ThompsonZero Config for
+    # the full rationale; both knobs are opt-in and off by default, so every
+    # existing run is bit-identical.  ((frac_of_run, sims), ...) ascending.
+    sims_ramp: tuple = ()
+    sims_ramp_offset: int = 0
+    double_aux: int = 0
+    double_min_visits: int = 8
     temp_threshold: int = 12          # sample from visits for N plies, then greedy
 
     # self-play
@@ -303,6 +350,8 @@ class Config:
     lr_warmup_eps: int = 100
     lr_decay_eps: int = 2000
     lr_min_factor: float = 0.10
+    # OLIVAW step schedule ((frac_of_run, absolute_lr), ...); empty = cosine.
+    lr_steps: tuple = ()
     weight_decay: float = 1e-4
     grad_clip: float = 1.0
     value_weight: float = 1.0         # loss = policy CE + value_weight * MSE
@@ -352,7 +401,25 @@ def noise_root(slot, rng, cfg):
 
 
 def _slot_new(game, cfg, rng, checkpoint_dir):
-    sims = cfg['fast_sims'] if rng.random() < cfg['fast_prob'] else cfg['full_sims']
+    ramp = cfg.get('sims_ramp')
+    if ramp:
+        # OLIVAW's per-generation sims ramp.  Stage comes from games THIS
+        # worker has started against its own share of the run -- workers draw
+        # from one queue and finish at near-identical rates, so the local
+        # fraction tracks the global one closely enough to place two stage
+        # boundaries, and it needs no extra IPC.  The counter lives in the
+        # worker's own copy of the cfg dict.
+        cfg['_ramp_n'] = cfg.get('_ramp_n', 0) + 1
+        share = max(1.0, cfg['ramp_total_games'] / cfg['ramp_workers'])
+        f = cfg['ramp_offset_frac'] + min(1.0, cfg['_ramp_n'] / share) \
+            * (1.0 - cfg['ramp_offset_frac'])
+        sims = ramp[0][1]
+        for thr, sv in ramp:
+            if f >= thr:
+                sims = sv
+    else:
+        sims = (cfg['fast_sims'] if rng.random() < cfg['fast_prob']
+                else cfg['full_sims'])
     slot = {'state': game.new_initial_state(), 'hist': [], 'aux': [],
             'actions': [], 'move': 0, 'sims': sims, 'root': None, 'n': 0,
             'pool': None, 'noised': False}
@@ -448,6 +515,8 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
             s['hist'].append(make_target(root))
             a = root_pick(root, rng, sample=(s['move'] < cfg['temp_threshold']))
             pidx = int(np.nonzero(root.legal == a)[0][0])
+            if cfg.get('double_aux'):
+                emit_doubles(s, root, pidx, cfg)
             s['actions'].append(int(a))
             s['root'] = root.children[pidx]
             s['noised'] = False          # the next search needs its own noise
@@ -822,6 +891,8 @@ if _HAS_TORCH:
                 a = root_pick(root, self.rng,
                               sample=(s['move'] < self.cfg['temp_threshold']))
                 pidx = int(np.nonzero(root.legal == a)[0][0])
+                if self.cfg.get('double_aux'):
+                    emit_doubles(s, root, pidx, self.cfg)
                 s['root'] = root.children[pidx]
                 s['noised'] = False
                 s['state'].apply_action(a); s['move'] += 1; s['n'] = 0
@@ -1057,6 +1128,15 @@ if _HAS_TORCH:
                     wave_per_game=cfg.wave_per_game,
                     fast_sims=cfg.fast_sims, full_sims=cfg.full_sims,
                     fast_prob=cfg.fast_prob, temp_threshold=cfg.temp_threshold,
+                    sims_ramp=tuple(cfg.sims_ramp),
+                    ramp_total_games=max(cfg.num_episodes
+                                         - cfg.sims_ramp_offset, 1),
+                    ramp_offset_frac=(cfg.sims_ramp_offset
+                                      / max(cfg.num_episodes, 1)),
+                    ramp_workers=max(cfg.resolved_workers()
+                                     if cfg.use_workers else 1, 1),
+                    double_aux=cfg.double_aux,
+                    double_min_visits=cfg.double_min_visits,
                     max_plies=cfg.max_plies, pool_prob=cfg.pool_prob,
                     random_pool_frac=cfg.random_pool_frac,
                     checkpoint_dir=cfg.checkpoint_dir,
@@ -1114,6 +1194,15 @@ if _HAS_TORCH:
         def _lr(ep):
             if ep < cfg.lr_warmup_eps:
                 return ep / max(cfg.lr_warmup_eps, 1)
+            if cfg.lr_steps:
+                # LambdaLR's factor multiplies lr_peak, so each entry's
+                # absolute lr becomes a factor of lr_peak.
+                f = ep / max(cfg.num_episodes, 1)
+                fac = 1.0
+                for thr, lr in cfg.lr_steps:
+                    if f >= thr:
+                        fac = lr / cfg.lr_peak
+                return fac
             f = min((ep - cfg.lr_warmup_eps)
                     / max(cfg.lr_decay_eps - cfg.lr_warmup_eps, 1), 1.0)
             return cfg.lr_min_factor + (1 - cfg.lr_min_factor) * 0.5 * (
