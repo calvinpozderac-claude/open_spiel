@@ -36,8 +36,15 @@ import numpy as np
 import tournament as T
 
 EPS = list(range(5000, 50001, 5000))
-GAMES = 80
-SIMS = 400
+# 6 games/pair. Few per pair, but every checkpoint still plays 19 opponents
+# = 114 games, and BT pools the whole matrix -- a sparse-but-connected design
+# beats a dense one on few opponents. Simulated on a 20-player ladder with a
+# realistic 450-Elo spread: mean |error| 28 Elo, p95 67, rank rho 0.976. Good
+# enough to rank arms separated by >~50 Elo; NOT enough to call a photo finish,
+# in which case top the pairs up (results accumulate per pair in the JSON).
+GAMES = 6
+SIMS = 400          # override on the CLI; the in-training ladder's 64 is a
+                    # SEPARATE protocol and must never be pooled with this one
 N_WORKERS = 4
 SIG = (64, 10, 8)          # both OLIVAW arms; NOT the 32ch legacy library
 
@@ -55,7 +62,7 @@ def participants(arm):
 
 
 def out_path(arm):
-    return f'olivaw_ladder_{arm}.json'
+    return f'olivaw_ladder_{arm}_s{SIMS}.json'
 
 
 def main(arm):
@@ -96,6 +103,11 @@ def main(arm):
 
 
 def report(arm):
+    path = out_path(arm)
+    if not os.path.exists(path):
+        print(f'no results yet for arm {arm!r} @ {SIMS} sims ({path}); '
+              f'run `python olivaw_ladder.py {arm} {SIMS}` first')
+        return
     parts = participants(arm)
     names = [p[0] for p in parts]
     idx = {nm: i for i, nm in enumerate(names)}
@@ -120,6 +132,9 @@ def report(arm):
 
 if __name__ == '__main__':
     args = [a for a in sys.argv[1:]]
+    # trailing integer = sims, e.g. `olivaw_ladder.py both 1000`
+    if args and args[-1].isdigit():
+        SIMS = int(args.pop())
     if args and args[0] == 'report':
         report(args[1] if len(args) > 1 else 'az')
     else:

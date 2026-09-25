@@ -39,8 +39,23 @@ PARTICIPANTS = [
     ('DISTILL',       'othello_benchmark/bench_DISTILL',               '5000', 'thompson', 'pathsum'),
     ('AZ',            'othello_benchmark/bench_AZ_MATCH',              '5000', 'az',       1.5),
 ]
-GAMES = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1] != 'report' else 100
-SIMS = int(sys.argv[2]) if len(sys.argv) > 2 else 400
+def _argv_int(pos, default):
+    """Module-level argv parsing that tolerates being IMPORTED.
+
+    These are read at import time, so any script that imports tournament gets
+    its OWN argv parsed here -- `olivaw_ladder.py report az` used to crash on
+    int('az'). hybrid_ladder.py only ever survived by luck (its second arg
+    happened to be absent). Non-numeric or missing -> default."""
+    if len(sys.argv) > pos:
+        try:
+            return int(sys.argv[pos])
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
+GAMES = _argv_int(1, 100)
+SIMS = _argv_int(2, 400)
 
 
 def _load(engine, d, label, c4, az):
