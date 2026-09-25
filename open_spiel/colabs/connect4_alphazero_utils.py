@@ -1067,9 +1067,9 @@ if _HAS_TORCH:
                                 in elo_pool.pair_games.items()}
                                if elo_pool else {}),
                 # Ordered pairs, so the BT win matrix survives a resume.
-                'pair_wins': ({f'{a}|{b}': v for (a, b), v
-                               in getattr(elo_pool, 'pair_wins', {}).items()}
-                              if elo_pool else {})}
+                'pair_wdl': ({f'{a}|{b}': list(v) for (a, b), v
+                              in getattr(elo_pool, 'pair_wdl', {}).items()}
+                             if elo_pool else {})}
         tmp = os.path.join(checkpoint_dir, 'latest.pt.tmp')
         torch.save(blob, tmp)
         os.replace(tmp, os.path.join(checkpoint_dir, 'latest.pt'))
@@ -1257,9 +1257,9 @@ if _HAS_TORCH:
             elo_pool.order = list(ckpt.get('order') or [])
             elo_pool.pair_games = {frozenset(k): v for k, v
                                    in (ckpt.get('pair_games') or {}).items()}
-            elo_pool.pair_wins = {
-                tuple(k.split('|', 1)): v
-                for k, v in (ckpt.get('pair_wins') or {}).items()}
+            elo_pool.pair_wdl = {
+                tuple(k.split('|', 1)): list(v)
+                for k, v in (ckpt.get('pair_wdl') or {}).items()}
             kept = []
             for lb in list(elo_pool.order):
                 try:

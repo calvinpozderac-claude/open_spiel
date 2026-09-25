@@ -70,6 +70,21 @@ def _move(engine, param, net, game, state, rng, c4, az):
     return c4.root_pick(root, rng, thompson=False, temp=OUR_TEMP)
 
 
+def _wdl_of(entry):
+    """Pairwise record as (wins, draws, losses, games) for the first player.
+
+    Accepts BOTH storage formats. New entries are [w, d, l]. Entries written
+    before W/D/L tracking are [points, games] -- the draw count is simply GONE
+    from those (a points total cannot be decomposed), so they report d=0 and a
+    win count that folds draws in as halves. Refit those pairs by deleting them
+    from the JSON and re-running if the draw rate matters."""
+    if len(entry) == 3:
+        w, d, l = entry
+        return float(w), float(d), float(l), float(w + d + l)
+    pts, g = entry                      # legacy [points, games]
+    return float(pts), 0.0, float(g - pts), float(g)
+
+
 def _worker(args):
     ((an, ad, al, aeng, aparam), (bn, bd, bl, beng, bparam),
      n_games, seed, a_first) = args
@@ -83,7 +98,7 @@ def _worker(args):
     net_a = _load(aeng, ad, al, c4, az)
     net_b = _load(beng, bd, bl, c4, az)
     rng = np.random.default_rng(seed)
-    a_pts = 0.0
+    a_w = a_d = a_l = 0
     for gi in range(n_games):
         a_seat = (0 if a_first else 1)
         if gi % 2 == 1:
@@ -96,8 +111,13 @@ def _worker(args):
                 mv = _move(beng, bparam, net_b, game, st, rng, c4, az)
             st.apply_action(int(mv))
         r = st.returns()[a_seat]
-        a_pts += 1.0 if r > 0 else (0.0 if r < 0 else 0.5)
-    return (an, bn), a_pts, n_games
+        if r > 0:
+            a_w += 1
+        elif r < 0:
+            a_l += 1
+        else:
+            a_d += 1
+    return (an, bn), (a_w, a_d, a_l)
 
 
 def fit_elo(names, wins, games, anchor=1500.0, iters=None, lr=None, reg=1.6e5):
@@ -169,6 +189,7 @@ def main():
     n = len(parts)
     wins = np.zeros((n, n))
     games = np.zeros((n, n))
+    wdl = [[[0.0, 0.0, 0.0] for _ in range(n)] for _ in range(n)]
     done = {}
     if os.path.exists(OUT):
         with open(OUT) as fh:
@@ -188,54 +209,69 @@ def main():
     print(f'[tourn] {n} nets, {len(list(itertools.combinations(parts,2)))} pairs, '
           f'{GAMES} games/pair @ {SIMS} sims, {len(jobs)} shard-jobs', flush=True)
 
-    agg = {}   # (a,b) -> [a_pts, games]
+    agg = {}   # (a,b) -> [wins, draws, losses]
     t0 = time.time()
     with mp.Pool(N_WORKERS) as pool:
-        for (an, bn), a_pts, g in pool.imap_unordered(_worker, jobs):
-            e = agg.setdefault((an, bn), [0.0, 0])
-            e[0] += a_pts
-            e[1] += g
-            print(f'[tourn] {an} vs {bn}: +{a_pts:.1f}/{g} '
+        for (an, bn), (w, d, l) in pool.imap_unordered(_worker, jobs):
+            e = agg.setdefault((an, bn), [0, 0, 0])
+            e[0] += w; e[1] += d; e[2] += l
+            print(f'[tourn] {an} vs {bn}: {w}W-{d}D-{l}L '
                   f'({time.time()-t0:.0f}s)', flush=True)
-    for (an, bn), (a_pts, g) in agg.items():
-        done[f'{an}|{bn}'] = [a_pts, g]
+    for (an, bn), wdl in agg.items():
+        done[f'{an}|{bn}'] = list(wdl)
     with open(OUT, 'w') as fh:
         json.dump({'pairs': done, 'sims': SIMS}, fh)
 
-    for key, (a_pts, g) in done.items():
+    for key, entry in done.items():
         an, bn = key.split('|')
         i, j = idx[an], idx[bn]
-        wins[i][j] += a_pts
+        w, d, l, g = _wdl_of(entry)
+        wins[i][j] += w + 0.5 * d
         games[i][j] += g
-        wins[j][i] += g - a_pts
+        wins[j][i] += l + 0.5 * d
         games[j][i] += g
-    report(parts, wins, games)
+        wdl[i][j] = [wdl[i][j][k] + v for k, v in enumerate((w, d, l))]
+        wdl[j][i] = [wdl[j][i][k] + v for k, v in enumerate((l, d, w))]
+    report(parts, wins, games, wdl)
 
 
-def report(parts=None, wins=None, games=None):
+def report(parts=None, wins=None, games=None, wdl=None):
     if parts is None:
         parts = PARTICIPANTS
         idx = {p[0]: k for k, p in enumerate(parts)}
         n = len(parts)
         wins = np.zeros((n, n)); games = np.zeros((n, n))
+        wdl = [[[0.0, 0.0, 0.0] for _ in range(n)] for _ in range(n)]
         with open(OUT) as fh:
             done = json.load(fh)['pairs']
-        for key, (a_pts, g) in done.items():
+        for key, entry in done.items():
             an, bn = key.split('|')
             i, j = idx[an], idx[bn]
-            wins[i][j] += a_pts; games[i][j] += g
-            wins[j][i] += g - a_pts; games[j][i] += g
+            w, d, l, g = _wdl_of(entry)
+            wins[i][j] += w + 0.5 * d; games[i][j] += g
+            wins[j][i] += l + 0.5 * d; games[j][i] += g
+            wdl[i][j] = [wdl[i][j][k] + v for k, v in enumerate((w, d, l))]
+            wdl[j][i] = [wdl[j][i][k] + v for k, v in enumerate((l, d, w))]
     names = [p[0] for p in parts]
-    elo = fit_elo(names, wins, games)
-    order = np.argsort(-elo)
+    n = len(names)
+    if wdl is None:
+        wdl = [[[0.0, 0.0, 0.0] for _ in range(n)] for _ in range(n)]
+    # Bradley-Terry MAP (fit_elo IS a BT fit, despite the name); reg passed
+    # explicitly because relying on that default has burned this repo once.
+    bt = fit_elo(names, wins, games, reg=1.6e5)
+    order = np.argsort(-bt)
     tot_pts = wins.sum(1)
     tot_g = games.sum(1)
-    print(f'\n{"rank":<5}{"model":<15}{"Elo":>6}{"score":>9}{"win%":>7}   engine/search')
+    tw = [sum(wdl[i][j][0] for j in range(n)) for i in range(n)]
+    td = [sum(wdl[i][j][1] for j in range(n)) for i in range(n)]
+    tl = [sum(wdl[i][j][2] for j in range(n)) for i in range(n)]
+    print(f'\n{"rank":<5}{"model":<15}{"BT":>6}{"W-D-L":>16}{"score%":>8}'
+          f'   engine/search')
     for rank, i in enumerate(order, 1):
         wp = tot_pts[i] / max(tot_g[i], 1)
         eng = f'{parts[i][3]}:{parts[i][4]}'
-        print(f'{rank:<5}{names[i]:<15}{elo[i]:>6.0f}'
-              f'{tot_pts[i]:>6.0f}/{tot_g[i]:<3.0f}{wp:>6.1%}   {eng}')
+        rec = f'{tw[i]:.0f}-{td[i]:.0f}-{tl[i]:.0f}'
+        print(f'{rank:<5}{names[i]:<15}{bt[i]:>6.0f}{rec:>16}{wp:>8.1%}   {eng}')
 
 
 if __name__ == '__main__':

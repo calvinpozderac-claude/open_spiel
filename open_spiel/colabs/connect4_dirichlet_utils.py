@@ -3414,12 +3414,14 @@ if _HAS_TORCH:
             self.elo = {'random': start_elo}
             self.order = []
             self.pair_games = {}
-            # Ordered-pair win totals: pair_wins[(a, b)] = points a scored
-            # against b (1 win, 0.5 draw). pair_games alone is not enough to
-            # fit Bradley-Terry -- it records how often a pair met, not who
+            # Ordered-pair records: pair_wdl[(a, b)] = [wins, draws, losses]
+            # for a against b. Stored as the full triple, not a points total:
+            # a points total cannot be decomposed back into W/D/L, and the draw
+            # rate is its own signal in Othello. pair_games alone is not enough
+            # to fit Bradley-Terry -- it records how often a pair met, not who
             # won -- which is why ladders from before this existed cannot be
             # retro-fitted and need an offline round-robin instead.
-            self.pair_wins = {}
+            self.pair_wdl = {}
 
         def _bot(self, label):
             return self.bot_factory(self.game, self.nets[label], self.device,
@@ -3460,8 +3462,15 @@ if _HAS_TORCH:
             self.elo[a] += k * (sa - ea)
             self.elo[b] += k * ((1.0 - sa) - (1.0 - ea))
             self.pair_games[key] = n + 1
-            self.pair_wins[(a, b)] = self.pair_wins.get((a, b), 0.0) + sa
-            self.pair_wins[(b, a)] = self.pair_wins.get((b, a), 0.0) + (1.0 - sa)
+            # sa is a's score in {1, 0.5, 0}; record it both ways round.
+            ab = self.pair_wdl.setdefault((a, b), [0, 0, 0])
+            ba = self.pair_wdl.setdefault((b, a), [0, 0, 0])
+            if sa > 0.5:
+                ab[0] += 1; ba[2] += 1
+            elif sa < 0.5:
+                ab[2] += 1; ba[0] += 1
+            else:
+                ab[1] += 1; ba[1] += 1
 
         def bt_ratings(self, anchor=1500.0, reg=1.6e5):
             """Bradley-Terry MAP ratings from the accumulated win matrix.
@@ -3478,13 +3487,14 @@ if _HAS_TORCH:
             if n < 2:
                 return dict.fromkeys(players, anchor)
             ii, jj, ww, gg = [], [], [], []
-            for (a, b), w in self.pair_wins.items():
+            for (a, b), (w, d, l) in self.pair_wdl.items():
                 if a not in idx or b not in idx:
                     continue
-                g = self.pair_games.get(frozenset((a, b)), 0)
+                g = w + d + l
                 if g <= 0:
                     continue
-                ii.append(idx[a]); jj.append(idx[b]); ww.append(w); gg.append(g)
+                ii.append(idx[a]); jj.append(idx[b])
+                ww.append(w + 0.5 * d); gg.append(g)
             if not ii:
                 return dict.fromkeys(players, anchor)
             ii, jj = np.array(ii), np.array(jj)
@@ -3615,8 +3625,8 @@ if _HAS_TORCH:
                                for k, v in elo_pool.pair_games.items()},
                 # Ordered pairs, so the win matrix survives a resume and the
                 # BT fit stays exact across restarts.
-                'pair_wins': {f'{a}|{b}': v for (a, b), v
-                              in getattr(elo_pool, 'pair_wins', {}).items()},
+                'pair_wdl': {f'{a}|{b}': list(v) for (a, b), v
+                             in getattr(elo_pool, 'pair_wdl', {}).items()},
                 'hist': hist, 'cfg': asdict(cfg) if cfg is not None else None}
         tmp = os.path.join(checkpoint_dir, 'latest.pt.tmp')
         torch.save(blob, tmp)
@@ -3864,9 +3874,9 @@ if _HAS_TORCH:
                                                 or {}).items()}
             # Absent in checkpoints written before BT tracking existed; those
             # ladders simply cannot be refitted (only counts were kept).
-            elo_pool.pair_wins = {
-                tuple(k.split('|', 1)): v
-                for k, v in (ckpt.get('pair_wins') or {}).items()}
+            elo_pool.pair_wdl = {
+                tuple(k.split('|', 1)): list(v)
+                for k, v in (ckpt.get('pair_wdl') or {}).items()}
             # A benchmark file can be missing (interrupted save, hand-cleaned
             # directory) — drop that rating rather than making the whole
             # checkpoint unloadable.
