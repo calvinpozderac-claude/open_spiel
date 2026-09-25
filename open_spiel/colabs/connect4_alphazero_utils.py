@@ -1065,7 +1065,11 @@ if _HAS_TORCH:
                 'order': elo_pool.order if elo_pool else [],
                 'pair_games': ({tuple(sorted(k)): v for k, v
                                 in elo_pool.pair_games.items()}
-                               if elo_pool else {})}
+                               if elo_pool else {}),
+                # Ordered pairs, so the BT win matrix survives a resume.
+                'pair_wins': ({f'{a}|{b}': v for (a, b), v
+                               in getattr(elo_pool, 'pair_wins', {}).items()}
+                              if elo_pool else {})}
         tmp = os.path.join(checkpoint_dir, 'latest.pt.tmp')
         torch.save(blob, tmp)
         os.replace(tmp, os.path.join(checkpoint_dir, 'latest.pt'))
@@ -1253,6 +1257,9 @@ if _HAS_TORCH:
             elo_pool.order = list(ckpt.get('order') or [])
             elo_pool.pair_games = {frozenset(k): v for k, v
                                    in (ckpt.get('pair_games') or {}).items()}
+            elo_pool.pair_wins = {
+                tuple(k.split('|', 1)): v
+                for k, v in (ckpt.get('pair_wins') or {}).items()}
             kept = []
             for lb in list(elo_pool.order):
                 try:
@@ -1378,6 +1385,18 @@ if _HAS_TORCH:
                         sorted(elo.items(), key=lambda kv: -kv[1])[:6])
                     log(f'ep {ep:6d} | {diag}')
                     log(f'         DEEP Elo@{cfg.eval_sims}: {ladder}')
+                    # Bradley-Terry over the full win matrix -- order- and
+                    # path-independent. Same call as the ThompsonZero arm, so
+                    # the two ladders stay directly comparable.
+                    try:
+                        bt = elo_pool.bt_ratings()
+                        hist.setdefault('bt', []).append(dict(bt))
+                        btl = '  '.join(
+                            f'{k}={v:.0f}' for k, v in
+                            sorted(bt.items(), key=lambda kv: -kv[1])[:6])
+                        log(f'         DEEP BT @{cfg.eval_sims}: {btl}')
+                    except Exception as e:
+                        log(f'         (BT fit failed: {type(e).__name__}: {e})')
                     if solved_probe and (not cfg.solved_every
                                           or ep % cfg.solved_every == 0):
                         line, agg = _solved_eval_line(solved_probe, snap, cfg)

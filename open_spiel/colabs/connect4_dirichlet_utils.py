@@ -3377,6 +3377,16 @@ if _HAS_TORCH:
         """A rating ladder over saved checkpoints, played at a fixed simulation
         budget.
 
+        TWO ratings are reported. `elo` is the incremental K-factor update,
+        kept for continuity with every earlier run. `bt_ratings()` is a
+        Bradley-Terry MAP fit over the whole accumulated win matrix and is the
+        one to trust: the incremental update is ORDER- AND PATH-DEPENDENT (each
+        update uses whatever the ratings happened to be at the time, so one
+        game against a mis-rated opponent biases a checkpoint permanently),
+        which is why the in-training ladder kept inverting adjacent
+        checkpoints. The BT fit reads only the final win/game totals, so it
+        does not care what order anything was played in.
+
         Engine-agnostic: `bot_factory` and `pick` are the only two places that
         know what kind of network this is, so the AlphaZero control uses the
         same ladder rather than a parallel implementation that could drift."""
@@ -3404,6 +3414,12 @@ if _HAS_TORCH:
             self.elo = {'random': start_elo}
             self.order = []
             self.pair_games = {}
+            # Ordered-pair win totals: pair_wins[(a, b)] = points a scored
+            # against b (1 win, 0.5 draw). pair_games alone is not enough to
+            # fit Bradley-Terry -- it records how often a pair met, not who
+            # won -- which is why ladders from before this existed cannot be
+            # retro-fitted and need an offline round-robin instead.
+            self.pair_wins = {}
 
         def _bot(self, label):
             return self.bot_factory(self.game, self.nets[label], self.device,
@@ -3444,6 +3460,55 @@ if _HAS_TORCH:
             self.elo[a] += k * (sa - ea)
             self.elo[b] += k * ((1.0 - sa) - (1.0 - ea))
             self.pair_games[key] = n + 1
+            self.pair_wins[(a, b)] = self.pair_wins.get((a, b), 0.0) + sa
+            self.pair_wins[(b, a)] = self.pair_wins.get((b, a), 0.0) + (1.0 - sa)
+
+        def bt_ratings(self, anchor=1500.0, reg=1.6e5):
+            """Bradley-Terry MAP ratings from the accumulated win matrix.
+
+            Order-independent, unlike `self.elo`. `reg` is a Gaussian prior
+            VARIANCE in Elo^2 around `anchor`; 1.6e5 (~400 Elo stdev) is weak
+            enough to leave ordinary data essentially unbiased and strong
+            enough to keep a swept pair finite -- a plain MLE is INFINITE for
+            any player with a 0% or 100% record, which happens here routinely
+            against 'random'. See tournament.fit_elo for the full story."""
+            players = [p for p in self.players if p in self.nets]
+            idx = {p: i for i, p in enumerate(players)}
+            n = len(players)
+            if n < 2:
+                return dict.fromkeys(players, anchor)
+            ii, jj, ww, gg = [], [], [], []
+            for (a, b), w in self.pair_wins.items():
+                if a not in idx or b not in idx:
+                    continue
+                g = self.pair_games.get(frozenset((a, b)), 0)
+                if g <= 0:
+                    continue
+                ii.append(idx[a]); jj.append(idx[b]); ww.append(w); gg.append(g)
+            if not ii:
+                return dict.fromkeys(players, anchor)
+            ii, jj = np.array(ii), np.array(jj)
+            ww, gg = np.array(ww, float), np.array(gg, float)
+            S = 400.0 / np.log(10.0)
+
+            def nll_grad(r):
+                d = (r[jj] - r[ii]) / S
+                nll = -(ww * -np.logaddexp(0.0, d)
+                        + (gg - ww) * -np.logaddexp(0.0, -d)).sum()
+                p = 1.0 / (1.0 + np.exp(d))
+                dL = ww - gg * p
+                grad = np.zeros(n)
+                np.add.at(grad, ii, dL)
+                np.add.at(grad, jj, -dL)
+                pen = ((r - anchor) ** 2).sum() / (2 * reg)
+                return nll + pen, -grad + (r - anchor) / reg
+
+            from scipy.optimize import minimize
+            res = minimize(nll_grad, np.full(n, anchor, float), jac=True,
+                           method='L-BFGS-B',
+                           options=dict(maxiter=2000, ftol=1e-12, gtol=1e-10))
+            r = res.x - res.x.mean() + anchor
+            return {p: float(r[idx[p]]) for p in players}
 
         def _match(self, a, b, bot_cache):
             for g in range(self.games_per_pair):
@@ -3548,6 +3613,10 @@ if _HAS_TORCH:
                 'elo': elo_pool.elo, 'order': elo_pool.order,
                 'pair_games': {tuple(sorted(k)): v
                                for k, v in elo_pool.pair_games.items()},
+                # Ordered pairs, so the win matrix survives a resume and the
+                # BT fit stays exact across restarts.
+                'pair_wins': {f'{a}|{b}': v for (a, b), v
+                              in getattr(elo_pool, 'pair_wins', {}).items()},
                 'hist': hist, 'cfg': asdict(cfg) if cfg is not None else None}
         tmp = os.path.join(checkpoint_dir, 'latest.pt.tmp')
         torch.save(blob, tmp)
@@ -3793,6 +3862,11 @@ if _HAS_TORCH:
             elo_pool.pair_games = {frozenset(k): v
                                    for k, v in (ckpt.get('pair_games')
                                                 or {}).items()}
+            # Absent in checkpoints written before BT tracking existed; those
+            # ladders simply cannot be refitted (only counts were kept).
+            elo_pool.pair_wins = {
+                tuple(k.split('|', 1)): v
+                for k, v in (ckpt.get('pair_wins') or {}).items()}
             # A benchmark file can be missing (interrupted save, hand-cleaned
             # directory) — drop that rating rather than making the whole
             # checkpoint unloadable.
@@ -4004,6 +4078,18 @@ if _HAS_TORCH:
                                        sorted(elo.items(), key=lambda kv: -kv[1])[:6])
                     log(f'ep {ep:6d} | {diag}')
                     log(f'         DEEP Elo@{cfg.eval_sims}: {ladder}')
+                    # Bradley-Terry over the full win matrix -- order- and
+                    # path-independent, so it does not inherit the incremental
+                    # ladder's habit of inverting adjacent checkpoints.
+                    try:
+                        bt = elo_pool.bt_ratings()
+                        hist.setdefault('bt', []).append(dict(bt))
+                        btl = '  '.join(
+                            f'{k}={v:.0f}' for k, v in
+                            sorted(bt.items(), key=lambda kv: -kv[1])[:6])
+                        log(f'         DEEP BT @{cfg.eval_sims}: {btl}')
+                    except Exception as e:
+                        log(f'         (BT fit failed: {type(e).__name__}: {e})')
                     if solved_probe and (not cfg.solved_every
                                           or ep % cfg.solved_every == 0):
                         line, agg = _solved_eval_line(solved_probe, snap, cfg)
