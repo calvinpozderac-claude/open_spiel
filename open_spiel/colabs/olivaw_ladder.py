@@ -87,7 +87,10 @@ def main(arm):
     for n, (a, b) in enumerate(pairs, 1):
         per = GAMES // N_WORKERS
         rem = GAMES - per * N_WORKERS
-        jobs = [(a, b, per + (1 if w < rem else 0), 7000 + 131 * w, w % 2 == 0)
+        # sig/sims go IN the tuple: spawn workers re-import tournament and
+        # would otherwise use its 32ch module default on our 64ch nets.
+        jobs = [(a, b, per + (1 if w < rem else 0), 7000 + 131 * w, w % 2 == 0,
+                 SIG, SIMS)
                 for w in range(N_WORKERS) if per + (1 if w < rem else 0)]
         w = d = l = 0
         with mp.Pool(N_WORKERS) as pool:

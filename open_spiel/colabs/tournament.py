@@ -58,12 +58,12 @@ GAMES = _argv_int(1, 100)
 SIMS = _argv_int(2, 400)
 
 
-def _load(engine, d, label, c4, az):
+def _load(engine, d, label, c4, az, sig):
     mod = az if engine == 'az' else c4
-    return mod.load_benchmark_net(d, label, SIG)
+    return mod.load_benchmark_net(d, label, sig)
 
 
-def _move(engine, param, net, game, state, rng, c4, az):
+def _move(engine, param, net, game, state, rng, c4, az, sims):
     """One eval move from `net` using its own engine.
 
     AZ: PUCT is otherwise fully deterministic (no root noise, no stochastic
@@ -74,12 +74,12 @@ def _move(engine, param, net, game, state, rng, c4, az):
     log baseline), for real per-game variance while still close to greedy."""
     if engine == 'az':
         az.set_search(c_puct=float(param))
-        bot = az.AZMCTSBot(game, net, 'cpu', SIMS, batch_size=16,
+        bot = az.AZMCTSBot(game, net, 'cpu', sims, batch_size=16,
                            random_state=rng, noise_frac=0.0)
         root = bot.mcts_search(state)
         return az.root_pick(root, rng, sample=True, temp=0.3)
     c4.set_search(search_agg=param, target_agg=param)
-    bot = c4.C4MCTSBot(game, net, 'cpu', SIMS, batch_size=16,
+    bot = c4.C4MCTSBot(game, net, 'cpu', sims, batch_size=16,
                        temp=OUR_TEMP, random_state=rng)
     root = bot.mcts_search(state)
     return c4.root_pick(root, rng, thompson=False, temp=OUR_TEMP)
@@ -101,8 +101,20 @@ def _wdl_of(entry):
 
 
 def _worker(args):
-    ((an, ad, al, aeng, aparam), (bn, bd, bl, beng, bparam),
-     n_games, seed, a_first) = args
+    """One shard of a pair's games.
+
+    sig and sims travel IN THE JOB TUPLE, never as module globals. On Windows
+    `spawn` each worker is a fresh interpreter that re-imports this module, so
+    a parent-process assignment like `tournament.SIG = (64, 10, 8)` is INVISIBLE
+    here -- workers silently fell back to the 32ch default and blew up loading
+    64ch OLIVAW checkpoints. Five-element jobs keep the old defaults."""
+    if len(args) == 7:
+        ((an, ad, al, aeng, aparam), (bn, bd, bl, beng, bparam),
+         n_games, seed, a_first, sig, sims) = args
+    else:
+        ((an, ad, al, aeng, aparam), (bn, bd, bl, beng, bparam),
+         n_games, seed, a_first) = args
+        sig, sims = SIG, SIMS
     import torch
     torch.set_num_threads(1)
     import connect4_dirichlet_utils as c4
@@ -110,8 +122,8 @@ def _worker(args):
     game = c4.load_game('othello')
     c4.set_game(game)
     c4.set_search(selection='dirichlet', virtual_loss=1.0)
-    net_a = _load(aeng, ad, al, c4, az)
-    net_b = _load(beng, bd, bl, c4, az)
+    net_a = _load(aeng, ad, al, c4, az, sig)
+    net_b = _load(beng, bd, bl, c4, az, sig)
     rng = np.random.default_rng(seed)
     a_w = a_d = a_l = 0
     for gi in range(n_games):
@@ -121,9 +133,9 @@ def _worker(args):
         st = game.new_initial_state()
         while not st.is_terminal():
             if st.current_player() == a_seat:
-                mv = _move(aeng, aparam, net_a, game, st, rng, c4, az)
+                mv = _move(aeng, aparam, net_a, game, st, rng, c4, az, sims)
             else:
-                mv = _move(beng, bparam, net_b, game, st, rng, c4, az)
+                mv = _move(beng, bparam, net_b, game, st, rng, c4, az, sims)
             st.apply_action(int(mv))
         r = st.returns()[a_seat]
         if r > 0:
