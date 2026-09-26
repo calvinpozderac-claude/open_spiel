@@ -1404,6 +1404,12 @@ class Config:
     quick_eval_every: int = 500       # cheap SEARCH-FREE pulse vs last checkpoint
     quick_eval_games: int = 40
     deep_eval_every: int = 2_500      # new checkpoint + MCTS running-Elo pool
+    # Rate each saved benchmark with the in-training ladder? Set False when an
+    # EXTERNAL ladder does the rating (e.g. olivaw_live_ladder.py, which plays
+    # every new checkpoint against both arms at a higher sim count). Benchmarks
+    # are still SAVED either way -- that is the whole point of the flag, since
+    # saving used to be welded to rating inside one `if` block.
+    deep_eval_elo: bool = True
     eval_sims: int = 128
     eval_games_per_pair: int = 4
     eval_last_n: int = 3
@@ -4081,25 +4087,36 @@ if _HAS_TORCH:
 
                 if ep % cfg.deep_eval_every == 0:
                     snap = cpu_clone(base_network, sig)
+                    # Saving the benchmark is INDEPENDENT of rating it: with
+                    # deep_eval_elo=False an external ladder does the rating
+                    # (at its own, higher sim count) and this loop just writes
+                    # the checkpoint. These used to be one block, so turning
+                    # the eval off also stopped producing checkpoints.
                     save_benchmark_net(cfg.checkpoint_dir, str(ep), snap)
-                    elo = elo_pool.add_checkpoint(str(ep), snap)
-                    hist['elo'].append(dict(elo))
-                    ladder = '  '.join(f'{k}={v:.0f}' for k, v in
-                                       sorted(elo.items(), key=lambda kv: -kv[1])[:6])
-                    log(f'ep {ep:6d} | {diag}')
-                    log(f'         DEEP Elo@{cfg.eval_sims}: {ladder}')
-                    # Bradley-Terry over the full win matrix -- order- and
-                    # path-independent, so it does not inherit the incremental
-                    # ladder's habit of inverting adjacent checkpoints.
-                    try:
-                        bt = elo_pool.bt_ratings()
-                        hist.setdefault('bt', []).append(dict(bt))
-                        btl = '  '.join(
-                            f'{k}={v:.0f}' for k, v in
-                            sorted(bt.items(), key=lambda kv: -kv[1])[:6])
-                        log(f'         DEEP BT @{cfg.eval_sims}: {btl}')
-                    except Exception as e:
-                        log(f'         (BT fit failed: {type(e).__name__}: {e})')
+                    if not cfg.deep_eval_elo:
+                        log(f'ep {ep:6d} | {diag}')
+                        log(f'         benchmark {ep} saved '
+                            f'(in-training ladder disabled; rated externally)')
+                    else:
+                        elo = elo_pool.add_checkpoint(str(ep), snap)
+                        hist['elo'].append(dict(elo))
+                        ladder = '  '.join(f'{k}={v:.0f}' for k, v in
+                                           sorted(elo.items(), key=lambda kv: -kv[1])[:6])
+                        log(f'ep {ep:6d} | {diag}')
+                        log(f'         DEEP Elo@{cfg.eval_sims}: {ladder}')
+                        # Bradley-Terry over the full win matrix -- order- and
+                        # path-independent, so it does not inherit the
+                        # incremental ladder's habit of inverting neighbours.
+                        try:
+                            bt = elo_pool.bt_ratings()
+                            hist.setdefault('bt', []).append(dict(bt))
+                            btl = '  '.join(
+                                f'{k}={v:.0f}' for k, v in
+                                sorted(bt.items(), key=lambda kv: -kv[1])[:6])
+                            log(f'         DEEP BT @{cfg.eval_sims}: {btl}')
+                        except Exception as e:
+                            log(f'         (BT fit failed: '
+                                f'{type(e).__name__}: {e})')
                     if solved_probe and (not cfg.solved_every
                                           or ep % cfg.solved_every == 0):
                         line, agg = _solved_eval_line(solved_probe, snap, cfg)

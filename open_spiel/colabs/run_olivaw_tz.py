@@ -80,6 +80,13 @@ def make_cfg():
         quick_eval_every=OC.QUICK_EVAL_EVERY,
         quick_eval_games=OC.QUICK_EVAL_GAMES,
         deep_eval_every=OC.DEEP_EVAL_EVERY, eval_sims=OC.EVAL_SIMS,
+        # The noisy 64-sim in-training ladder is OFF. olivaw_live_ladder.py
+        # watches for each saved benchmark and plays it against all 10 AZ
+        # checkpoints plus every earlier TZ one at 400 sims, then refits BT
+        # over the whole accumulated matrix -- a live cross-arm ranking on the
+        # same protocol as the final tournament, instead of a cheap proxy on a
+        # different one. Benchmarks are still saved every DEEP_EVAL_EVERY.
+        deep_eval_elo=False,
         eval_games_per_pair=OC.EVAL_GAMES_PER_PAIR,
         eval_last_n=OC.EVAL_LAST_N, eval_refresh_pairs=OC.EVAL_REFRESH_PAIRS,
         resume=True, solved_dir='',
