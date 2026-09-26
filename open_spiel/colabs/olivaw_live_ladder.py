@@ -48,14 +48,65 @@ import tournament as T
 AZ_DIR = 'othello_benchmark/bench_OLIVAW_AZ'
 TZ_DIR = 'othello_benchmark/bench_OLIVAW_TZ'
 EPS = list(range(5000, 50001, 5000))
-GAMES = 6
+# 12 XOT openings x 2 seats = 24 games/pair.
+#
+# WHY XOT RATHER THAN TEMPERATURE NOISE. Without openings the only diversity is
+# near-greedy sampling off the ONE standard start. Audited: that does produce 6
+# distinct games out of 6, so it was not broken -- but each game explores the
+# same opening region, and the in-training ladder's greedy variant was worse
+# still (16 games -> 11 distinct sequences, one repeated 3x). XOT's 10,784
+# curated 8-ply openings are scored near-even by Edax and Ntest, so every game
+# starts from a genuinely different, genuinely balanced position -- OLIVAW's own
+# evaluation protocol.
+#
+# The SAME 12 openings are used for every pair, each played from both seats:
+# a paired design, so "which openings came up" is not a variance source and
+# black/white imbalance within an opening cancels.
+#
+# MOVES ARE GREEDY. Once openings supply the diversity, temperature sampling is
+# just noise on top -- and it was costing resolution: AZ25k vs AZ50k read
+# 5W-0D-1L over 6 sampled non-XOT games but 11W-2D-11L over 24 sampled XOT
+# games, i.e. the "peak at ep25000" was a 6-game artifact. tournament._move
+# switches to argmax automatically whenever openings are present.
+#
+# CAVEAT on the error bars: greedy play from a FIXED opening set makes each
+# pair's 24 games deterministic and exactly reproducible, but they are then 24
+# fixed positions rather than 24 independent draws. BT's binomial likelihood
+# will therefore UNDERSTATE uncertainty. Read this as a paired comparison on a
+# 12-position benchmark; to widen the sample, add openings (N_OPENINGS), which
+# is the only axis that now carries real statistical weight.
+N_OPENINGS = 12
+GAMES = N_OPENINGS * 2
 SIMS = 400
+XOT_FILE = 'xot_large.txt'
+XOT_SEED = 20260926
 SIG = (64, 10, 8)
 N_WORKERS = 4
-OUT = f'olivaw_live_ladder_s{SIMS}.json'
+# The filename encodes the PROTOCOL (sims / games / xot), not just sims. The
+# first seed ran 6 games/pair with no openings; if that file were reused,
+# run_pairs would see all 45 pairs already present and silently keep results
+# from a different protocol. Changing the protocol changes the filename, so a
+# mixed ladder is impossible rather than merely discouraged.
+OUT = f'olivaw_live_ladder_s{SIMS}_g{GAMES}_xot_greedy.json'
+OUT_LEGACY_6 = f'olivaw_live_ladder_s{SIMS}.json'   # 6 games/pair, no openings
 LOG = 'olivaw_live_ladder.log'
 POLL_SECONDS = 300
 IDLE_GIVE_UP_HOURS = 12.0
+
+
+_OPENINGS = None
+
+
+def openings():
+    """The fixed XOT opening set shared by every pair in the ladder."""
+    global _OPENINGS
+    if _OPENINGS is None:
+        with open(XOT_FILE) as fh:
+            seqs = [ln.strip() for ln in fh if ln.strip()]
+        rng = np.random.default_rng(XOT_SEED)
+        pick = rng.choice(len(seqs), size=N_OPENINGS, replace=False)
+        _OPENINGS = tuple(seqs[i] for i in sorted(pick))
+    return _OPENINGS
 
 
 def _log(msg):
@@ -102,13 +153,14 @@ def pair_key(a, b):
 
 
 def play_pair(a, b):
-    per = GAMES // N_WORKERS
-    rem = GAMES - per * N_WORKERS
-    # sig/sims ride IN the tuple: spawn workers re-import tournament and would
-    # otherwise use its 32ch module default against our 64ch nets.
-    jobs = [(a, b, per + (1 if w < rem else 0), 7000 + 131 * w, w % 2 == 0,
-             SIG, SIMS)
-            for w in range(N_WORKERS) if per + (1 if w < rem else 0)]
+    # Split the OPENINGS across workers; each plays its share from both seats,
+    # so the pair total is N_OPENINGS * 2 whatever the worker count.
+    ops = openings()
+    shards = [ops[i::N_WORKERS] for i in range(N_WORKERS)]
+    # sig/sims/openings ride IN the tuple: spawn workers re-import tournament
+    # and would otherwise use its 32ch module default against our 64ch nets.
+    jobs = [(a, b, 0, 7000 + 131 * w, True, SIG, SIMS, sh)
+            for w, sh in enumerate(shards) if sh]
     w = d = l = 0
     with mp.Pool(N_WORKERS) as pool:
         for (an, _bn), (pw, pd, pl) in pool.imap_unordered(T._worker, jobs):

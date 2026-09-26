@@ -63,20 +63,32 @@ def _load(engine, d, label, c4, az, sig):
     return mod.load_benchmark_net(d, label, sig)
 
 
-def _move(engine, param, net, game, state, rng, c4, az, sims):
+def _move(engine, param, net, game, state, rng, c4, az, sims, greedy=False):
     """One eval move from `net` using its own engine.
 
-    AZ: PUCT is otherwise fully deterministic (no root noise, no stochastic
-    tie-break) -- greedy argmax collapses many "games" to the same handful of
-    trajectories (confirmed: az_ladder.json pairwise scores were all exact
-    multiples of 1/4). Sample from the visit distribution at temp=0.3, this
-    repo's own established standard-AlphaZero eval protocol (az_screen_pick.
-    log baseline), for real per-game variance while still close to greedy."""
+    AZ and GREEDINESS. PUCT is otherwise fully deterministic (no root noise, no
+    stochastic tie-break), so greedy argmax collapses many "games" into the same
+    handful of trajectories -- confirmed once already, when az_ladder.json's
+    pairwise scores came back as exact multiples of 1/4. The temp=0.3 sampling
+    below exists ONLY to manufacture variance when every game starts from the
+    same position.
+
+    With XOT openings supplying the diversity instead, that trade reverses:
+    sampling is then pure noise on top of an already-varied position set, and it
+    was measurably costing resolution. So `greedy` is passed True exactly when
+    openings are in use, and each game becomes a clean deterministic test of
+    best play from its own opening.
+
+    The Thompson side is already greedy (posterior value argmax), so this only
+    changes the AZ engine -- which means the two arms are now BOTH greedy and
+    directly comparable, rather than one sampling and one not."""
     if engine == 'az':
         az.set_search(c_puct=float(param))
         bot = az.AZMCTSBot(game, net, 'cpu', sims, batch_size=16,
                            random_state=rng, noise_frac=0.0)
         root = bot.mcts_search(state)
+        if greedy:
+            return az.root_pick(root, rng, sample=False)
         return az.root_pick(root, rng, sample=True, temp=0.3)
     c4.set_search(search_agg=param, target_agg=param)
     bot = c4.C4MCTSBot(game, net, 'cpu', sims, batch_size=16,
@@ -107,8 +119,21 @@ def _worker(args):
     `spawn` each worker is a fresh interpreter that re-imports this module, so
     a parent-process assignment like `tournament.SIG = (64, 10, 8)` is INVISIBLE
     here -- workers silently fell back to the 32ch default and blew up loading
-    64ch OLIVAW checkpoints. Five-element jobs keep the old defaults."""
-    if len(args) == 7:
+    64ch OLIVAW checkpoints. Five-element jobs keep the old defaults.
+
+    8-element jobs add `openings`: XOT sequences (8 plies of algebraic moves,
+    e.g. 'f5d6c4d3c2b3b4b5'). Each is played from BOTH seats, which is the whole
+    point -- a paired design removes "which openings came up" as a variance
+    source, so two checkpoints are compared on identical positions. Without
+    them the only diversity is near-greedy sampling noise off the one standard
+    start; measured 6/6 distinct games, so it works, but XOT positions are
+    curated near-even and far more informative per game.
+    """
+    openings = ()
+    if len(args) == 8:
+        ((an, ad, al, aeng, aparam), (bn, bd, bl, beng, bparam),
+         n_games, seed, a_first, sig, sims, openings) = args
+    elif len(args) == 7:
         ((an, ad, al, aeng, aparam), (bn, bd, bl, beng, bparam),
          n_games, seed, a_first, sig, sims) = args
     else:
@@ -125,17 +150,28 @@ def _worker(args):
     net_a = _load(aeng, ad, al, c4, az, sig)
     net_b = _load(beng, bd, bl, c4, az, sig)
     rng = np.random.default_rng(seed)
+    amap = None
+    if openings:
+        import edax_bot as eb
+        amap = eb._action_map(game)
+        # one game per (opening, seat): openings x 2 seats, ignoring n_games
+        plan = [(o, s_) for o in openings for s_ in (0, 1)]
+    else:
+        plan = [(None, (0 if a_first else 1) if gi % 2 == 0
+                 else (1 if a_first else 0)) for gi in range(n_games)]
     a_w = a_d = a_l = 0
-    for gi in range(n_games):
-        a_seat = (0 if a_first else 1)
-        if gi % 2 == 1:
-            a_seat = 1 - a_seat
+    for opening, a_seat in plan:
         st = game.new_initial_state()
+        if opening:
+            for k in range(0, 16, 2):
+                st.apply_action(amap[opening[k:k + 2]])
         while not st.is_terminal():
             if st.current_player() == a_seat:
-                mv = _move(aeng, aparam, net_a, game, st, rng, c4, az, sims)
+                mv = _move(aeng, aparam, net_a, game, st, rng, c4, az, sims,
+                           greedy=bool(openings))
             else:
-                mv = _move(beng, bparam, net_b, game, st, rng, c4, az, sims)
+                mv = _move(beng, bparam, net_b, game, st, rng, c4, az, sims,
+                           greedy=bool(openings))
             st.apply_action(int(mv))
         r = st.returns()[a_seat]
         if r > 0:
