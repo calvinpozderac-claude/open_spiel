@@ -429,6 +429,13 @@ if _HAS_TORCH:
         V = ((1.0 - rho).unsqueeze(-1) if rho.dim() == d.dim() - 1 else (1.0 - rho)) \
             * delta
         V = V.clamp_min(floor)
+        ds = d.clamp_min(floor)
         mask = (delta > 0).to(d.dtype)
-        per = (torch.log(V) + d / V) * mask
+        # EXCESS NLL: log(V/d) + d/V - 1 >= 0, zero iff V == d.  The raw
+        # log V + d/V is a density NLL and is legitimately large and NEGATIVE
+        # here (drifts are ~1e-5, so log V ~ -11), which would swamp every
+        # other term in the reported total and make the loss incomparable to
+        # runs without it.  Subtracting the per-pair minimum (log d + 1) is a
+        # constant in rho, so the gradient and the argmin are untouched.
+        per = (torch.log(V / ds) + ds / V - 1.0) * mask
         return per.sum(-1) / mask.sum(-1).clamp_min(1.0)

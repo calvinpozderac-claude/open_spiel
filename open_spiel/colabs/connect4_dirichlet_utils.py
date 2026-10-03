@@ -1319,6 +1319,15 @@ class Config:
     # per position) is NOT used: it needs k >= 16 to identify rho, which is ~16x
     # the continuation cost, and it is biased even then.
     snapshot_fracs: tuple = ()
+    # Add the (opt-in) rho head to the network.  Needed for the 'drift' loss
+    # term; off by default so every pre-existing run is bit-identical.
+    rho_head: bool = False
+    rho_init: float = 0.8          # head bias / rho_bar init (measured ~0.8)
+    # 'fixed'    rho_search / rho_target are used everywhere; the head only logs
+    # 'global'   the drift loss trains rho_bar (SEARCH still reads rho_search --
+    #            the learned value has no transport to the workers yet)
+    # 'position' the drift loss trains the per-position head
+    rho_mode: str = 'fixed'
     # THE DEFAULT IS 'additive' for both.
     #
     # SEARCH wants concentration to GROW with evidence, so Thompson exploration
@@ -3819,11 +3828,13 @@ if _HAS_TORCH:
     # ══════════════════════════════════════════════════════════════════════════
     #  Checkpointing
     # ══════════════════════════════════════════════════════════════════════════
+    _CLONE_RHO_HEAD = False      # set from the cfg in run_training
+
     def _cpu_sd(net):
         return {k: v.detach().cpu() for k, v in net.state_dict().items()}
 
     def cpu_clone(net, sig):
-        c = C4DirichletNet(*sig)
+        c = C4DirichletNet(*sig, rho_head=_CLONE_RHO_HEAD)
         c.load_state_dict(_cpu_sd(net)); c.eval()
         return c
 
@@ -3863,11 +3874,18 @@ if _HAS_TORCH:
         _assert_finite_sd(sd, f'bench_{label}.pt')
         torch.save(sd, os.path.join(checkpoint_dir, f'bench_{label}.pt'))
 
-    def load_benchmark_net(checkpoint_dir, label, sig, rho_head=False):
+    def load_benchmark_net(checkpoint_dir, label, sig, rho_head=None):
+        """rho_head=None (default) DETECTS whether the checkpoint has one.
+
+        Otherwise every caller -- the ladders, the probes, the Elo pool -- would
+        have to know which runs were trained with a rho head, and a strict
+        load_state_dict rejects the mismatch either way."""
+        sd = torch.load(os.path.join(checkpoint_dir, f'bench_{label}.pt'),
+                        map_location='cpu', weights_only=True)
+        if rho_head is None:
+            rho_head = any(k.startswith(('rho_mlp', 'rho_bar')) for k in sd)
         net = C4DirichletNet(*sig, rho_head=rho_head)
-        net.load_state_dict(torch.load(
-            os.path.join(checkpoint_dir, f'bench_{label}.pt'),
-            map_location='cpu', weights_only=True))
+        net.load_state_dict(sd)
         net.eval()
         return net
 
@@ -4011,7 +4029,8 @@ if _HAS_TORCH:
 
     def build_network(cfg, device):
         sig = (cfg.channels, cfg.num_blocks, cfg.head_ch)
-        return C4DirichletNet(*sig).to(device), sig
+        return C4DirichletNet(*sig, rho_head=cfg.rho_head,
+                              rho_init=cfg.rho_init).to(device), sig
 
     def _load_solved_probe(cfg, log):
         """Precomputed value probe for the absolute metric, or None when it is
@@ -4049,6 +4068,8 @@ if _HAS_TORCH:
                    corr_target_cap=cfg.corr_target_cap,
                    snapshot_fracs=cfg.snapshot_fracs)
         set_backend(backend, device)
+        global _CLONE_RHO_HEAD
+        _CLONE_RHO_HEAD = bool(cfg.rho_head)
         random.seed(cfg.seed); np.random.seed(cfg.seed)
         torch.manual_seed(cfg.seed)
 
@@ -4232,7 +4253,8 @@ if _HAS_TORCH:
                                 cons_frac=cfg.cons_frac, rng=step_rng,
                                 lam=lam, z_sched=z_sched,
                                 z_conc_mode=cfg.z_kl_conc_mode,
-                                z_rel_mult=cfg.z_kl_rel_mult, z_grow=z_grow)
+                                z_rel_mult=cfg.z_kl_rel_mult, z_grow=z_grow,
+                                rho_mode=cfg.rho_mode)
                         except RuntimeError as e:
                             # Losing one step in thousands costs nothing; losing
                             # a multi-hour run to a transient device fault costs
@@ -4290,7 +4312,8 @@ if _HAS_TORCH:
                 comp = {}
                 for n in ('klv', 'kla', 'dcev', 'dcea', 'evv', 'eva',
                           'cev', 'cea', 'zklv', 'zkla',
-                          'mzcv', 'mzca', 'mkcv', 'mkca', 'cons'):
+                          'mzcv', 'mzca', 'mkcv', 'mkca', 'cons',
+                          'drift', 'rhoreg'):
                     if lw.get(n):
                         comp[n] = lw[n] * ml(n)
                 if lw.get('evv') or lw.get('eva'):
@@ -4318,7 +4341,8 @@ if _HAS_TORCH:
                 trained = ' '.join(
                     f'{n} {ml(n):.3f}' for n in
                     ('klv', 'kla', 'dcev', 'dcea', 'evv', 'eva',
-                     'zklv', 'zkla', 'mzcv', 'mzca', 'mkcv', 'mkca', 'cons')
+                     'zklv', 'zkla', 'mzcv', 'mzca', 'mkcv', 'mkca', 'cons',
+                     'drift', 'rhoreg')
                     if lw.get(n))
                 lam_s = f'| lam {lam:.2f} ' if (lw.get('evv') or lw.get('eva')) else ''
                 diag = (f'loss {ml("loss"):.2f} ({trained} | '
