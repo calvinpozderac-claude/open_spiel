@@ -1,0 +1,5 @@
+[2026-09-13 21:23:29] WRAPPER: wrapper started (pid 20968) sched=const
+[2026-09-13 21:23:29] WRAPPER: launching run_zkl const process
+[2026-09-14 03:15:27] WRAPPER: process exited with code 0 -- re-checking after a pause
+[2026-09-14 03:15:32] WRAPPER: sentinel found -- run complete, exiting wrapper
+[2026-09-14 03:15:32] WRAPPER: wrapper done

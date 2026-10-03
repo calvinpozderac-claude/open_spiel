@@ -1,0 +1,5 @@
+[2026-09-14 11:39:04] WRAPPER: wrapper started (pid 30452) arm=cemse_shift
+[2026-09-14 11:39:04] WRAPPER: launching run_zvariant cemse_shift process
+[2026-09-14 14:36:45] WRAPPER: process exited with code 0 -- re-checking after a pause
+[2026-09-14 14:36:50] WRAPPER: sentinel found -- run complete, exiting wrapper
+[2026-09-14 14:36:50] WRAPPER: wrapper done

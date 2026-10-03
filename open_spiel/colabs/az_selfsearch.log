@@ -1,0 +1,4 @@
+[2026-09-28 15:09:56] === az_selfsearch: AZ50k vs ITSELF, [(100, 1000), (1000, 10000)] sims ===
+[2026-09-28 15:15:28] [100 vs 1000 sims] HIGH side: 6W-1D-5L = 54.2% of 12 games (332s)
+[2026-09-28 16:02:39] [1000 vs 10000 sims] HIGH side: 5W-0D-3L = 62.5% of 8 games (2831s)
+[2026-09-28 16:02:39] === AZ_SELFSEARCH DONE ===

@@ -1,0 +1,8 @@
+The expression after '&' in a pipeline element produced an object that was not valid. It must result in a command 
+name, a script block, or a CommandInfo object.
+At C:\Users\Calvin Pozderac\Documents\open_spiel\open_spiel\colabs\az_then_tournament_master.ps1:7 char:3
++ & $python tournament.py 100 400 *>> "C:\Users\Calvin Pozderac\Documen ...
++   ~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : BadExpression
+ 

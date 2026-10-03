@@ -1,0 +1,24 @@
+[2026-09-09 21:04:20] === P1 EDL: resume ep40000 -> 48000, loss_weights (1.0, 1.0, 0.5) edl_lambda=1.0 anneal_eps=10000 -> othello_benchmark/bench_HYBRID_p1_edl ===
+[2026-09-09 21:04:23] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-09-09 21:04:23]   (no optimizer state in the checkpoint — starting Adam moments from zero)
+[2026-09-09 21:04:23] resumed at ep 40000
+[2026-09-09 21:04:23] device=privateuseone:0 backend=directml | params=330,632 | search_agg=additive_mle target_agg=avgconc | start_ep=40001
+[2026-09-09 21:47:05] ep  41000 | loss 1.47 (evv 0.47 eva 0.80 regv 0.05 rega 0.06 cev 0.358 cea 0.596 cons 0.15) | lam 1.00 | sh evv 32% eva 55% reg 8% cons 5% | conc(pred/tgt) v 33.7/63.8 a 10.1/22.8 | unsolved (45% of batch) v 11.12/19.24 a 5.32/8.56 | dr 3% ply 60 buf 129k aux 68640 | lr 1.94e-04 | vs 40000 (no-MCTS) W17 D1 L12
+[2026-09-09 21:47:05]          perf: 0.40 games/s | wait(sp) 83% train 17% | NNbatch 93 (51 fwd/s)
+[2026-09-09 22:28:23] ep  42000 | loss 1.39 (evv 0.46 eva 0.78 regv 0.04 rega 0.05 cev 0.349 cea 0.582 cons 0.13) | lam 1.00 | sh evv 33% eva 56% reg 6% cons 5% | conc(pred/tgt) v 34.0/63.6 a 10.2/22.2 | unsolved (44% of batch) v 10.56/17.63 a 4.98/7.93 | dr 2% ply 61 buf 258k aux 137022 | lr 1.62e-04 | vs 40000 (no-MCTS) W13 D1 L16
+[2026-09-09 22:28:23]          perf: 0.40 games/s | wait(sp) 82% train 18% | NNbatch 92 (51 fwd/s)
+[2026-09-09 23:10:05] ep  43000 | loss 1.51 (evv 0.51 eva 0.80 regv 0.05 rega 0.05 cev 0.382 cea 0.587 cons 0.21) | lam 1.00 | sh evv 34% eva 53% reg 6% cons 7% | conc(pred/tgt) v 31.6/62.9 a 9.2/22.5 | unsolved (48% of batch) v 11.77/21.96 a 5.02/8.99 | dr 3% ply 61 buf 300k aux 204475 | lr 1.34e-04 | vs 40000 (no-MCTS) W15 D0 L15
+[2026-09-09 23:10:05]          perf: 0.40 games/s | wait(sp) 82% train 17% | NNbatch 92 (51 fwd/s)
+[2026-09-09 23:51:28] ep  44000 | loss 1.52 (evv 0.51 eva 0.85 regv 0.05 rega 0.05 cev 0.385 cea 0.621 cons 0.12) | lam 1.00 | sh evv 34% eva 56% reg 6% cons 4% | conc(pred/tgt) v 31.9/62.0 a 9.1/21.8 | unsolved (46% of batch) v 10.80/17.89 a 4.74/8.10 | dr 2% ply 61 buf 300k aux 272454 | lr 1.09e-04 | vs 40000 (no-MCTS) W12 D0 L18
+[2026-09-09 23:51:28]          perf: 0.40 games/s | wait(sp) 82% train 18% | NNbatch 93 (51 fwd/s)
+[2026-09-10 00:32:29] ep  45000 | loss 1.48 (evv 0.48 eva 0.82 regv 0.05 rega 0.06 cev 0.367 cea 0.616 cons 0.14) | lam 1.00 | sh evv 33% eva 56% reg 7% cons 5% | conc(pred/tgt) v 36.2/61.8 a 10.1/21.8 | unsolved (47% of batch) v 12.13/18.65 a 5.06/7.89 | dr 4% ply 61 buf 300k aux 338094 | lr 8.84e-05
+[2026-09-10 00:32:29]          DEEP Elo@64: 45000=1221  40000=1087  random=821
+[2026-09-10 00:32:29]          perf: 0.42 games/s | wait(sp) 81% train 18% | NNbatch 93 (50 fwd/s)
+[2026-09-10 01:13:15] ep  46000 | loss 1.58 (evv 0.53 eva 0.85 regv 0.05 rega 0.06 cev 0.399 cea 0.621 cons 0.17) | lam 1.00 | sh evv 34% eva 54% reg 7% cons 5% | conc(pred/tgt) v 34.5/61.2 a 10.3/22.1 | unsolved (48% of batch) v 13.27/19.38 a 5.98/8.87 | dr 4% ply 61 buf 300k aux 407575 | lr 7.11e-05 | vs 45000 (no-MCTS) W10 D2 L18
+[2026-09-10 01:13:15]          perf: 0.39 games/s | wait(sp) 79% train 17% | NNbatch 93 (50 fwd/s)
+[2026-09-10 01:55:02] ep  47000 | loss 1.45 (evv 0.49 eva 0.79 regv 0.04 rega 0.05 cev 0.370 cea 0.592 cons 0.15) | lam 1.00 | sh evv 34% eva 55% reg 7% cons 5% | conc(pred/tgt) v 35.0/63.1 a 10.5/23.7 | unsolved (46% of batch) v 12.48/20.56 a 6.20/10.19 | dr 4% ply 61 buf 300k aux 483356 | lr 5.76e-05 | vs 45000 (no-MCTS) W11 D1 L18
+[2026-09-10 01:55:02]          perf: 0.40 games/s | wait(sp) 82% train 17% | NNbatch 93 (51 fwd/s)
+[2026-09-10 02:35:21] ep  48000 | loss 1.45 (evv 0.47 eva 0.81 regv 0.04 rega 0.06 cev 0.357 cea 0.609 cons 0.15) | lam 1.00 | sh evv 32% eva 56% reg 7% cons 5% | conc(pred/tgt) v 33.7/68.2 a 9.7/25.9 | unsolved (41% of batch) v 10.40/22.04 a 4.95/9.17 | dr 4% ply 61 buf 300k aux 556271 | lr 4.78e-05 | vs 45000 (no-MCTS) W13 D1 L16
+[2026-09-10 02:35:21]          perf: 0.41 games/s | wait(sp) 82% train 18% | NNbatch 94 (50 fwd/s)
+[2026-09-10 02:35:22] === done in 19861s ===
+[2026-09-10 02:35:22] P1EDL DONE

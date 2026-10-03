@@ -1,0 +1,19 @@
+[2026-09-28 12:49:24] === az_edax_bench: 9 cells, 0 done, 9 to run | 1000 sims vs Edax L[4, 6, 8], 12 XOT openings x 2 seats = 24 games/cell ===
+[2026-09-28 12:58:04] [1/9] AZ25k vs EdaxL4 @1000sims: 0W-0D-24L = 0.0% [0%,14%] (520s, total 520s)
+[2026-09-28 13:06:27] [2/9] AZ25k vs EdaxL6 @1000sims: 0W-0D-24L = 0.0% [0%,14%] (503s, total 1023s)
+[2026-09-28 13:14:55] [3/9] AZ25k vs EdaxL8 @1000sims: 0W-0D-24L = 0.0% [0%,14%] (508s, total 1531s)
+[2026-09-28 13:23:16] [4/9] AZ45k vs EdaxL4 @1000sims: 0W-0D-24L = 0.0% [0%,14%] (501s, total 2032s)
+[2026-09-28 13:31:27] [5/9] AZ45k vs EdaxL6 @1000sims: 0W-0D-24L = 0.0% [0%,14%] (492s, total 2523s)
+[2026-09-28 13:39:51] [6/9] AZ45k vs EdaxL8 @1000sims: 0W-0D-24L = 0.0% [0%,14%] (504s, total 3027s)
+[2026-09-28 13:48:12] [7/9] AZ50k vs EdaxL4 @1000sims: 0W-1D-23L = 2.1% [0%,17%] (501s, total 3528s)
+[2026-09-28 13:56:35] [8/9] AZ50k vs EdaxL6 @1000sims: 0W-0D-24L = 0.0% [0%,14%] (503s, total 4031s)
+[2026-09-28 14:04:47] [9/9] AZ50k vs EdaxL8 @1000sims: 0W-0D-24L = 0.0% [0%,14%] (492s, total 4523s)
+[2026-09-28 14:04:47] === AZ_EDAX_BENCH DONE ===
+
+  OLIVAW-AZ vs Edax @1000 sims, XOT openings, 24 games/cell
+  ckpt                    EdaxL4                EdaxL6                EdaxL8
+  AZ25k            0-0-24   0.0%         0-0-24   0.0%         0-0-24   0.0%
+  AZ45k            0-0-24   0.0%         0-0-24   0.0%         0-0-24   0.0%
+  AZ50k            0-1-23   2.1%         0-0-24   0.0%         0-0-24   0.0%
+
+  OLIVAW paper, same budget: O-1000 beats E4 and E6, loses to E8 (~depth 6-7).

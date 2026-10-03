@@ -1,5 +1,5 @@
-[2026-09-05 19:43:26] WRAPPER: wrapper started (pid 3244)
-[2026-09-05 19:43:26] WRAPPER: launching run_hybrid process
-[2026-09-07 08:09:13] WRAPPER: process exited with code 0 -- re-checking after a pause
-[2026-09-07 08:09:18] WRAPPER: sentinel found -- run complete, exiting wrapper
-[2026-09-07 08:09:18] WRAPPER: wrapper done
+[2026-09-19 22:11:57] WRAPPER: wrapper started (pid 6048)
+[2026-09-19 22:11:57] WRAPPER: launching run_hybrid process
+[2026-09-21 10:39:03] WRAPPER: process exited with code 0 -- re-checking after a pause
+[2026-09-21 10:39:08] WRAPPER: sentinel found -- run complete, exiting wrapper
+[2026-09-21 10:39:08] WRAPPER: wrapper done

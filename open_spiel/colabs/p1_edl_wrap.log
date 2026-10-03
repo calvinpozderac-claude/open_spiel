@@ -1,0 +1,5 @@
+[2026-09-09 21:04:18] WRAPPER: wrapper started (pid 22984)
+[2026-09-09 21:04:18] WRAPPER: launching run_p1_edl process
+[2026-09-10 02:35:23] WRAPPER: process exited with code 0 -- re-checking after a pause
+[2026-09-10 02:35:28] WRAPPER: sentinel found -- run complete, exiting wrapper
+[2026-09-10 02:35:28] WRAPPER: wrapper done

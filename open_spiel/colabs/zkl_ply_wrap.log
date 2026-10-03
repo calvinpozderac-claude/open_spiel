@@ -1,0 +1,5 @@
+[2026-09-13 09:31:43] WRAPPER: wrapper started (pid 29544) sched=ply
+[2026-09-13 09:31:43] WRAPPER: launching run_zkl ply process
+[2026-09-13 15:27:18] WRAPPER: process exited with code 0 -- re-checking after a pause
+[2026-09-13 15:27:23] WRAPPER: sentinel found -- run complete, exiting wrapper
+[2026-09-13 15:27:23] WRAPPER: wrapper done

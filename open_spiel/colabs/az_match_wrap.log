@@ -1,0 +1,5 @@
+[2026-09-16 17:50:45] WRAPPER: wrapper started (pid 30612)
+[2026-09-16 17:50:45] WRAPPER: launching run_az
+[2026-09-17 14:26:45] WRAPPER: process exited (0) -- pause
+[2026-09-17 14:26:50] WRAPPER: sentinel found -- exiting
+[2026-09-17 14:26:50] WRAPPER: wrapper done

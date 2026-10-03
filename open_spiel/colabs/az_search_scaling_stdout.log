@@ -1,0 +1,13 @@
+[2026-09-28 14:08:00] === az_search_scaling: AZ50k vs EdaxL4, sims [2500, 10000] ===
+[2026-09-28 14:27:54] [2500 sims] AZ50k vs EdaxL4: 0W-1D-23L = 2.1% of 24 games (1195s, total 1195s)
+[2026-09-28 15:05:23] [10000 sims] AZ50k vs EdaxL4: 0W-0D-12L = 0.0% of 12 games (2249s, total 3444s)
+[2026-09-28 15:05:23] === AZ_SEARCH_SCALING DONE ===
+
+  AZ50k vs Edax L4, search scaling on a FIXED net
+      sims       W-D-L  games    score
+      1000      0-1-23     24     2.1%   (from az_edax_bench)
+      2500      0-1-23     24     2.1%
+     10000      0-0-12     12     0.0%
+
+  Flat => the NETWORK is the ceiling (capacity).
+  Steep => our sims are worth less than OLIVAW's nodes (search).

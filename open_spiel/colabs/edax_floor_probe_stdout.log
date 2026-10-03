@@ -1,0 +1,10 @@
+[2026-09-28 19:05:10] === edax_floor_probe: AZ45k + TZ30k, auto-escalating levels [2, 3] ===
+[2026-09-28 19:11:38] [L2] AZ45k vs EdaxL2: 2W-0D-22L = 8.3% (388s, total 388s)
+[2026-09-28 19:19:42] [L2] TZ30k vs EdaxL2: 15W-0D-9L = 62.5% (484s, total 872s)
+[2026-09-28 19:19:42] === L2: not a clean sweep for both -- stopping escalation here ===
+[2026-09-28 19:19:42] === EDAX_FLOOR_PROBE DONE ===
+
+  Edax floor probe -- best checkpoint per arm, 1000 sims, XOT, 24 games/cell
+  arm/ckpt                EdaxL2            EdaxL3
+  AZ45k             2-0-22    8%                --
+  TZ30k             15-0-9   62%                --

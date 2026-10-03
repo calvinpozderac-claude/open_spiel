@@ -91,7 +91,12 @@ OUT = f'olivaw_live_ladder_s{SIMS}_g{GAMES}_xot_greedy.json'
 OUT_LEGACY_6 = f'olivaw_live_ladder_s{SIMS}.json'   # 6 games/pair, no openings
 LOG = 'olivaw_live_ladder.log'
 POLL_SECONDS = 300
-IDLE_GIVE_UP_HOURS = 12.0
+# Must comfortably exceed the gap between TZ checkpoints. That gap is 5 blocks
+# and grew from ~8h to ~13h as the sims ramp slowed training; the original 12h
+# limit expired 8 minutes BEFORE the TZ40k benchmark was written, so the watcher
+# quit and TZ40k sat unrated for 2 hours while I reported it as in progress.
+IDLE_GIVE_UP_HOURS = 96.0
+HEARTBEAT = 'olivaw_watch.heartbeat'
 
 
 _OPENINGS = None
@@ -107,6 +112,14 @@ def openings():
         pick = rng.choice(len(seqs), size=N_OPENINGS, replace=False)
         _OPENINGS = tuple(seqs[i] for i in sorted(pick))
     return _OPENINGS
+
+
+def beat():
+    """Liveness file. A monitor watches its mtime, so a watcher that dies
+    (external kill, crash, or a self-imposed exit) is noticed within minutes
+    instead of looking identical to one that is idle."""
+    with open(HEARTBEAT, 'w') as fh:
+        fh.write(time.strftime('%Y-%m-%d %H:%M:%S'))
 
 
 def _log(msg):
@@ -179,6 +192,7 @@ def run_pairs(pairs, done, tag):
         if k in done:
             continue
         w, d, l = play_pair(a, b)
+        beat()
         # stored under the sorted key, from the FIRST name's perspective
         first = sorted((a[0], b[0]))[0]
         done[k] = [w, d, l] if first == a[0] else [l, d, w]
@@ -266,6 +280,7 @@ def watch():
         rated.update(k for k in key.split('|') if k.startswith('TZ'))
     idle = 0.0
     while True:
+        beat()
         tz = available('tz')
         new = [p for p in tz if p[0] not in rated]
         if new:

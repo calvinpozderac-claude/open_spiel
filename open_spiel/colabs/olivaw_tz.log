@@ -1,0 +1,115 @@
+[2026-09-26 10:35:01] === OLIVAW-TZ: 50000 eps, 10 blocks x 64 ch | OLIVAW recipe: double_aux=1 sims_ramp=[100, 200, 400] steps/ep=6 batch=1024 buf=600k lr=[0.003, 0.001, 0.0001] temp_thr=20 | engine=thompson SEARCH=additive_mle TARGET=avgconc ===
+[2026-09-26 10:35:03] Self-play: 4 WORKER PROCESSES x 16 games -> central inference server on privateuseone:0
+[2026-09-26 10:35:03] device=privateuseone:0 backend=directml | params=909,816 | search_agg=additive_mle target_agg=avgconc | start_ep=1
+[2026-09-26 12:07:32] ep   1000 | loss 1.39 (klv 0.126 kla 0.101 cons 0.071 | cev 0.424 cea 0.598) | sh klv 9% kla 15% cev 31% cea 43% cons 3% | conc(pred/tgt) v 5.9/27.4 a 1.8/6.4 | unsolved (79% of batch) v 2.82/8.05 a 1.65/2.88 | dr 3% ply 60 buf 146k aux 85996 | lr 3.00e-03 | vs 0 (no-MCTS) W21 D0 L9
+[2026-09-26 12:07:32]          perf: 0.18 games/s | wait(sp) 21% train 79% | NNbatch 126 (8 fwd/s)
+[2026-09-26 13:39:50] ep   2000 | loss 1.34 (klv 0.116 kla 0.095 cons 0.081 | cev 0.403 cea 0.586) | sh klv 9% kla 14% cev 30% cea 44% cons 3% | conc(pred/tgt) v 9.8/27.4 a 2.4/6.8 | unsolved (79% of batch) v 4.11/8.62 a 1.92/3.23 | dr 2% ply 61 buf 292k aux 171665 | lr 3.00e-03 | vs 0 (no-MCTS) W21 D0 L9
+[2026-09-26 13:39:50]          perf: 0.18 games/s | wait(sp) 20% train 79% | NNbatch 127 (8 fwd/s)
+[2026-09-26 15:12:01] ep   3000 | loss 1.39 (klv 0.158 kla 0.096 cons 0.069 | cev 0.422 cea 0.587) | sh klv 11% kla 14% cev 30% cea 42% cons 2% | conc(pred/tgt) v 11.9/27.1 a 2.7/7.0 | unsolved (81% of batch) v 5.00/9.40 a 2.14/3.63 | dr 3% ply 61 buf 436k aux 255264 | lr 3.00e-03 | vs 0 (no-MCTS) W23 D0 L7
+[2026-09-26 15:12:01]          perf: 0.18 games/s | wait(sp) 20% train 79% | NNbatch 127 (8 fwd/s)
+[2026-09-26 16:44:43] ep   4000 | loss 1.32 (klv 0.109 kla 0.094 cons 0.073 | cev 0.401 cea 0.586) | sh klv 8% kla 14% cev 30% cea 44% cons 3% | conc(pred/tgt) v 16.5/28.4 a 3.7/7.5 | unsolved (79% of batch) v 6.32/9.56 a 2.49/3.82 | dr 2% ply 61 buf 582k aux 340221 | lr 3.00e-03 | vs 0 (no-MCTS) W22 D0 L8
+[2026-09-26 16:44:43]          perf: 0.18 games/s | wait(sp) 21% train 79% | NNbatch 126 (8 fwd/s)
+[2026-09-26 18:16:47] ep   5000 | loss 1.27 (klv 0.119 kla 0.091 cons 0.067 | cev 0.383 cea 0.551) | sh klv 9% kla 14% cev 30% cea 43% cons 3% | conc(pred/tgt) v 16.3/29.1 a 4.1/8.2 | unsolved (79% of batch) v 6.57/10.76 a 2.76/4.42 | dr 1% ply 61 buf 600k aux 425682 | lr 3.00e-03
+[2026-09-26 18:16:47]          benchmark 5000 saved (in-training ladder disabled; rated externally)
+[2026-09-26 18:16:47]          perf: 0.18 games/s | wait(sp) 20% train 80% | NNbatch 127 (8 fwd/s)
+[2026-09-26 20:05:27] ep   6000 | loss 1.23 (klv 0.102 kla 0.085 cons 0.062 | cev 0.380 cea 0.548) | sh klv 8% kla 14% cev 31% cea 45% cons 3% | conc(pred/tgt) v 18.5/29.9 a 5.0/8.7 | unsolved (79% of batch) v 7.70/10.73 a 3.24/4.54 | dr 2% ply 61 buf 600k aux 511766 | lr 3.00e-03 | vs 0 (no-MCTS) W18 D1 L11
+[2026-09-26 20:05:27]          perf: 0.15 games/s | wait(sp) 18% train 82% | NNbatch 132 (6 fwd/s)
+[2026-09-26 21:37:42] ep   7000 | loss 1.30 (klv 0.136 kla 0.088 cons 0.084 | cev 0.392 cea 0.552) | sh klv 10% kla 14% cev 30% cea 43% cons 3% | conc(pred/tgt) v 17.5/29.6 a 4.9/8.9 | unsolved (80% of batch) v 7.62/11.48 a 3.37/5.09 | dr 2% ply 61 buf 600k aux 598051 | lr 3.00e-03 | vs 0 (no-MCTS) W21 D0 L9
+[2026-09-26 21:37:42]          perf: 0.18 games/s | wait(sp) 20% train 80% | NNbatch 127 (8 fwd/s)
+[2026-09-26 23:10:20] ep   8000 | loss 1.25 (klv 0.116 kla 0.092 cons 0.070 | cev 0.369 cea 0.542) | sh klv 9% kla 15% cev 30% cea 43% cons 3% | conc(pred/tgt) v 20.8/31.5 a 5.8/9.6 | unsolved (78% of batch) v 9.20/12.43 a 3.87/5.43 | dr 2% ply 61 buf 600k aux 685921 | lr 3.00e-03 | vs 0 (no-MCTS) W22 D0 L8
+[2026-09-26 23:10:20]          perf: 0.18 games/s | wait(sp) 21% train 79% | NNbatch 127 (8 fwd/s)
+[2026-09-27 00:42:41] ep   9000 | loss 1.29 (klv 0.130 kla 0.098 cons 0.090 | cev 0.375 cea 0.539) | sh klv 10% kla 15% cev 29% cea 42% cons 3% | conc(pred/tgt) v 19.0/32.1 a 5.5/9.9 | unsolved (78% of batch) v 8.61/12.67 a 3.71/5.54 | dr 1% ply 61 buf 600k aux 774050 | lr 3.00e-03 | vs 0 (no-MCTS) W19 D0 L11
+[2026-09-27 00:42:41]          perf: 0.18 games/s | wait(sp) 20% train 79% | NNbatch 127 (8 fwd/s)
+[2026-09-27 02:15:01] ep  10000 | loss 1.26 (klv 0.114 kla 0.089 cons 0.063 | cev 0.378 cea 0.556) | sh klv 9% kla 14% cev 30% cea 44% cons 2% | conc(pred/tgt) v 19.7/31.7 a 6.0/9.8 | unsolved (78% of batch) v 8.43/12.04 a 3.94/5.46 | dr 3% ply 61 buf 600k aux 863696 | lr 3.00e-03
+[2026-09-27 02:15:01]          benchmark 10000 saved (in-training ladder disabled; rated externally)
+[2026-09-27 02:15:01]          perf: 0.18 games/s | wait(sp) 20% train 79% | NNbatch 126 (8 fwd/s)
+[2026-09-27 04:04:58] ep  11000 | loss 1.23 (klv 0.104 kla 0.090 cons 0.059 | cev 0.371 cea 0.543) | sh klv 8% kla 15% cev 30% cea 44% cons 2% | conc(pred/tgt) v 19.8/31.9 a 6.0/10.1 | unsolved (79% of batch) v 9.50/13.32 a 4.19/6.00 | dr 2% ply 60 buf 600k aux 952166 | lr 1.00e-03 | vs 0 (no-MCTS) W21 D0 L9
+[2026-09-27 04:04:58]          perf: 0.15 games/s | wait(sp) 18% train 82% | NNbatch 133 (6 fwd/s)
+[2026-09-27 05:37:25] ep  12000 | loss 1.25 (klv 0.104 kla 0.096 cons 0.069 | cev 0.367 cea 0.550) | sh klv 8% kla 15% cev 29% cea 44% cons 3% | conc(pred/tgt) v 21.2/33.1 a 6.4/10.4 | unsolved (77% of batch) v 9.49/13.08 a 4.32/6.01 | dr 2% ply 61 buf 600k aux 1042138 | lr 1.00e-03 | vs 0 (no-MCTS) W26 D2 L2
+[2026-09-27 05:37:25]          perf: 0.18 games/s | wait(sp) 20% train 79% | NNbatch 127 (8 fwd/s)
+[2026-09-27 07:09:41] ep  13000 | loss 1.42 (klv 0.251 kla 0.109 cons 0.074 | cev 0.366 cea 0.547) | sh klv 18% kla 15% cev 26% cea 39% cons 3% | conc(pred/tgt) v 21.7/34.0 a 6.7/10.8 | unsolved (77% of batch) v 9.85/13.86 a 4.56/6.36 | dr 2% ply 60 buf 600k aux 1131225 | lr 1.00e-03 | vs 0 (no-MCTS) W23 D1 L6
+[2026-09-27 07:09:41]          perf: 0.18 games/s | wait(sp) 20% train 79% | NNbatch 127 (8 fwd/s)
+[2026-09-27 08:42:02] ep  14000 | loss 1.46 (klv 0.271 kla 0.103 cons 0.079 | cev 0.378 cea 0.561) | sh klv 19% kla 14% cev 26% cea 38% cons 3% | conc(pred/tgt) v 20.8/33.9 a 6.6/11.0 | unsolved (77% of batch) v 9.92/14.25 a 4.59/6.59 | dr 2% ply 60 buf 600k aux 1221179 | lr 1.00e-03 | vs 0 (no-MCTS) W20 D1 L9
+[2026-09-27 08:42:02]          perf: 0.18 games/s | wait(sp) 20% train 79% | NNbatch 126 (8 fwd/s)
+[2026-09-27 10:14:13] ep  15000 | loss 1.28 (klv 0.111 kla 0.101 cons 0.069 | cev 0.370 cea 0.558) | sh klv 9% kla 16% cev 29% cea 44% cons 3% | conc(pred/tgt) v 21.3/33.6 a 6.6/10.7 | unsolved (77% of batch) v 9.51/13.93 a 4.47/6.32 | dr 3% ply 61 buf 600k aux 1310893 | lr 1.00e-03
+[2026-09-27 10:14:13]          benchmark 15000 saved (in-training ladder disabled; rated externally)
+[2026-09-27 10:14:13]          perf: 0.18 games/s | wait(sp) 20% train 79% | NNbatch 126 (8 fwd/s)
+[2026-09-27 12:06:18] ep  16000 | loss 1.36 (klv 0.135 kla 0.110 cons 0.124 | cev 0.375 cea 0.564) | sh klv 10% kla 16% cev 28% cea 42% cons 5% | conc(pred/tgt) v 21.5/34.5 a 7.2/11.4 | unsolved (77% of batch) v 10.64/14.92 a 5.17/7.12 | dr 3% ply 61 buf 600k aux 1401129 | lr 1.00e-03 | vs 0 (no-MCTS) W25 D0 L5
+[2026-09-27 12:06:18]          perf: 0.15 games/s | wait(sp) 18% train 82% | NNbatch 132 (6 fwd/s)
+[2026-09-27 13:46:53] ep  17000 | loss 1.55 (klv 0.342 kla 0.117 cons 0.084 | cev 0.371 cea 0.564) | sh klv 22% kla 15% cev 24% cea 36% cons 3% | conc(pred/tgt) v 19.7/35.4 a 6.4/11.6 | unsolved (76% of batch) v 9.46/14.56 a 4.71/6.92 | dr 3% ply 61 buf 600k aux 1500244 | lr 1.00e-03 | vs 0 (no-MCTS) W24 D1 L5
+[2026-09-27 13:46:53]          perf: 0.17 games/s | wait(sp) 27% train 73% | NNbatch 123 (10 fwd/s)
+[2026-09-27 15:41:21] ep  18000 | loss 1.38 (klv 0.137 kla 0.121 cons 0.087 | cev 0.366 cea 0.591) | sh klv 10% kla 17% cev 27% cea 43% cons 3% | conc(pred/tgt) v 21.0/38.6 a 6.5/12.0 | unsolved (72% of batch) v 9.17/14.30 a 4.44/6.52 | dr 4% ply 60 buf 600k aux 1620161 | lr 1.00e-03 | vs 0 (no-MCTS) W24 D0 L6
+[2026-09-27 15:41:21]          perf: 0.15 games/s | wait(sp) 36% train 64% | NNbatch 121 (13 fwd/s)
+[2026-09-27 17:35:06] ep  19000 | loss 1.41 (klv 0.160 kla 0.141 cons 0.088 | cev 0.335 cea 0.588) | sh klv 11% kla 20% cev 24% cea 42% cons 3% | conc(pred/tgt) v 22.4/42.7 a 7.0/13.3 | unsolved (67% of batch) v 8.68/14.24 a 4.50/6.66 | dr 3% ply 61 buf 600k aux 1743014 | lr 1.00e-03 | vs 0 (no-MCTS) W24 D0 L6
+[2026-09-27 17:35:06]          perf: 0.15 games/s | wait(sp) 36% train 63% | NNbatch 121 (13 fwd/s)
+[2026-09-27 19:28:24] ep  20000 | loss 1.41 (klv 0.139 kla 0.147 cons 0.113 | cev 0.321 cea 0.598) | sh klv 10% kla 21% cev 23% cea 42% cons 4% | conc(pred/tgt) v 23.5/45.2 a 7.1/14.1 | unsolved (64% of batch) v 8.69/14.26 a 4.47/6.65 | dr 3% ply 60 buf 600k aux 1864913 | lr 1.00e-03
+[2026-09-27 19:28:24]          benchmark 20000 saved (in-training ladder disabled; rated externally)
+[2026-09-27 19:28:24]          perf: 0.15 games/s | wait(sp) 37% train 63% | NNbatch 121 (13 fwd/s)
+[2026-09-27 21:41:07] ep  21000 | loss 1.42 (klv 0.160 kla 0.157 cons 0.105 | cev 0.306 cea 0.587) | sh klv 11% kla 22% cev 22% cea 41% cons 4% | conc(pred/tgt) v 24.6/46.4 a 7.5/14.6 | unsolved (63% of batch) v 9.03/14.70 a 4.77/6.96 | dr 2% ply 60 buf 600k aux 1984002 | lr 1.00e-03 | vs 0 (no-MCTS) W19 D2 L9
+[2026-09-27 21:41:07]          perf: 0.13 games/s | wait(sp) 33% train 67% | NNbatch 126 (11 fwd/s)
+[2026-09-27 23:34:19] ep  22000 | loss 1.39 (klv 0.147 kla 0.150 cons 0.079 | cev 0.317 cea 0.586) | sh klv 11% kla 22% cev 23% cea 42% cons 3% | conc(pred/tgt) v 23.5/45.7 a 7.0/14.3 | unsolved (64% of batch) v 8.99/15.41 a 4.51/6.93 | dr 3% ply 61 buf 600k aux 2104118 | lr 1.00e-03 | vs 0 (no-MCTS) W23 D0 L7
+[2026-09-27 23:34:19]          perf: 0.15 games/s | wait(sp) 37% train 63% | NNbatch 121 (13 fwd/s)
+[2026-09-28 01:27:23] ep  23000 | loss 1.37 (klv 0.140 kla 0.150 cons 0.079 | cev 0.309 cea 0.584) | sh klv 10% kla 22% cev 23% cea 43% cons 3% | conc(pred/tgt) v 24.7/45.9 a 7.7/14.6 | unsolved (64% of batch) v 9.59/14.83 a 5.03/7.22 | dr 3% ply 60 buf 600k aux 2222676 | lr 1.00e-03 | vs 0 (no-MCTS) W19 D0 L11
+[2026-09-28 01:27:23]          perf: 0.15 games/s | wait(sp) 37% train 63% | NNbatch 121 (13 fwd/s)
+[2026-09-28 03:20:27] ep  24000 | loss 1.56 (klv 0.286 kla 0.164 cons 0.096 | cev 0.315 cea 0.582) | sh klv 18% kla 21% cev 20% cea 37% cons 3% | conc(pred/tgt) v 25.1/46.3 a 8.0/15.1 | unsolved (63% of batch) v 9.91/15.12 a 5.34/7.64 | dr 3% ply 61 buf 600k aux 2342197 | lr 1.00e-03 | vs 0 (no-MCTS) W23 D1 L6
+[2026-09-28 03:20:27]          perf: 0.15 games/s | wait(sp) 37% train 63% | NNbatch 121 (13 fwd/s)
+[2026-09-28 05:13:37] ep  25000 | loss 1.49 (klv 0.233 kla 0.154 cons 0.073 | cev 0.316 cea 0.600) | sh klv 16% kla 21% cev 21% cea 40% cons 2% | conc(pred/tgt) v 26.1/46.8 a 8.1/15.2 | unsolved (63% of batch) v 10.02/15.56 a 5.25/7.52 | dr 3% ply 60 buf 600k aux 2462611 | lr 1.00e-03
+[2026-09-28 05:13:37]          benchmark 25000 saved (in-training ladder disabled; rated externally)
+[2026-09-28 05:13:37]          perf: 0.15 games/s | wait(sp) 37% train 63% | NNbatch 121 (13 fwd/s)
+[2026-09-28 07:28:37] ep  26000 | loss 1.52 (klv 0.223 kla 0.176 cons 0.080 | cev 0.318 cea 0.584) | sh klv 15% kla 23% cev 21% cea 38% cons 3% | conc(pred/tgt) v 25.8/46.1 a 8.1/15.1 | unsolved (64% of batch) v 10.12/15.56 a 5.42/7.81 | dr 3% ply 60 buf 600k aux 2583112 | lr 1.00e-03 | vs 0 (no-MCTS) W26 D0 L4
+[2026-09-28 07:28:37]          perf: 0.12 games/s | wait(sp) 33% train 67% | NNbatch 126 (10 fwd/s)
+[2026-09-28 09:21:47] ep  27000 | loss 1.63 (klv 0.320 kla 0.177 cons 0.077 | cev 0.321 cea 0.598) | sh klv 20% kla 22% cev 20% cea 37% cons 2% | conc(pred/tgt) v 26.2/44.8 a 8.1/14.6 | unsolved (65% of batch) v 9.75/14.90 a 5.44/7.75 | dr 2% ply 61 buf 600k aux 2702708 | lr 1.00e-03 | vs 0 (no-MCTS) W24 D1 L5
+[2026-09-28 09:21:47]          perf: 0.15 games/s | wait(sp) 37% train 63% | NNbatch 121 (13 fwd/s)
+[2026-09-28 11:15:07] ep  28000 | loss 1.65 (klv 0.350 kla 0.170 cons 0.073 | cev 0.329 cea 0.593) | sh klv 21% kla 21% cev 20% cea 36% cons 2% | conc(pred/tgt) v 23.8/45.2 a 7.8/15.0 | unsolved (65% of batch) v 9.32/15.33 a 5.49/7.93 | dr 4% ply 61 buf 600k aux 2823633 | lr 1.00e-04 | vs 0 (no-MCTS) W26 D0 L4
+[2026-09-28 11:15:07]          perf: 0.15 games/s | wait(sp) 37% train 63% | NNbatch 121 (13 fwd/s)
+[2026-09-28 13:09:50] ep  29000 | loss 1.51 (klv 0.187 kla 0.160 cons 0.087 | cev 0.340 cea 0.617) | sh klv 12% kla 21% cev 23% cea 41% cons 3% | conc(pred/tgt) v 22.8/45.6 a 7.7/14.9 | unsolved (64% of batch) v 9.21/15.24 a 5.44/7.69 | dr 2% ply 61 buf 600k aux 2944448 | lr 1.00e-04 | vs 0 (no-MCTS) W24 D0 L6
+[2026-09-28 13:09:50]          perf: 0.15 games/s | wait(sp) 36% train 63% | NNbatch 121 (13 fwd/s)
+[2026-09-28 15:11:06] ep  30000 | loss 1.53 (klv 0.182 kla 0.172 cons 0.095 | cev 0.337 cea 0.617) | sh klv 12% kla 23% cev 22% cea 40% cons 3% | conc(pred/tgt) v 23.3/46.3 a 8.0/15.3 | unsolved (64% of batch) v 9.12/15.73 a 5.55/8.08 | dr 3% ply 60 buf 600k aux 3063696 | lr 1.00e-04
+[2026-09-28 15:11:06]          benchmark 30000 saved (in-training ladder disabled; rated externally)
+[2026-09-28 15:11:06]          perf: 0.14 games/s | wait(sp) 35% train 64% | NNbatch 124 (12 fwd/s)
+[2026-09-28 18:10:20] ep  31000 | loss 1.55 (klv 0.194 kla 0.162 cons 0.106 | cev 0.360 cea 0.619) | sh klv 12% kla 21% cev 23% cea 40% cons 3% | conc(pred/tgt) v 21.2/44.9 a 7.5/14.6 | unsolved (65% of batch) v 8.96/14.90 a 5.53/7.74 | dr 4% ply 61 buf 600k aux 3183244 | lr 1.00e-04 | vs 0 (no-MCTS) W26 D0 L4
+[2026-09-28 18:10:20]          perf: 0.09 games/s | wait(sp) 28% train 71% | NNbatch 126 (8 fwd/s)
+[2026-09-28 20:08:25] ep  32000 | loss 1.62 (klv 0.219 kla 0.186 cons 0.101 | cev 0.356 cea 0.619) | sh klv 14% kla 23% cev 22% cea 38% cons 3% | conc(pred/tgt) v 21.2/45.8 a 7.6/14.9 | unsolved (64% of batch) v 8.94/15.44 a 5.51/7.77 | dr 2% ply 61 buf 600k aux 3302103 | lr 1.00e-04 | vs 0 (no-MCTS) W26 D1 L3
+[2026-09-28 20:08:25]          perf: 0.14 games/s | wait(sp) 36% train 64% | NNbatch 123 (12 fwd/s)
+[2026-09-28 22:01:43] ep  33000 | loss 1.58 (klv 0.218 kla 0.165 cons 0.089 | cev 0.364 cea 0.624) | sh klv 14% kla 21% cev 23% cea 39% cons 3% | conc(pred/tgt) v 21.7/45.6 a 7.8/14.9 | unsolved (64% of batch) v 8.85/15.16 a 5.71/7.91 | dr 3% ply 61 buf 600k aux 3420742 | lr 1.00e-04 | vs 0 (no-MCTS) W24 D1 L5
+[2026-09-28 22:01:43]          perf: 0.15 games/s | wait(sp) 37% train 63% | NNbatch 121 (13 fwd/s)
+[2026-09-29 00:26:39] ep  34000 | loss 1.66 (klv 0.273 kla 0.186 cons 0.090 | cev 0.359 cea 0.610) | sh klv 16% kla 22% cev 22% cea 37% cons 3% | conc(pred/tgt) v 21.1/48.0 a 7.8/15.8 | unsolved (61% of batch) v 8.60/15.00 a 5.64/7.93 | dr 2% ply 61 buf 600k aux 3572705 | lr 1.00e-04 | vs 0 (no-MCTS) W25 D0 L5
+[2026-09-29 00:26:39]          perf: 0.11 games/s | wait(sp) 51% train 49% | NNbatch 117 (18 fwd/s)
+[2026-09-29 03:04:54] ep  35000 | loss 2.13 (klv 0.644 kla 0.254 cons 0.098 | cev 0.319 cea 0.612) | sh klv 30% kla 24% cev 15% cea 29% cons 2% | conc(pred/tgt) v 24.0/52.7 a 8.3/17.3 | unsolved (56% of batch) v 8.78/15.57 a 5.56/7.79 | dr 3% ply 61 buf 600k aux 3739030 | lr 1.00e-04
+[2026-09-29 03:04:54]          benchmark 35000 saved (in-training ladder disabled; rated externally)
+[2026-09-29 03:04:54]          perf: 0.11 games/s | wait(sp) 55% train 45% | NNbatch 116 (19 fwd/s)
+[2026-09-29 06:05:47] ep  36000 | loss 1.69 (klv 0.263 kla 0.216 cons 0.107 | cev 0.314 cea 0.632) | sh klv 16% kla 26% cev 19% cea 37% cons 3% | conc(pred/tgt) v 24.5/55.7 a 8.3/18.6 | unsolved (52% of batch) v 7.75/14.92 a 5.37/7.74 | dr 2% ply 61 buf 600k aux 3898920 | lr 1.00e-04 | vs 0 (no-MCTS) W25 D0 L5
+[2026-09-29 06:05:47]          perf: 0.09 games/s | wait(sp) 52% train 48% | NNbatch 120 (16 fwd/s)
+[2026-09-29 08:42:53] ep  37000 | loss 1.85 (klv 0.382 kla 0.238 cons 0.089 | cev 0.315 cea 0.628) | sh klv 21% kla 26% cev 17% cea 34% cons 2% | conc(pred/tgt) v 25.7/55.8 a 8.7/18.6 | unsolved (52% of batch) v 8.32/14.91 a 5.46/7.75 | dr 3% ply 61 buf 600k aux 4063495 | lr 1.00e-04 | vs 0 (no-MCTS) W28 D1 L1
+[2026-09-29 08:42:53]          perf: 0.11 games/s | wait(sp) 56% train 44% | NNbatch 116 (19 fwd/s)
+[2026-09-29 11:20:19] ep  38000 | loss 1.67 (klv 0.235 kla 0.214 cons 0.100 | cev 0.319 cea 0.641) | sh klv 14% kla 26% cev 19% cea 38% cons 3% | conc(pred/tgt) v 26.7/56.7 a 9.0/19.2 | unsolved (52% of batch) v 9.16/16.37 a 5.77/8.28 | dr 3% ply 61 buf 600k aux 4230828 | lr 1.00e-04 | vs 0 (no-MCTS) W23 D0 L7
+[2026-09-29 11:20:19]          perf: 0.11 games/s | wait(sp) 56% train 44% | NNbatch 117 (19 fwd/s)
+[2026-09-29 13:57:41] ep  39000 | loss 1.69 (klv 0.243 kla 0.215 cons 0.095 | cev 0.312 cea 0.657) | sh klv 14% kla 25% cev 18% cea 39% cons 3% | conc(pred/tgt) v 25.7/57.0 a 8.8/19.0 | unsolved (51% of batch) v 8.38/15.30 a 5.68/7.95 | dr 2% ply 60 buf 600k aux 4397187 | lr 1.00e-04 | vs 0 (no-MCTS) W25 D1 L4
+[2026-09-29 13:57:41]          perf: 0.11 games/s | wait(sp) 55% train 45% | NNbatch 116 (19 fwd/s)
+[2026-09-29 16:37:25] ep  40000 | loss 1.67 (klv 0.275 kla 0.224 cons 0.096 | cev 0.292 cea 0.608) | sh klv 16% kla 27% cev 17% cea 36% cons 3% | conc(pred/tgt) v 26.9/58.5 a 9.1/19.7 | unsolved (49% of batch) v 9.00/15.60 a 5.75/8.07 | dr 4% ply 61 buf 600k aux 4564830 | lr 1.00e-04
+[2026-09-29 16:37:25]          benchmark 40000 saved (in-training ladder disabled; rated externally)
+[2026-09-29 16:37:25]          perf: 0.10 games/s | wait(sp) 55% train 44% | NNbatch 116 (19 fwd/s)
+[2026-09-29 19:32:00] ep  41000 | loss 1.75 (klv 0.320 kla 0.216 cons 0.096 | cev 0.310 cea 0.635) | sh klv 18% kla 25% cev 18% cea 36% cons 3% | conc(pred/tgt) v 26.4/57.7 a 9.1/19.5 | unsolved (51% of batch) v 8.96/16.51 a 5.88/8.32 | dr 4% ply 61 buf 600k aux 4729823 | lr 1.00e-04 | vs 0 (no-MCTS) W27 D0 L3
+[2026-09-29 19:32:00]          perf: 0.10 games/s | wait(sp) 54% train 46% | NNbatch 119 (17 fwd/s)
+[2026-09-29 22:18:49] ep  42000 | loss 1.79 (klv 0.346 kla 0.220 cons 0.094 | cev 0.315 cea 0.646) | sh klv 19% kla 25% cev 18% cea 36% cons 3% | conc(pred/tgt) v 26.2/57.2 a 9.1/19.4 | unsolved (51% of batch) v 8.70/15.34 a 5.80/8.07 | dr 3% ply 61 buf 600k aux 4895446 | lr 1.00e-04 | vs 0 (no-MCTS) W25 D1 L4
+[2026-09-29 22:18:49]          perf: 0.10 games/s | wait(sp) 54% train 45% | NNbatch 118 (18 fwd/s)
+[2026-09-30 00:55:53] ep  43000 | loss 1.72 (klv 0.286 kla 0.216 cons 0.147 | cev 0.311 cea 0.621) | sh klv 17% kla 25% cev 18% cea 36% cons 4% | conc(pred/tgt) v 26.0/56.2 a 9.0/18.9 | unsolved (52% of batch) v 8.80/15.59 a 5.79/8.04 | dr 3% ply 61 buf 600k aux 5060024 | lr 1.00e-04 | vs 0 (no-MCTS) W24 D2 L4
+[2026-09-30 00:55:53]          perf: 0.11 games/s | wait(sp) 56% train 44% | NNbatch 117 (19 fwd/s)
+[2026-09-30 03:33:02] ep  44000 | loss 1.94 (klv 0.488 kla 0.236 cons 0.089 | cev 0.308 cea 0.627) | sh klv 25% kla 24% cev 16% cea 32% cons 2% | conc(pred/tgt) v 26.4/56.9 a 9.1/19.1 | unsolved (51% of batch) v 8.92/16.07 a 5.81/8.14 | dr 3% ply 61 buf 600k aux 5224983 | lr 1.00e-04 | vs 0 (no-MCTS) W24 D0 L6
+[2026-09-30 03:33:02]          perf: 0.11 games/s | wait(sp) 56% train 44% | NNbatch 117 (19 fwd/s)
+[2026-09-30 06:10:16] ep  45000 | loss 1.61 (klv 0.251 kla 0.213 cons 0.094 | cev 0.293 cea 0.593) | sh klv 16% kla 26% cev 18% cea 37% cons 3% | conc(pred/tgt) v 27.8/57.3 a 9.5/19.6 | unsolved (51% of batch) v 8.95/15.73 a 5.85/8.19 | dr 3% ply 61 buf 600k aux 5391204 | lr 1.00e-04
+[2026-09-30 06:10:16]          benchmark 45000 saved (in-training ladder disabled; rated externally)
+[2026-09-30 06:10:16]          perf: 0.11 games/s | wait(sp) 56% train 44% | NNbatch 117 (19 fwd/s)
+[2026-09-30 09:14:26] ep  46000 | loss 1.81 (klv 0.356 kla 0.243 cons 0.110 | cev 0.304 cea 0.613) | sh klv 20% kla 27% cev 17% cea 34% cons 3% | conc(pred/tgt) v 28.0/57.3 a 9.4/19.7 | unsolved (51% of batch) v 9.31/16.58 a 5.98/8.55 | dr 3% ply 61 buf 600k aux 5555598 | lr 1.00e-04 | vs 0 (no-MCTS) W25 D2 L3
+[2026-09-30 09:14:26]          perf: 0.09 games/s | wait(sp) 52% train 48% | NNbatch 120 (16 fwd/s)
+[2026-09-30 12:01:48] ep  47000 | loss 1.63 (klv 0.248 kla 0.203 cons 0.083 | cev 0.314 cea 0.621) | sh klv 15% kla 25% cev 19% cea 38% cons 3% | conc(pred/tgt) v 27.9/56.8 a 9.4/19.4 | unsolved (51% of batch) v 9.24/15.65 a 5.88/8.19 | dr 3% ply 61 buf 600k aux 5722170 | lr 1.00e-04 | vs 0 (no-MCTS) W23 D1 L6
+[2026-09-30 12:01:48]          perf: 0.10 games/s | wait(sp) 55% train 44% | NNbatch 116 (18 fwd/s)
+[2026-09-30 14:44:12] ep  48000 | loss 1.80 (klv 0.323 kla 0.232 cons 0.207 | cev 0.302 cea 0.607) | sh klv 18% kla 26% cev 17% cea 34% cons 6% | conc(pred/tgt) v 27.8/57.3 a 9.2/19.1 | unsolved (51% of batch) v 9.36/16.38 a 5.95/8.32 | dr 3% ply 60 buf 600k aux 5888667 | lr 1.00e-04 | vs 0 (no-MCTS) W25 D0 L5
+[2026-09-30 14:44:13]          perf: 0.10 games/s | wait(sp) 55% train 45% | NNbatch 116 (18 fwd/s)
+[2026-09-30 17:23:30] ep  49000 | loss 1.76 (klv 0.308 kla 0.221 cons 0.111 | cev 0.326 cea 0.629) | sh klv 17% kla 25% cev 19% cea 36% cons 3% | conc(pred/tgt) v 26.8/56.8 a 9.0/19.0 | unsolved (51% of batch) v 8.76/15.67 a 5.79/8.04 | dr 3% ply 60 buf 600k aux 6059007 | lr 1.00e-04 | vs 0 (no-MCTS) W21 D0 L9
+[2026-09-30 17:23:30]          perf: 0.10 games/s | wait(sp) 56% train 44% | NNbatch 116 (19 fwd/s)
+[2026-09-30 19:59:36] ep  50000 | loss 1.66 (klv 0.234 kla 0.220 cons 0.091 | cev 0.301 cea 0.639) | sh klv 14% kla 26% cev 18% cea 39% cons 3% | conc(pred/tgt) v 28.4/57.9 a 9.4/19.5 | unsolved (50% of batch) v 8.92/15.86 a 5.72/8.05 | dr 3% ply 61 buf 600k aux 6228373 | lr 1.00e-04
+[2026-09-30 19:59:36]          benchmark 50000 saved (in-training ladder disabled; rated externally)
+[2026-09-30 19:59:36]          perf: 0.11 games/s | wait(sp) 56% train 44% | NNbatch 117 (19 fwd/s)
+[2026-09-30 19:59:47] === done in 379486s ===
+[2026-09-30 19:59:47] OLIVAW_TZ DONE

@@ -1,0 +1,5 @@
+[2026-09-14 08:33:27] WRAPPER: wrapper started (pid 20824) arm=cemse_double
+[2026-09-14 08:33:27] WRAPPER: launching run_zvariant cemse_double process
+[2026-09-14 11:38:58] WRAPPER: process exited with code 0 -- re-checking after a pause
+[2026-09-14 11:39:03] WRAPPER: sentinel found -- run complete, exiting wrapper
+[2026-09-14 11:39:03] WRAPPER: wrapper done

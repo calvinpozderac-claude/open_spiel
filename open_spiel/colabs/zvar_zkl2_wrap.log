@@ -1,0 +1,5 @@
+[2026-09-14 03:16:08] WRAPPER: wrapper started (pid 20396) arm=zkl2
+[2026-09-14 03:16:08] WRAPPER: launching run_zvariant zkl2 process
+[2026-09-14 08:33:22] WRAPPER: process exited with code 0 -- re-checking after a pause
+[2026-09-14 08:33:27] WRAPPER: sentinel found -- run complete, exiting wrapper
+[2026-09-14 08:33:27] WRAPPER: wrapper done

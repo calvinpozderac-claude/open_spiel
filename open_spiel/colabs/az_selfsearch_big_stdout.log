@@ -1,0 +1,16 @@
+[2026-09-28 15:16:26] === az_selfsearch_big: AZ50k vs ITSELF, [(25, 100), (100, 400), (100, 1000), (400, 1600)], 40 games/rung ===
+[2026-09-28 15:19:47] [25 vs 100] HIGH: 22W-0D-18L = 55.0% [40%,69%] of 40 (201s)
+[2026-09-28 15:32:19] [100 vs 400] HIGH: 25W-2D-13L = 65.0% [50%,78%] of 40 (752s)
+[2026-09-28 15:59:04] [100 vs 1000] HIGH: 30W-1D-9L = 76.2% [61%,87%] of 40 (1605s)
+[2026-09-28 16:35:30] [400 vs 1600] HIGH: 26W-0D-14L = 65.0% [50%,78%] of 40 (2186s)
+[2026-09-28 16:35:30] === AZ_SELFSEARCH_BIG DONE ===
+
+  AZ50k vs ITSELF -- same network, only sims differ
+         matchup    high W-D-L    n  high score          95% CI
+       25 vs 100       22-0-18   40       55.0%       [40%,69%]
+      100 vs 400       25-2-13   40       65.0%       [50%,78%]
+     100 vs 1000        30-1-9   40       76.2%       [61%,87%]
+     400 vs 1600       26-0-14   40       65.0%       [50%,78%]
+
+  Healthy AlphaZero: a 4x search edge is worth ~+150 Elo (~70%),
+  a 10x edge ~+250 Elo (~80%). Rungs near 50% mean search is inert.

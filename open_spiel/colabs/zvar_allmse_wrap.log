@@ -1,0 +1,5 @@
+[2026-09-14 14:36:50] WRAPPER: wrapper started (pid 15408) arm=allmse
+[2026-09-14 14:36:50] WRAPPER: launching run_zvariant allmse process
+[2026-09-14 20:21:44] WRAPPER: process exited with code 0 -- re-checking after a pause
+[2026-09-14 20:21:49] WRAPPER: sentinel found -- run complete, exiting wrapper
+[2026-09-14 20:21:49] WRAPPER: wrapper done
