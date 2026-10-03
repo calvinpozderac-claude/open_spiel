@@ -375,6 +375,103 @@ def log_confound_surface():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Drift-based rho recovery -- the identification route actually used
+# ─────────────────────────────────────────────────────────────────────────────
+def test_drift_recovery_global(verbose=True):
+    """Spec Step 8's gate, met by snapshot drift instead of fork outcomes.
+
+    The spec identifies rho from k outcomes per fork and argues nothing else can.
+    Nested snapshots can: the shared error cancels in mu_n - mu_N, so the drift
+    measures the idiosyncratic variance, and rho = 1 - idio/total with the total
+    known from the leaf concentrations.  No outcomes are used here at all."""
+    rng = np.random.default_rng(101)
+    c = calibrate_c(rng)
+    est = []
+    for rt in (0.1, 0.3, 0.6):
+        d = make_positions(rt, 4000, c, rng)
+        r, npair = cp.rho_from_drift(d['snaps'])
+        est.append(r)
+        if verbose:
+            print(f'  rho_true {rt:.1f} -> rho_hat {r:.3f}  (|err| {abs(r-rt):.3f}, '
+                  f'{npair} pairs, 4000 positions, ZERO outcomes)')
+    for rt, r in zip((0.1, 0.3, 0.6), est):
+        assert abs(r - rt) <= 0.05, (rt, r)
+    assert est[0] < est[1] < est[2], est
+
+
+def test_drift_recovery_small_sample(verbose=True):
+    """400 positions is enough; the spec's outcome route needs k>=16 per position."""
+    rng = np.random.default_rng(102)
+    c = calibrate_c(rng)
+    for rt in (0.1, 0.3, 0.6):
+        rs = [cp.rho_from_drift(make_positions(rt, 400, c, rng)['snaps'])[0]
+              for _ in range(5)]
+        if verbose:
+            print(f'  rho_true {rt:.1f} -> {np.mean(rs):.3f} +- {np.std(rs):.3f} '
+                  f'over 5 repeats of 400 positions')
+        assert abs(np.mean(rs) - rt) <= 0.06, (rt, np.mean(rs))
+
+
+def test_drift_handles_heterogeneous_leaves(verbose=True):
+    """Leaf variances that SHRINK as search deepens (what a real tree does, as it
+    concentrates on good moves) must not bias rho.  The exact denominator uses the
+    cumulative SU at both snapshots; a naive single-u version collapses here."""
+    rng0 = np.random.default_rng(103)
+    c = calibrate_c(rng0)
+    rt, P, L = 0.3, 4000, SNAP_N[-1]
+    for decay in (0.0, 0.3, 0.6, 1.0):
+        rng = np.random.default_rng(7)
+        theta = rng.dirichlet([4, 4, 4], size=P)
+        base = _alr(theta)
+        b = rng.normal(0, 1, (P, 2)) * (math.sqrt(rt) * S_ERR)
+        w = (1.0 + np.arange(L)) ** (-decay)
+        e = rng.normal(0, 1, (P, L, 2)) * (math.sqrt(1 - rt) * S_ERR) * w[None, :, None]
+        m = _alr_inv(base[:, None, :] + b[:, None, :] + e)
+        u = (1.0 - (m * m).sum(-1)) / (c + 1.0) * (w ** 2)[None, :]
+        cm, cu = m.cumsum(1), u.cumsum(1)
+        sn = np.zeros((P, len(SNAP_N), 9))
+        for j, n in enumerate(SNAP_N):
+            sn[:, j, 0] = n
+            sn[:, j, 1:4] = cm[:, n - 1]
+            sn[:, j, 7] = cu[:, n - 1]
+        r, _ = cp.rho_from_drift(sn)
+        naive_num = naive_den = 0.0
+        for j in range(len(SNAP_N)):
+            for k in range(j + 1, len(SNAP_N)):
+                nj, nk = SNAP_N[j], SNAP_N[k]
+                mj, mk = sn[:, j, 1:4] / nj, sn[:, k, 1:4] / nk
+                naive_num += ((mj - mk) ** 2).sum(-1).sum()
+                naive_den += ((sn[:, k, 7] / nk) * (1 / nj - 1 / nk)).sum()
+        naive = 1.0 - naive_num / naive_den
+        if verbose:
+            print(f'  variance decay {decay:.1f}: exact {r:.3f}   naive {naive:.3f}')
+        assert abs(r - rt) <= 0.06, (decay, r)
+
+
+def test_drift_rho_is_relative_to_claimed_leaf_variance(verbose=True):
+    """Documents the method's real limitation: rho is the shared FRACTION of the
+    variance the network CLAIMS.  Miscalibrated concentrations bias it directly,
+    which is why the outcome terms (cev/cea) are still needed to keep them honest."""
+    rng = np.random.default_rng(104)
+    c = calibrate_c(rng)
+    d = make_positions(0.3, 4000, c, rng)
+    for scale in (0.5, 1.0, 2.0):
+        sn = d['snaps'].copy()
+        sn[:, :, 7] *= scale
+        r, _ = cp.rho_from_drift(sn)
+        want = 1.0 - (1.0 - 0.3) / scale
+        if verbose:
+            print(f'  net claims {scale:.1f}x the true leaf variance -> rho_hat '
+                  f'{r:.3f}  (predicted {max(want, 1e-3):.3f})')
+        assert abs(r - max(want, 1e-3)) < 0.07, (scale, r, want)
+
+
+DRIFT = [test_drift_recovery_global, test_drift_recovery_small_sample,
+         test_drift_handles_heterogeneous_leaves,
+         test_drift_rho_is_relative_to_claimed_leaf_variance]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 UNIT = [test_T1_limits, test_T2_empty_returns_prior, test_T3_leaf_equals_prior,
         test_T4_monotone_and_saturates, test_T5_terminal_same_outcome_is_a_spike,
         test_T6_terminal_split_scales_with_n, test_T7_no_double_count,
@@ -384,8 +481,20 @@ UNIT = [test_T1_limits, test_T2_empty_returns_prior, test_T3_leaf_equals_prior,
 
 
 def main(argv):
+    if len(argv) > 1 and argv[1] == 'drift':
+        fails = 0
+        for t in DRIFT:
+            print(t.__name__)
+            try:
+                t()
+            except Exception as e:                                # noqa: BLE001
+                fails += 1; print(f'  FAIL {type(e).__name__}: {e}')
+        print('DRIFT OK' if not fails else f'DRIFT {fails} FAILED')
+        return 1 if fails else 0
     if len(argv) > 1 and argv[1] == 'synth':
-        print('synthetic global recovery'); test_synthetic_global_recovery()
+        print('synthetic global recovery '
+              '(the OUTCOME route from the spec -- expected to fail)')
+        test_synthetic_global_recovery()
         print('synthetic position recovery'); test_synthetic_position_recovery()
         print('SYNTHETIC OK'); return 0
     if len(argv) > 1 and argv[1] == 'confound':

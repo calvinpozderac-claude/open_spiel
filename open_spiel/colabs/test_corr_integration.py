@@ -209,5 +209,133 @@ def main(argv):
     return 1 if fails else 0
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  rho head + drift loss
+# ─────────────────────────────────────────────────────────────────────────────
+def _batch_with_snaps(n=48, sims=64, seed=0, rho_init=0.5):
+    import torch
+    g = c4.load_game('othello'); c4.set_game(g)
+    FR = (1 / 16, 1 / 8, 1 / 4, 1 / 2, 1.0)
+    cfg = c4._worker_cfg(c4.Config(
+        game_name='othello', channels=16, num_blocks=2, head_ch=4,
+        search_agg='corr', target_agg='corr', snapshot_fracs=FR,
+        fast_sims=sims, full_sims=sims, fast_prob=1.0, worker_wave=4,
+        use_workers=False, n_parallel_games=4), (16, 2, 4))
+    c4.set_search(search_agg='corr', target_agg='corr', selection='dirichlet',
+                  snapshot_fracs=FR)
+    net = c4.C4DirichletNet(16, 2, 4, rho_head=True, rho_init=rho_init)
+    sp = c4.ParallelSelfPlay(g, net, 'cpu', cfg, checkpoint_dir=None, seed=seed)
+    it = sp.episodes()
+    batch = []
+    while len(batch) < n:
+        batch += list(next(it))
+    return net, batch[:n]
+
+
+def test_rho_head_optional_and_backcompat():
+    import torch
+    g = c4.load_game('othello'); c4.set_game(g)
+    plain = c4.C4DirichletNet(8, 1, 2)
+    assert len(plain(torch.zeros(1, *c4._OBS_SHAPE))) == 4
+    assert plain(torch.zeros(1, *c4._OBS_SHAPE), return_rho=True)[4] is None
+    assert not any('rho' in k for k in plain.state_dict())
+    withrho = c4.C4DirichletNet(8, 1, 2, rho_head=True)
+    assert any('rho' in k for k in withrho.state_dict())
+    # a checkpoint saved without the head still loads into the default net
+    import io
+    buf = io.BytesIO(); torch.save(plain.state_dict(), buf); buf.seek(0)
+    c4.C4DirichletNet(8, 1, 2).load_state_dict(torch.load(buf, weights_only=True))
+
+
+def test_T11_gradient_routing():
+    """Spec Step 7 routing table: the drift term must reach rho and the trunk and
+    NOT the alpha heads; the distillation/outcome terms must not reach rho."""
+    import torch
+    net, batch = _batch_with_snaps()
+    # cev/cea are weighted by z_w, which only finish_episode sets -- without this
+    # those two terms have zero gradient for a trivial reason and the routing
+    # assertions below would pass vacuously.
+    c4.finish_episode(batch, [1.0, -1.0])
+    meta, obs2 = c4.build_batch_meta(batch, 'cpu')
+    assert bool((meta['snap_dl'] > 0).any()), 'no drift data in the batch'
+    assert float(meta['z_w'].sum()) > 0, 'z_w not stamped'
+    assert float(meta['played_w'].sum()) > 0, 'played_w not set'
+    obs = [b['obs'] for b in batch]
+    x = c4.batch_to_tensor(obs, 'cpu')
+
+    groups = {
+        'alpha_heads': [p for n, p in net.named_parameters()
+                        if n.startswith(('v_out', 'a_out'))],
+        'rho_head':    [p for n, p in net.named_parameters()
+                        if n.startswith('rho_mlp')],
+        'rho_bar':     [net.rho_bar_logit],
+        'trunk':       [p for n, p in net.named_parameters()
+                        if n.startswith(('stem', 'body', 'head'))],
+    }
+
+    def grads(weights, rho_mode):
+        net.zero_grad(set_to_none=True)
+        v, vc, a, ac, rr = net(x, return_rho=True)
+        loss, _ = c4.full_loss((v, vc, a, ac), None, meta, weights,
+                               rho_raw=rr, rho_bar_logit=net.rho_bar_logit,
+                               rho_mode=rho_mode)
+        loss.backward()
+        return {k: any(p.grad is not None and p.grad.abs().sum().item() > 0
+                       for p in ps) for k, ps in groups.items()}
+
+    g = grads({'drift': 1.0}, 'position')
+    assert g == {'alpha_heads': False, 'rho_head': True, 'rho_bar': False,
+                 'trunk': True}, g
+    g = grads({'drift': 1.0, 'rhoreg': 1.0}, 'position')
+    assert g['rho_bar'] and not g['alpha_heads'], g
+    g = grads({'drift': 1.0}, 'global')
+    assert g == {'alpha_heads': False, 'rho_head': False, 'rho_bar': True,
+                 'trunk': False}, g           # global mode: no trunk gradient
+    for term in ('klv', 'kla', 'cev', 'cea'):
+        g = grads({term: 1.0}, 'position')
+        assert g['alpha_heads'] and not g['rho_head'] and not g['rho_bar'], (term, g)
+
+
+def test_drift_loss_learns_rho():
+    """The drift loss must move rho from its init to the value the data implies.
+
+    It is compared against the closed-form moment estimator with a LOOSE tolerance
+    on purpose: the two are different estimators of the same quantity.  The moment
+    version pools a ratio of sums over all pairs; drift_nll averages a per-pair
+    exponential NLL, which weights positions differently.  Measured difference on
+    real self-play batches is ~0.01-0.03, and float32 packing of the drift terms
+    contributes nothing (verified exactly 0.0000).  What is asserted is therefore
+    direction and rough agreement, not identity."""
+    import torch
+    net, batch = _batch_with_snaps(n=160, sims=128, rho_init=0.5)
+    sn = np.array([np.array(b['snaps']) for b in batch
+                   if len(b.get('snaps', ())) == 5])
+    want, _ = cp.rho_from_drift(sn)
+    assert want > 0.6, f'test batch has unexpectedly low rho ({want})'
+    opt = torch.optim.Adam(net.parameters(), lr=0.05)
+    for _ in range(300):
+        c4.train_step(net, opt, batch, 'cpu', {'drift': 1.0}, rho_mode='global')
+    got = float(torch.sigmoid(net.rho_bar_logit))
+    assert got > 0.5 + 0.1, f'rho did not move up from its 0.5 init: {got}'
+    assert abs(got - want) < 0.06, (got, want)
+
+
+def test_snapshots_off_by_default():
+    c4.set_search(search_agg='additive_mle', target_agg='avgconc',
+                  snapshot_fracs=())
+    assert c4._SNAP_FRACS == ()
+    t = c4.make_target(_tree(c4)[0])
+    assert t['snaps'] == ()
+    net, batch = _batch_with_snaps(n=8, sims=32)       # restores corr + fracs
+    c4.set_search(search_agg='additive_mle', target_agg='avgconc',
+                  snapshot_fracs=())
+
+
+FAST += [test_rho_head_optional_and_backcompat, test_T11_gradient_routing,
+         test_drift_loss_learns_rho, test_snapshots_off_by_default]
+
+
 if __name__ == '__main__':
     sys.exit(main(sys.argv))

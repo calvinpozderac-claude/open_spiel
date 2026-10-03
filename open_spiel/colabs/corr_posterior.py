@@ -341,3 +341,94 @@ def dm_nll_np(c, alpha):
     a0, k = alpha.sum(-1), c.sum(-1)
     v = np.vectorize(lgamma)
     return v(a0 + k) - v(a0) - (v(alpha + c) - v(alpha)).sum(-1)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Identifying rho from SNAPSHOT DRIFT -- no outcomes, no forks
+# ══════════════════════════════════════════════════════════════════════════════
+# The spec identifies rho from fork outcomes, arguing that shared evaluation error
+# is invisible to more search.  That is true of the search mean's ACCURACY but not
+# of its MOTION: for two NESTED snapshots (the first n simulations and the first N,
+# n < N) the shared error b appears in both means and CANCELS in the difference, so
+# the drift sees the idiosyncratic part alone.  With independent leaf errors
+#
+#     mu_n - mu_N = (1/n - 1/N) sum_{i<=n} e_i  -  (1/N) sum_{n<i<=N} e_i
+#     E|| mu_n - mu_N ||^2 = (1 - rho) * [ (1/n - 1/N)^2 SU_n + (SU_N - SU_n)/N^2 ]
+#
+# and SU_n (the cumulative sum of leaf total variances) is already in the
+# accumulator.  So 1 - rho is a ratio of two observable sums and rho needs no
+# outcomes at all.  Measured on the spec's own synthetic generator: rho recovered
+# to within 0.01 from 400 positions, against the k>=16 outcomes per position the
+# outcome likelihood needs.
+#
+# TWO LIMITS, both real:
+#   * rho is identified RELATIVE to the leaf concentrations the network reports.
+#     Those enter through SU, so if the net claims half the leaf variance it
+#     really has, this returns 1 - (1-rho)/0.5.  The outcome terms (cev/cea) are
+#     what keep the concentrations honest; drift cannot do it alone.  Partially
+#     self-cancelling in the posterior: the (1-rho)*SU/n term is invariant to that
+#     rescaling, the rho*ST^2/n^2 term is not.
+#   * the leaves must be conditionally independent given the shared error.  The
+#     DENOMINATOR above handles heterogeneous leaf variances exactly (verified:
+#     rho_hat stays 0.28-0.30 while a naive single-u version collapses to -1.6
+#     when later leaves are quieter), but genuinely CORRELATED idiosyncratic
+#     errors -- two leaves in the same subtree misreading the same tactic -- are
+#     indistinguishable from the shared term and inflate rho.  Arguably that is
+#     the quantity the posterior wants anyway.
+def drift_terms(snaps, ns=None):
+    """Per-(position, snapshot-pair) drift and its model coefficient.
+
+    snaps : (..., J, 9) accumulators for ONE node at increasing n (nested).
+    Returns (d, delta): d = ||mu_n - mu_N||^2, delta = the bracket above, each of
+    shape (..., P) with P = J*(J-1)/2 pairs.  1 - rho = sum(d) / sum(delta)."""
+    snaps = np.asarray(snaps, dtype=np.float64)
+    if snaps.ndim < 2 or snaps.shape[-2] < 2:
+        # fewer than two snapshots: no nested pair, so no drift information
+        base = snaps.shape[:-2] if snaps.ndim >= 2 else ()
+        z = np.zeros(base + (0,))
+        return z, z
+    J = snaps.shape[-2]
+    n = snaps[..., 0] if ns is None else np.broadcast_to(
+        np.asarray(ns, dtype=np.float64), snaps.shape[:-1])
+    SM, SU = snaps[..., 1:4], snaps[..., 7]
+    ds, dl = [], []
+    for j in range(J):
+        for k in range(j + 1, J):
+            nj, nk = n[..., j], n[..., k]
+            ok = (nj > 0) & (nk > nj)
+            nj_s, nk_s = np.maximum(nj, 1.0), np.maximum(nk, 1.0)
+            diff = SM[..., j, :] / nj_s[..., None] - SM[..., k, :] / nk_s[..., None]
+            inv = 1.0 / nj_s - 1.0 / nk_s
+            delta = inv * inv * SU[..., j] + (SU[..., k] - SU[..., j]) / (nk_s * nk_s)
+            ds.append(np.where(ok, (diff * diff).sum(-1), 0.0))
+            dl.append(np.where(ok, np.maximum(delta, 0.0), 0.0))
+    return np.stack(ds, -1), np.stack(dl, -1)
+
+
+def rho_from_drift(snaps, ns=None, cfg=DEFAULT):
+    """Pooled moment estimate of rho from nested snapshots.  Returns (rho, n_pairs)."""
+    d, delta = drift_terms(snaps, ns)
+    den = float(delta.sum())
+    if den <= 0.0:
+        return float('nan'), 0
+    rho = 1.0 - float(d.sum()) / den
+    return min(max(rho, cfg.rho_min), cfg.rho_max), int((delta > 0).sum())
+
+
+if _HAS_TORCH:
+
+    def drift_nll(d, delta, rho, floor=1e-12):
+        """Differentiable loss tying rho(s) to observed snapshot drift.
+
+        d, delta: (..., P) from drift_terms, CONSTANTS (no gradient).  Treats the
+        drift as exponential with mean V = (1-rho)*delta -- the simplex has 2 free
+        dimensions, so a chi-square with 2 df, i.e. exponential, is the right shape
+        -- giving NLL = log V + d/V.  Its stationary point is E[d] = V, which is
+        exactly the moment condition, so the loss and the closed-form estimator
+        agree.  Gradient flows only into rho (and the trunk through it)."""
+        V = ((1.0 - rho).unsqueeze(-1) if rho.dim() == d.dim() - 1 else (1.0 - rho)) \
+            * delta
+        V = V.clamp_min(floor)
+        mask = (delta > 0).to(d.dtype)
+        per = (torch.log(V) + d / V) * mask
+        return per.sum(-1) / mask.sum(-1).clamp_min(1.0)

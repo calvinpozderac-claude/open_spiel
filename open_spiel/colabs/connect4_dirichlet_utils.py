@@ -476,6 +476,36 @@ def observed_alpha(acc, mode):
                      max(M[2] * b0, ALPHA_FLOOR)])
 
 
+def _acc_vec(acc):
+    """One accumulator as the flat 9-vector corr_posterior uses:
+    [n, SM(3), SQ(3), SU, ST].  SU is the component sum of slot 3 (SV)."""
+    sm, sq, sv = acc[1], acc[2], acc[3]
+    return [acc[0], sm[0], sm[1], sm[2], sq[0], sq[1], sq[2],
+            sv[0] + sv[1] + sv[2], acc[9]]
+
+
+def _maybe_snapshot(s, root):
+    """Copy the ROOT accumulator when the simulation count first passes each
+    fraction of this game's budget.
+
+    This is the whole data cost of learning rho: a 9-float copy a few times per
+    move.  No extra games, no forks, no weakening of the move actually played --
+    the search runs to its full budget either way.  The drift between nested
+    snapshots identifies rho (see corr_posterior.drift_terms)."""
+    fr = _SNAP_FRACS
+    if not fr or root is None:
+        return
+    done = s.get('snap_at', 0)
+    if done >= len(fr):
+        return
+    n, budget = s['n'], max(s['sims'], 1)
+    while done < len(fr) and n >= fr[done] * budget:
+        done += 1
+    if done > s.get('snap_at', 0):
+        s['snap_at'] = done
+        s.setdefault('snaps', []).append(_acc_vec(root.nacc))
+
+
 def _new_acc():
     """A fresh evidence accumulator, as plain Python floats.  Python lists, not
     numpy: these are mutated once per node per simulation, and numpy's per-op
@@ -625,6 +655,7 @@ _PATHCONF_ACTIVE = False       # maintain acc slot 8 (path-attenuated conf)?
 _GAUSSIAN_SELECT = False       # exact Dirichlet draw vs cached-moment Gaussian
 _VIRTUAL_LOSS = 1.0            # penalty on v for an in-flight edge
 _CORR_ACTIVE = False           # maintain acc slot 9 (sum sqrt(u)) for the 'corr' rule
+_SNAP_FRACS = ()                # budget fractions at which to copy the root acc
 _RHO_SEARCH = 0.25             # leaf-error correlation used for SELECTION beliefs
 _RHO_TARGET = 0.999            # ... and for TRAINING TARGETS (near-avgconc)
 _CORR_TARGET_CAP = TERMINAL_CONC   # max alpha0 of a corr TARGET (see _corr_target)
@@ -637,13 +668,16 @@ _MLE_ACTIVE = False            # maintain the 'additive_mle' log-sums in _acc_ad
 def set_search(search_agg=None, target_agg=None, selection=None,
                virtual_loss=None, backup=None, conf_offset=None,
                head_conf_bias=None, target_conc_floor=None,
-               rho_search=None, rho_target=None, corr_target_cap=None):
+               rho_search=None, rho_target=None, corr_target_cap=None,
+               snapshot_fracs=None):
     """Configure the tree for this PROCESS.  Self-play workers call it themselves
     from their cfg so a spawned process matches the parent exactly."""
     global _SEARCH_AGG, _TARGET_AGG, _GAUSSIAN_SELECT, _VIRTUAL_LOSS, _MLE_ACTIVE
     global _BACKUP_SAMPLE, _CONF_OFFSET, _HEAD_CONF_BIAS, _TARGET_CONC_FLOOR
     global _PATHCONF_ACTIVE, _CORR_ACTIVE, _RHO_SEARCH, _RHO_TARGET
-    global _CORR_TARGET_CAP
+    global _CORR_TARGET_CAP, _SNAP_FRACS
+    if snapshot_fracs is not None:
+        _SNAP_FRACS = tuple(sorted(float(f) for f in snapshot_fracs))
     if rho_search is not None:
         _RHO_SEARCH = float(rho_search)
     if rho_target is not None:
@@ -1059,7 +1093,10 @@ def make_target(root):
             # ply / game length, stamped by finish_episode -- the z-KL loss
             # scales its target concentration by how noisy z is at this point
             # (see full_loss _z_conc).  -1 = solver/exact sample (skipped there).
-            'zply': -1, 'zlen': -1}
+            'zply': -1, 'zlen': -1,
+            # Nested root-accumulator snapshots for the rho drift loss: a list of
+            # 9-float vectors at increasing n.  Empty unless snapshots are on.
+            'snaps': ()}
 
 
 def _floor_conc(alpha, min_total):
@@ -1275,6 +1312,13 @@ class Config:
     # Max total concentration of a 'corr' TRAINING target (selection beliefs are
     # not capped).  See _corr_target for why the raw 1e6 spike cannot be a target.
     corr_target_cap: float = TERMINAL_CONC
+    # Budget fractions at which the ROOT accumulator is copied, for the rho drift
+    # loss.  () = off.  The drift between NESTED snapshots identifies rho without
+    # forks or extra games (see corr_posterior.drift_terms); the whole cost is a
+    # 9-float copy a few times per move.  The spec's fork machinery (k outcomes
+    # per position) is NOT used: it needs k >= 16 to identify rho, which is ~16x
+    # the continuation cost, and it is biased even then.
+    snapshot_fracs: tuple = ()
     # THE DEFAULT IS 'additive' for both.
     #
     # SEARCH wants concentration to GROW with evidence, so Thompson exploration
@@ -1896,6 +1940,11 @@ class _SlotEngine:
         pidx = int(np.nonzero(root.legal == a)[0][0])
         t['played'] = pidx
         t['sims_used'] = s['n']
+        if _SNAP_FRACS:
+            _maybe_snapshot(s, root)              # final budget fraction
+            t['snaps'] = tuple(s.get('snaps', ()))
+            s['snaps'] = []
+            s['snap_at'] = 0
         s['hist'].append(t)
         if self.cfg.get('double_aux'):
             self._emit_doubles(s, root, pidx)
@@ -1977,7 +2026,8 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
                cfg.get('conf_offset', 0.0), cfg.get('head_conf_bias', 1.4),
                cfg.get('target_conc_floor', 0.15),
                rho_search=cfg.get('rho_search'), rho_target=cfg.get('rho_target'),
-               corr_target_cap=cfg.get('corr_target_cap'))
+               corr_target_cap=cfg.get('corr_target_cap'),
+               snapshot_fracs=cfg.get('snapshot_fracs'))
     # stdlib random drives the sampled backup; seed it per worker so a
     # sampled run is as reproducible as a mean one.
     random.seed(cfg['seed'] + worker_id * 7919)
@@ -2058,6 +2108,8 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
             s = slots[i]
             if s['root'] is None:
                 continue
+            if _SNAP_FRACS:
+                _maybe_snapshot(s, s['root'])
             solved = _node_solved_outcome(s['root']) is not None
             if not solved and s['n'] < s['sims']:
                 if not _adaptive_converged(cfg, s):
@@ -2211,9 +2263,14 @@ if _HAS_TORCH:
         Dir(softplus(v_conf_raw) · softmax(v_logits)); the action belief for a is
         Dir(softplus(a_conf_raw[a]) · softmax(a_logits[a]))."""
 
-        def __init__(self, channels=64, num_blocks=5, head_ch=16):
+        def __init__(self, channels=64, num_blocks=5, head_ch=16,
+                     rho_head=False, rho_init=0.8):
             super().__init__()
             self._sig = (channels, num_blocks, head_ch)
+            # rho_head is OPT-IN and NOT part of _sig: adding parameters
+            # unconditionally would make load_state_dict reject every checkpoint
+            # saved before it existed (the whole HYBRID/OLIVAW library).
+            self._has_rho = bool(rho_head)
             in_ch = _OBS_SHAPE[0]
             self.stem = nn.Sequential(
                 nn.Conv2d(in_ch, channels, 3, padding=1, bias=False),
@@ -2260,12 +2317,34 @@ if _HAS_TORCH:
                 self.v_out.bias.zero_(); self.v_out.bias[3] = _HEAD_CONF_BIAS
                 self.a_out.bias.view(_NUM_ACTIONS, 4).zero_()
                 self.a_out.bias.view(_NUM_ACTIONS, 4)[:, 3] = _HEAD_CONF_BIAS
+            if self._has_rho:
+                # Trunk features ONLY -- no ply, move number, piece count or
+                # simulation count.  The n-dependence of confidence lives in the
+                # posterior formula; a head that could see n would absorb it and
+                # rho would stop being identifiable.
+                self.rho_mlp = nn.Sequential(
+                    nn.Linear(flat, 64), nn.ReLU(inplace=True), nn.Linear(64, 1))
+                b0 = math.log(rho_init / (1.0 - rho_init))
+                with torch.no_grad():
+                    nn.init.normal_(self.rho_mlp[2].weight, std=_HEAD_INIT_STD)
+                    self.rho_mlp[2].bias.fill_(b0)
+                # the pooled rho the per-position head is shrunk toward; a model
+                # parameter, not a config value
+                self.rho_bar_logit = nn.Parameter(torch.tensor(float(b0)))
 
-        def forward(self, x):
+        def forward(self, x, return_rho=False):
+            """4-tuple as always.  `return_rho=True` appends the raw rho logit
+            (B,) from the SAME trunk pass -- a 5-tuple -- so no existing caller
+            (which never passes the flag) sees a changed signature."""
             h = self.head(self.body(self.stem(x)))
             v = self.v_out(h)
             a = self.a_out(h).view(-1, _NUM_ACTIONS, 4)
-            return v[:, :3], v[:, 3], a[..., :3], a[..., 3]
+            out = (v[:, :3], v[:, 3], a[..., :3], a[..., 3])
+            if not return_rho:
+                return out
+            if not self._has_rho:
+                return out + (None,)
+            return out + (self.rho_mlp(h).squeeze(-1),)
 
     # Above this, softplus(x) and x differ by log1p(exp(-x)) — 2e-9 at x=20,
     # far below fp32 resolution at that magnitude — so the two are the same
@@ -2509,7 +2588,8 @@ if _HAS_TORCH:
     #   cons      TD self-consistency KL, Q(s,a*) ~ flip(V(s')).
     LOSS_COMPONENTS = ('klv', 'kla', 'dcev', 'dcea', 'evv', 'eva',
                        'cev', 'cea', 'zklv', 'zkla',
-                       'mzcv', 'mzca', 'mkcv', 'mkca', 'cons')
+                       'mzcv', 'mzca', 'mkcv', 'mkca', 'cons',
+                       'drift', 'rhoreg')
 
     # softened one-hot eps for the z soft-target mean.
     Z_KL_EPS = 0.02
@@ -2544,7 +2624,8 @@ if _HAS_TORCH:
     def full_loss(out, out2, meta, weights, kl_normalize=False, lam=0.0,
                   z_sched=('ply', 16.0, 1.0, 12.0, 20),
                   z_conc_mode='sched', z_rel_mult=2.0,
-                  z_grow=('double', 16.0)):
+                  z_grow=('double', 16.0), rho_raw=None, rho_bar_logit=None,
+                  rho_mode='fixed'):
         """Weighted combination of loss components on one batch.
 
         `out`  = network outputs for the batch positions              (B rows)
@@ -2564,7 +2645,7 @@ if _HAS_TORCH:
         def wt(name):
             return float(w.get(name, 0.0))
 
-        v_logits, v_conf_raw, a_logits, a_conf_raw = out
+        v_logits, v_conf_raw, a_logits, a_conf_raw = out[:4]
         act = meta['pad_act']                            # (B,K) long
         mask = meta['pad_mask']                          # (B,K) bool
         idx3 = act.unsqueeze(-1).expand(-1, -1, 3)
@@ -2704,6 +2785,27 @@ if _HAS_TORCH:
             L['mkca'] = ((a0 - tgt) ** 2 * evm).sum() / evn / s2
             total = total + wt('mkca') * L['mkca']
 
+        # ── rho from snapshot DRIFT (no outcomes, no forks) ───────────────────
+        # d and delta come from the replay buffer and carry no gradient, so this
+        # term reaches ONLY rho and (through it) the trunk -- never the alpha
+        # heads.  See corr_posterior.drift_nll for why the exponential NLL's
+        # stationary point is exactly the moment condition E[d] = (1-rho)*delta.
+        if wt('drift') and rho_raw is not None:
+            if rho_mode == 'global':
+                rho_row = torch.sigmoid(rho_bar_logit).expand(v_alpha.shape[0])
+            else:
+                rho_row = torch.sigmoid(rho_raw)
+            rho_row = rho_row.clamp(_CORR_CFG.rho_min, _CORR_CFG.rho_max)
+            has = (meta['snap_dl'] > 0).any(-1)
+            nll = _cp.drift_nll(meta['snap_d'], meta['snap_dl'], rho_row)
+            hw = has.float()
+            L['drift'] = (nll * hw).sum() / hw.sum().clamp_min(1.0)
+            total = total + wt('drift') * L['drift']
+            if wt('rhoreg') and rho_mode == 'position' and rho_bar_logit is not None:
+                lg = torch.log(rho_row / (1.0 - rho_row))
+                L['rhoreg'] = ((lg - rho_bar_logit) ** 2).mean()
+                total = total + wt('rhoreg') * L['rhoreg']
+
         # ── consistency: Q(s,a*) must match the resulting state's flipped value ─
         if wt('cons'):
             cw = meta['cons_w']
@@ -2753,7 +2855,8 @@ if _HAS_TORCH:
             # concentration diagnostics into ONE host transfer.
             comp_names = ('klv', 'kla', 'dcev', 'dcea', 'evv', 'eva',
                           'regv', 'rega', 'cev', 'cea', 'zklv', 'zkla',
-                          'mzcv', 'mzca', 'mkcv', 'mkca', 'cons')
+                          'mzcv', 'mzca', 'mkcv', 'mkca', 'cons',
+                          'drift', 'rhoreg')
             zero = total.detach() * 0.0
             comp_vals = [L.get(n, zero) for n in comp_names]
             diag = torch.stack([total, *comp_vals,
@@ -2789,6 +2892,22 @@ if _HAS_TORCH:
         cons_row = np.full(B, -1, np.int64)
         cons_isnn = np.zeros(B, bool)
         cons_term = np.full((B, 3), TERMINAL_EPS, np.float32)
+        # rho drift terms: per sample, one (d, delta) pair per NESTED snapshot
+        # pair.  Computed on the host in float64 -- SQ - SM^2/n and the cumulative
+        # SU differences cancel badly in float32.
+        snap_lists = [s.get('snaps') or () for s in batch]
+        P = 0
+        for sl in snap_lists:
+            if len(sl) >= 2:
+                P = max(P, len(sl) * (len(sl) - 1) // 2)
+        snap_d = np.zeros((B, max(P, 1)), np.float32)
+        snap_dl = np.zeros((B, max(P, 1)), np.float32)
+        for i, sl in enumerate(snap_lists):
+            if len(sl) < 2:
+                continue
+            d_i, dl_i = _cp.drift_terms(np.asarray(sl, dtype=np.float64))
+            snap_d[i, :d_i.shape[-1]] = d_i
+            snap_dl[i, :dl_i.shape[-1]] = dl_i
         obs2 = []
         if cons_frac >= 1.0:
             keep_cons = np.ones(B, bool)
@@ -2836,7 +2955,8 @@ if _HAS_TORCH:
         i64 = np.concatenate([pad_act.reshape(-1), z_idx, played, cons_row])
         f32 = np.concatenate([ev_alpha.reshape(-1), v_obs.reshape(-1), z_w,
                               played_w, cons_w, cons_term.reshape(-1), unsolved,
-                              z_ply, z_len])
+                              z_ply, z_len, snap_d.reshape(-1),
+                              snap_dl.reshape(-1)])
         b8 = np.concatenate([pad_mask.reshape(-1), ev_mask.reshape(-1),
                              cons_isnn])
         ti = torch.from_numpy(i64).to(device)
@@ -2857,6 +2977,10 @@ if _HAS_TORCH:
             'unsolved':  tf[BK * 3 + B * 9:BK * 3 + B * 10],
             'z_ply':     tf[BK * 3 + B * 10:BK * 3 + B * 11],
             'z_len':     tf[BK * 3 + B * 11:BK * 3 + B * 12],
+            'snap_d':    tf[BK * 3 + B * 12:
+                            BK * 3 + B * 12 + B * max(P, 1)].view(B, max(P, 1)),
+            'snap_dl':   tf[BK * 3 + B * 12 + B * max(P, 1):
+                            BK * 3 + B * 12 + 2 * B * max(P, 1)].view(B, max(P, 1)),
             'pad_mask':  tb[:BK].view(B, K),
             'ev_mask':   tb[BK:2 * BK].view(B, K),
             'cons_isnn': tb[2 * BK:2 * BK + B],
@@ -2888,7 +3012,7 @@ if _HAS_TORCH:
                    cons_frac=1.0, rng=None, lam=0.0,
                    z_sched=('ply', 16.0, 1.0, 12.0, 20),
                    z_conc_mode='sched', z_rel_mult=2.0,
-                   z_grow=('double', 16.0)):
+                   z_grow=('double', 16.0), rho_mode='fixed'):
         """One optimiser step, loss computed entirely ON-DEVICE for every backend.
 
         The consistency term needs the successor position's state belief, so the
@@ -2908,8 +3032,14 @@ if _HAS_TORCH:
             obs = [s['obs'] for s in batch]
             B = len(obs)
             x = batch_to_tensor(obs + obs2, device)
+            want_rho = float(weights.get('drift', 0.0)) > 0.0
             with lock:
-                v_logits, v_conf, a_logits, a_conf = network(x)
+                if want_rho:
+                    v_logits, v_conf, a_logits, a_conf, rho_raw = network(
+                        x, return_rho=True)
+                else:
+                    v_logits, v_conf, a_logits, a_conf = network(x)
+                    rho_raw = None
                 out = (v_logits[:B], v_conf[:B], a_logits[:B], a_conf[:B])
                 out2 = ((v_logits[B:], v_conf[B:], a_logits[B:], a_conf[B:])
                         if obs2 else None)
@@ -2917,7 +3047,12 @@ if _HAS_TORCH:
                 loss, parts = full_loss(out, out2, meta, weights, kl_normalize,
                                         lam=lam, z_sched=z_sched,
                                         z_conc_mode=z_conc_mode,
-                                        z_rel_mult=z_rel_mult, z_grow=z_grow)
+                                        z_rel_mult=z_rel_mult, z_grow=z_grow,
+                                        rho_raw=(None if rho_raw is None
+                                                 else rho_raw[:B]),
+                                        rho_bar_logit=getattr(
+                                            network, 'rho_bar_logit', None),
+                                        rho_mode=rho_mode)
                 loss.backward()
                 gnorm = torch.nn.utils.clip_grad_norm_(network.parameters(),
                                                        grad_clip)
@@ -3275,6 +3410,8 @@ if _HAS_TORCH:
             for i, s in enumerate(self.slots):
                 if s['root'] is None:
                     continue
+                if _SNAP_FRACS:
+                    _maybe_snapshot(s, s['root'])
                 if (s['n'] < s['sims']
                         and _node_solved_outcome(s['root']) is None):
                     continue
@@ -3726,8 +3863,8 @@ if _HAS_TORCH:
         _assert_finite_sd(sd, f'bench_{label}.pt')
         torch.save(sd, os.path.join(checkpoint_dir, f'bench_{label}.pt'))
 
-    def load_benchmark_net(checkpoint_dir, label, sig):
-        net = C4DirichletNet(*sig)
+    def load_benchmark_net(checkpoint_dir, label, sig, rho_head=False):
+        net = C4DirichletNet(*sig, rho_head=rho_head)
         net.load_state_dict(torch.load(
             os.path.join(checkpoint_dir, f'bench_{label}.pt'),
             map_location='cpu', weights_only=True))
@@ -3859,6 +3996,7 @@ if _HAS_TORCH:
             search_agg=cfg.search_agg, target_agg=cfg.target_agg,
             rho_search=cfg.rho_search, rho_target=cfg.rho_target,
             corr_target_cap=cfg.corr_target_cap,
+            snapshot_fracs=tuple(cfg.snapshot_fracs),
             selection=cfg.selection, virtual_loss=cfg.virtual_loss,
             backup=cfg.backup, conf_offset=cfg.conf_offset,
             head_conf_bias=cfg.head_conf_bias,
@@ -3908,7 +4046,8 @@ if _HAS_TORCH:
                    cfg.virtual_loss, cfg.backup,
                    cfg.conf_offset, cfg.head_conf_bias, cfg.target_conc_floor,
                    rho_search=cfg.rho_search, rho_target=cfg.rho_target,
-                   corr_target_cap=cfg.corr_target_cap)
+                   corr_target_cap=cfg.corr_target_cap,
+                   snapshot_fracs=cfg.snapshot_fracs)
         set_backend(backend, device)
         random.seed(cfg.seed); np.random.seed(cfg.seed)
         torch.manual_seed(cfg.seed)
