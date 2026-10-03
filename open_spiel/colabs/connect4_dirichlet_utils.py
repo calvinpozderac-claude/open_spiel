@@ -130,6 +130,8 @@ from dataclasses import dataclass, asdict
 
 import numpy as np
 
+import corr_posterior as _cp
+
 try:
     import torch
     import torch.nn as nn
@@ -232,8 +234,15 @@ AGG_AVGCONC = 'avgconc'
 #              (the TARGET flavor)
 AGG_PATHSUM = 'pathsum'
 AGG_PATHAVG = 'pathavg'
+# Correlated-error Bayesian posterior (corr_posterior.py, "ThompsonZero v2" spec):
+# the network PRIOR and the search mean are two estimators of the same outcome
+# distribution with correlated error, combined by generalised least squares and
+# moment-matched to a Dirichlet.  Unlike every rule above it consumes the PRIOR as
+# well as the accumulator, and its one free parameter is rho (Config.rho_search /
+# Config.rho_target, fixed here -- the learned-rho machinery is not built).
+AGG_CORR = 'corr'
 AGGREGATIONS = (AGG_MIXTURE, AGG_MEAN, AGG_SUM, AGG_ADDITIVE, AGG_ADDITIVE_MLE,
-                AGG_AVGCONC, AGG_PATHSUM, AGG_PATHAVG)
+                AGG_AVGCONC, AGG_PATHSUM, AGG_PATHAVG, AGG_CORR)
 
 # ── 'additive_mle' tuning.  Speed is preferred to exactness here: the estimate
 # is a search statistic, not a reported quantity, and it moves slowly.
@@ -395,6 +404,14 @@ def observed_alpha(acc, mode):
     n = acc[0]
     if n <= 0.0:
         return None
+    if mode == AGG_CORR:
+        # Peripheral callers (adaptive allocation, checkpointed search) have no
+        # prior to hand over, so they get the SEARCH ESTIMATE alone (w = 0).  The
+        # tree itself never goes through here: _CNode uses _corr_belief.
+        sm, sv = acc[1], acc[3]
+        return np.array(_cp.posterior_scalar(
+            (1.0, 1.0, 1.0), n, sm, acc[2], sv[0] + sv[1] + sv[2], acc[9],
+            _RHO_SEARCH, _CORR_CFG, search_only=True))
     if mode == AGG_ADDITIVE_MLE:
         # Below 3 observations the Dirichlet MLE is degenerate (one sample is
         # fit perfectly by alpha0 -> infinity), and acc[5] being untouched means
@@ -470,10 +487,13 @@ def _new_acc():
         [6] A    = current MLE estimate
         [7] next refresh threshold
         [8] SC   = sum of PATH-ATTENUATED confidences — 'pathsum'/'pathavg'
+        [9] ST   = sum of sqrt(u_i), u_i = a leaf's TOTAL variance — 'corr'
     Slots 5-7 are only maintained when an 'additive_mle' rule is selected;
-    slot 8 only when a path rule is (see _PATHCONF_ACTIVE / _backup)."""
+    slot 8 only when a path rule is (see _PATHCONF_ACTIVE / _backup); slot 9
+    only when the 'corr' rule is (see _CORR_ACTIVE / _acc_add).  The 'corr' rule
+    also reads SU = sum(SV): the component sum of slot 3 IS the sum of u_i."""
     return [0.0, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0, 0.0]
+            [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0, 0.0, 0.0]
 
 
 def _dir_kl(a, b):
@@ -493,14 +513,27 @@ def _dir_kl(a, b):
     return kl
 
 
-def _payload(alpha):
+def _payload(alpha, exact=False):
     """Pre-compute one backed-up Dirichlet's contribution in BOTH perspectives.
 
     Returns (as_is, flipped); each is (m, m², v, α) as 3-tuples of Python floats.
     A simulation backs one Dirichlet up a whole path, alternating perspective at
     every ply, so both forms are built once per simulation and then just indexed
-    — no per-ply array flipping."""
+    — no per-ply array flipping.
+
+    exact=True is for a PROVEN terminal: the mean is the exact one-hot and the
+    variance is exactly zero, because a solved outcome is not an estimate and
+    carries no evaluation error.  (The finite TERMINAL_CONC spike that the other
+    rules back up exists only because a Dirichlet cannot be a point mass.)  The
+    'corr' rule needs this: with u == 0 a resolved subtree can reach alpha0 max."""
     aw, ad, al = (float(alpha[0]), float(alpha[1]), float(alpha[2]))
+    if exact:
+        k = 0 if (aw >= ad and aw >= al) else (1 if ad >= al else 2)
+        m = (1.0 if k == 0 else 0.0, 1.0 if k == 1 else 0.0, 1.0 if k == 2 else 0.0)
+        z = (0.0, 0.0, 0.0)
+        a = (aw, ad, al)
+        return ((m, m, z, a), ((m[2], m[1], m[0]), (m[2], m[1], m[0]), z,
+                               (al, ad, aw)))
     a0 = aw + ad + al
     inv = 1.0 / (a0 + 1.0)
     mw, md, ml = aw / a0, ad / a0, al / a0
@@ -567,6 +600,10 @@ def _acc_add(acc, pl):
     SQ[0] += q[0]; SQ[1] += q[1]; SQ[2] += q[2]
     SV[0] += v[0]; SV[1] += v[1]; SV[2] += v[2]
     SA[0] += a[0]; SA[1] += a[1]; SA[2] += a[2]
+    if _CORR_ACTIVE:
+        u = v[0] + v[1] + v[2]
+        if u > 0.0:                        # exact terminals have u == 0
+            acc[9] += math.sqrt(u)
     if _MLE_ACTIVE:
         # Accumulating the logs is cheap; the fixed point is not, so it only
         # runs on the geometric schedule (see _MLE_GROWTH).
@@ -587,6 +624,11 @@ _TARGET_AGG = AGG_MIXTURE      # evidence rule used for TRAINING TARGETS
 _PATHCONF_ACTIVE = False       # maintain acc slot 8 (path-attenuated conf)?
 _GAUSSIAN_SELECT = False       # exact Dirichlet draw vs cached-moment Gaussian
 _VIRTUAL_LOSS = 1.0            # penalty on v for an in-flight edge
+_CORR_ACTIVE = False           # maintain acc slot 9 (sum sqrt(u)) for the 'corr' rule
+_RHO_SEARCH = 0.25             # leaf-error correlation used for SELECTION beliefs
+_RHO_TARGET = 0.999            # ... and for TRAINING TARGETS (near-avgconc)
+_CORR_TARGET_CAP = TERMINAL_CONC   # max alpha0 of a corr TARGET (see _corr_target)
+_CORR_CFG = _cp.CorrConfig()
 _MLE_ACTIVE = False            # maintain the 'additive_mle' log-sums in _acc_add
                                # (skipped entirely when no rule needs them, so
                                # the default backup pays nothing for this)
@@ -594,12 +636,20 @@ _MLE_ACTIVE = False            # maintain the 'additive_mle' log-sums in _acc_ad
 
 def set_search(search_agg=None, target_agg=None, selection=None,
                virtual_loss=None, backup=None, conf_offset=None,
-               head_conf_bias=None, target_conc_floor=None):
+               head_conf_bias=None, target_conc_floor=None,
+               rho_search=None, rho_target=None, corr_target_cap=None):
     """Configure the tree for this PROCESS.  Self-play workers call it themselves
     from their cfg so a spawned process matches the parent exactly."""
     global _SEARCH_AGG, _TARGET_AGG, _GAUSSIAN_SELECT, _VIRTUAL_LOSS, _MLE_ACTIVE
     global _BACKUP_SAMPLE, _CONF_OFFSET, _HEAD_CONF_BIAS, _TARGET_CONC_FLOOR
-    global _PATHCONF_ACTIVE
+    global _PATHCONF_ACTIVE, _CORR_ACTIVE, _RHO_SEARCH, _RHO_TARGET
+    global _CORR_TARGET_CAP
+    if rho_search is not None:
+        _RHO_SEARCH = float(rho_search)
+    if rho_target is not None:
+        _RHO_TARGET = float(rho_target)
+    if corr_target_cap is not None:
+        _CORR_TARGET_CAP = float(corr_target_cap)
     if target_conc_floor is not None:
         _TARGET_CONC_FLOOR = float(target_conc_floor)
     if conf_offset is not None:
@@ -625,6 +675,7 @@ def set_search(search_agg=None, target_agg=None, selection=None,
     if virtual_loss is not None:
         _VIRTUAL_LOSS = float(virtual_loss)
     _MLE_ACTIVE = AGG_ADDITIVE_MLE in (_SEARCH_AGG, _TARGET_AGG)
+    _CORR_ACTIVE = AGG_CORR in (_SEARCH_AGG, _TARGET_AGG)
     _PATHCONF_ACTIVE = bool({AGG_PATHSUM, AGG_PATHAVG}
                             & {_SEARCH_AGG, _TARGET_AGG})
 
@@ -632,6 +683,41 @@ def set_search(search_agg=None, target_agg=None, selection=None,
 # ══════════════════════════════════════════════════════════════════════════════
 #  The tree
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _corr_belief(prior_row, acc, rho):
+    """The 'corr' posterior for one node/edge, or None if there is no evidence.
+    `prior_row` is the network Dirichlet the evidence is combined with."""
+    n = acc[0]
+    if n <= 0.0:
+        return None
+    sv = acc[3]
+    return np.array(_cp.posterior_scalar(
+        prior_row, n, acc[1], acc[2], sv[0] + sv[1] + sv[2], acc[9], rho,
+        _CORR_CFG))
+
+
+def _corr_target(alpha):
+    """A 'corr' belief prepared as a KL TRAINING TARGET.
+
+    Two guards the spec's raw posterior does not have, both for the same reason the
+    older targets carry TARGET_EPS and a finite TERMINAL_CONC spike:
+      * components are floored at TARGET_EPS.  A resolved node's mean is an exact
+        one-hot, so its other components land on the posterior's 1e-4 floor, and
+        KL(target || pred) pays (t_i - p_i)(psi(t_i) - psi(t0)): psi(1e-4) is
+        -1e4, which turns an ordinary KL of ~0.1 into ~1e3 per sample.
+      * total concentration is capped at _CORR_TARGET_CAP (default TERMINAL_CONC).
+        The posterior's a0_max of 1e6 is fine as a SELECTION belief (Thompson then
+        plays the proven move) but would make the distillation loss explode.
+    Search selection beliefs are NOT touched by either guard."""
+    a = np.asarray(alpha, dtype=np.float64)
+    tot = float(a.sum())
+    if tot > _CORR_TARGET_CAP:
+        a = a * (_CORR_TARGET_CAP / tot)
+    # Floor AFTER capping: flooring first and then rescaling would shrink the
+    # floored components back below TARGET_EPS (they would land at ~5e-6).  The
+    # floor can add at most 3 * TARGET_EPS to the capped total.
+    return np.maximum(a, TARGET_EPS)
+
 
 class _CNode:
     """One expanded state.
@@ -679,6 +765,11 @@ class _CNode:
         """Rewrite one edge's selection belief after its evidence changed."""
         if self.term[idx] >= 0:
             self.alpha_sel[idx] = _SPIKE[self.term[idx]]
+        elif _SEARCH_AGG == AGG_CORR:
+            # the posterior already COMBINES the prior with the evidence (GLS),
+            # so unlike the legacy rules there is no `alpha_p + obs`
+            b = _corr_belief(self.alpha_p[idx], self.eacc[idx], _RHO_SEARCH)
+            self.alpha_sel[idx] = self.alpha_p[idx] if b is None else b
         else:
             obs = observed_alpha(self.eacc[idx], _SEARCH_AGG)
             self.alpha_sel[idx] = (self.alpha_p[idx] if obs is None
@@ -696,6 +787,9 @@ class _CNode:
         observed evidence under `target_agg`).  None if never searched."""
         if self.term[idx] >= 0:
             return _SPIKE[self.term[idx]].copy()
+        if _TARGET_AGG == AGG_CORR:
+            b = _corr_belief(self.alpha_p[idx], self.eacc[idx], _RHO_TARGET)
+            return None if b is None else _corr_target(b)
         return observed_alpha(self.eacc[idx], _TARGET_AGG)
 
     def state_target(self):
@@ -703,6 +797,9 @@ class _CNode:
         solved = _node_solved_outcome(self)
         if solved is not None:
             return _SPIKE[solved].copy()
+        if _TARGET_AGG == AGG_CORR:
+            b = _corr_belief(self.v_alpha, self.nacc, _RHO_TARGET)
+            return self.v_alpha.copy() if b is None else _corr_target(b)
         obs = observed_alpha(self.nacc, _TARGET_AGG)
         return self.v_alpha.copy() if obs is None else obs
 
@@ -777,13 +874,15 @@ def _select_leaf(root, root_state, rng, temp=1.0):
         node.vloss[idx] += 1
         path.append((node, idx))
         if node.term[idx] >= 0:
-            return path, None, _payload(flip_alpha(_SPIKE[node.term[idx]])), None
+            return path, None, _payload(flip_alpha(_SPIKE[node.term[idx]]),
+                                        exact=_CORR_ACTIVE), None
         state.apply_action(int(node.legal[idx]))
         if state.is_terminal():
             r = state.returns()[node.player]                   # +1 / 0 / −1
             out = _WIN if r > 0 else (_LOSS if r < 0 else _DRAW)
             _set_term(node, idx, out)
-            return path, None, _payload(flip_alpha(_SPIKE[out])), None
+            return path, None, _payload(flip_alpha(_SPIKE[out]),
+                                        exact=_CORR_ACTIVE), None
         child = node.children[idx]
         if child is None:
             return path, state, None, (node, idx)
@@ -1162,6 +1261,20 @@ class Config:
     # 'mixture' | 'mean' | 'sum' | 'additive' | 'additive_mle'
     search_agg: str = AGG_ADDITIVE
     target_agg: str = AGG_ADDITIVE
+    # Used only by the 'corr' rule (search_agg/target_agg = 'corr'): the assumed
+    # correlation of network evaluation errors within a subtree, in (0, 1).
+    # rho -> 0 treats every simulation as independent evidence (concentration
+    # grows ~ linearly with visits); rho -> 1 says all leaves share one error, so
+    # more search cannot add confidence (concentration saturates at the leaf's
+    # own, ~avgconc).  FIXED here -- the spec's learned, per-position rho is NOT
+    # built (its synthetic recovery test fails; see test_corr_posterior.py).
+    # The spec's rollout: targets at rho_target = 0.999 first (P1), then sweep
+    # rho_search over 0.05 / 0.1 / 0.25 (P2).
+    rho_search: float = 0.25
+    rho_target: float = 0.999
+    # Max total concentration of a 'corr' TRAINING target (selection beliefs are
+    # not capped).  See _corr_target for why the raw 1e6 spike cannot be a target.
+    corr_target_cap: float = TERMINAL_CONC
     # THE DEFAULT IS 'additive' for both.
     #
     # SEARCH wants concentration to GROW with evidence, so Thompson exploration
@@ -1862,7 +1975,9 @@ def mp_worker(worker_id, req_q, resp_q, pool_resp_q, episode_q, cfg):
     set_search(cfg['search_agg'], cfg['target_agg'], cfg['selection'],
                cfg['virtual_loss'], cfg.get('backup', 'mean'),
                cfg.get('conf_offset', 0.0), cfg.get('head_conf_bias', 1.4),
-               cfg.get('target_conc_floor', 0.15))
+               cfg.get('target_conc_floor', 0.15),
+               rho_search=cfg.get('rho_search'), rho_target=cfg.get('rho_target'),
+               corr_target_cap=cfg.get('corr_target_cap'))
     # stdlib random drives the sampled backup; seed it per worker so a
     # sampled run is as reproducible as a mean one.
     random.seed(cfg['seed'] + worker_id * 7919)
@@ -3742,6 +3857,8 @@ if _HAS_TORCH:
             curriculum=cfg.curriculum, curr_depth0=cfg.curr_depth0,
             curr_mcts_tail=cfg.curr_mcts_tail,
             search_agg=cfg.search_agg, target_agg=cfg.target_agg,
+            rho_search=cfg.rho_search, rho_target=cfg.rho_target,
+            corr_target_cap=cfg.corr_target_cap,
             selection=cfg.selection, virtual_loss=cfg.virtual_loss,
             backup=cfg.backup, conf_offset=cfg.conf_offset,
             head_conf_bias=cfg.head_conf_bias,
@@ -3789,7 +3906,9 @@ if _HAS_TORCH:
         set_game(game)
         set_search(cfg.search_agg, cfg.target_agg, cfg.selection,
                    cfg.virtual_loss, cfg.backup,
-                   cfg.conf_offset, cfg.head_conf_bias, cfg.target_conc_floor)
+                   cfg.conf_offset, cfg.head_conf_bias, cfg.target_conc_floor,
+                   rho_search=cfg.rho_search, rho_target=cfg.rho_target,
+                   corr_target_cap=cfg.corr_target_cap)
         set_backend(backend, device)
         random.seed(cfg.seed); np.random.seed(cfg.seed)
         torch.manual_seed(cfg.seed)
