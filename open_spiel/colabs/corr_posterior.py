@@ -417,25 +417,35 @@ def rho_from_drift(snaps, ns=None, cfg=DEFAULT):
 
 if _HAS_TORCH:
 
-    def drift_nll(d, delta, rho, floor=1e-12):
+    def drift_nll(d, delta, rho, floor=1e-30):
         """Differentiable loss tying rho(s) to observed snapshot drift.
 
-        d, delta: (..., P) from drift_terms, CONSTANTS (no gradient).  Treats the
-        drift as exponential with mean V = (1-rho)*delta -- the simplex has 2 free
-        dimensions, so a chi-square with 2 df, i.e. exponential, is the right shape
-        -- giving NLL = log V + d/V.  Its stationary point is E[d] = V, which is
-        exactly the moment condition, so the loss and the closed-form estimator
-        agree.  Gradient flows only into rho (and the trunk through it)."""
-        V = ((1.0 - rho).unsqueeze(-1) if rho.dim() == d.dim() - 1 else (1.0 - rho)) \
-            * delta
-        V = V.clamp_min(floor)
-        ds = d.clamp_min(floor)
+        d, delta: (..., P) from drift_terms, CONSTANTS (no gradient).  Pools over
+        the P snapshot pairs of each position BEFORE taking the likelihood:
+
+            D = sum_p d,   V = (1-rho) * sum_p delta
+            L = log(V/D) + D/V - 1   >= 0, zero iff V == D
+
+        so the stationary point is sum_p d = (1-rho) sum_p delta -- exactly the
+        moment estimator rho_from_drift uses, per position.
+
+        WHY POOLED AND NOT PER PAIR.  A per-pair exponential NLL is what this
+        function used first, and it fails on real trees.  Measured there, the
+        per-pair ratio d/delta has median 0.062 but p99 1.46 and max 2.9, a ~47x
+        spread, because how much a search changes its mind varies hugely by
+        position.  The exponential NLL punishes d >> V linearly (d/V) and d << V
+        only logarithmically, so that right tail dominates the average and drags
+        rho down: in a live run it took rho from 0.80 to 0.477 while the term grew
+        to 83% of the total loss, even though the pooled estimate of the same data
+        was 0.83.  Pooling first makes the fit track the aggregate, which is the
+        quantity the posterior actually consumes.
+
+        The heavy tail is itself informative: it says rho is NOT constant across
+        positions, which is the case for a per-position head (rho_mode='position')
+        rather than for a single global value."""
         mask = (delta > 0).to(d.dtype)
-        # EXCESS NLL: log(V/d) + d/V - 1 >= 0, zero iff V == d.  The raw
-        # log V + d/V is a density NLL and is legitimately large and NEGATIVE
-        # here (drifts are ~1e-5, so log V ~ -11), which would swamp every
-        # other term in the reported total and make the loss incomparable to
-        # runs without it.  Subtracting the per-pair minimum (log d + 1) is a
-        # constant in rho, so the gradient and the argmin are untouched.
-        per = (torch.log(V / ds) + ds / V - 1.0) * mask
-        return per.sum(-1) / mask.sum(-1).clamp_min(1.0)
+        D = (d * mask).sum(-1).clamp_min(floor)
+        S = (delta * mask).sum(-1).clamp_min(floor)
+        V = ((1.0 - rho) * S).clamp_min(floor)
+        has = (mask.sum(-1) > 0).to(d.dtype)
+        return (torch.log(V / D) + D / V - 1.0) * has

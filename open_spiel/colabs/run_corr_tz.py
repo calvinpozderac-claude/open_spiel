@@ -6,22 +6,36 @@ so this is a one-variable change against that run: the evidence-collapse rule.
     OLIVAW-TZ   search additive_mle   target avgconc
     CORR        search corr           target corr     (rho fixed at 0.8)
 
-WHY rho IS FIXED HERE, with the drift loss still on.  Learned rho has no
-transport to the self-play workers yet: they receive rho through set_search at
-spawn, from the config, and the learned value lives in the network and changes
-during training.  So:
+WHY rho IS FIXED HERE AND THE DRIFT LOSS IS OFF.  Two separate reasons.
 
-  * SEARCH and TARGETS use rho_search / rho_target below -- specified, not learned.
-  * The rho head and the 'drift' loss term are ON anyway, which costs ~0.7% of
-    self-play (measured) and makes the run report what rho the data actually
-    implies, generation by generation.  If the learned rho_bar stays near 0.8,
-    the fixed value was a fair stand-in and a later learned-rho run should behave
-    much like this one; if it drifts, this run tells us the fixed choice was
-    wrong and by how much.
+1. Learned rho has no transport to the self-play workers: they get rho through
+   set_search at spawn, from config, while the learned value lives in the network
+   and changes during training.
+2. More importantly, learning rho from drift DURING a live run does not measure
+   what it is supposed to.  Self-play reads the weights live and training updates
+   them 6 times per episode, so a search's early simulations are evaluated by a
+   different network from its late ones.  That weight movement is drift the model
+   attributes to idiosyncratic leaf error, which pushes rho down.  Measured by
+   perturbing a frozen net's weights and re-measuring:
 
-rho_search = 0.8 is not a guess: snapshot drift on real Othello trees measured
-0.797 (untrained), 0.804 (TZ10k) and 0.834 (TZ50k).  The spec's rho_init of 0.3
-would have been far off.
+       frozen TZ50k                  rho = 0.764
+       weights +0.02 sigma           rho = 0.720
+       weights +0.05 sigma           rho = 0.553
+       weights +0.10 sigma           rho = 0.001
+
+   A first attempt at this run had w_drift = 1.0 and rho_mode = 'global'.  By
+   ep2000 the term was 83% of the total loss and rho_bar had fallen 0.80 -> 0.477,
+   tracking weight non-stationarity rather than leaf-error correlation.  It was
+   stopped and is not used.
+
+So rho is SPECIFIED at 0.8, from measuring frozen checkpoints (0.797 untrained,
+0.804 TZ10k, 0.834 TZ50k, 0.764 re-measured), and the rho head is OFF -- which
+also makes the parameter count identical to the OLIVAW-TZ arm (909,816), so the
+only difference between the two runs is the evidence-collapse rule.
+
+corr_rho_probe.py measures rho offline from a frozen checkpoint; that is the
+uncontaminated way to get it, and the viable route to a learned rho is a
+generation-level update from such a measurement rather than a per-step gradient.
 
 rho_target stays at 0.999 -- the near-avgconc end -- so the TARGET side changes
 as little as possible from the OLIVAW-TZ run and the comparison isolates the
@@ -38,10 +52,10 @@ import olivaw_common as OC
 CKPT = 'bench_CORR_TZ'
 LOG_PATH = os.path.join(os.path.dirname(__file__), 'corr_tz.log')
 
-RHO_SEARCH = 0.8        # measured on real trees; see the module docstring
+RHO_SEARCH = 0.8        # measured on FROZEN nets; see the module docstring
 RHO_TARGET = 0.999      # near-avgconc, to keep the target side close to OLIVAW-TZ
-SNAPSHOT_FRACS = (1 / 16, 1 / 8, 1 / 4, 1 / 2, 1.0)
-W_DRIFT = 1.0           # trains rho_bar for logging; search still uses RHO_SEARCH
+SNAPSHOT_FRACS = ()     # off: the drift loss is off, so nothing consumes them
+W_DRIFT = 0.0           # see the docstring -- confounded by live weight updates
 
 
 def _log(msg):
@@ -64,13 +78,13 @@ def make_cfg():
         rho_search=RHO_SEARCH, rho_target=RHO_TARGET,
         corr_target_cap=c4.TERMINAL_CONC,
         snapshot_fracs=SNAPSHOT_FRACS,
-        rho_head=True, rho_init=0.8, rho_mode='global',
+        rho_head=False, rho_mode='fixed',
 
         # ── identical to the OLIVAW-TZ arm from here down ────────────────────
         selection='dirichlet', kl_normalize=False, backup='mean',
         virtual_loss=1.0,
         loss_weights={'klv': 1.0, 'kla': 2.0, 'cev': 1.0, 'cea': 1.0,
-                      'cons': 0.5, 'drift': W_DRIFT},
+                      'cons': 0.5},          # identical to the OLIVAW-TZ arm
         late_temp=1e4, descent_temp=1.0,
         adaptive_mode=None, adaptive_kl_eps=None,
         sims_ramp=OC.SIMS_RAMP,
@@ -101,8 +115,7 @@ if __name__ == '__main__':
     _log(OC.banner(cfg, 'CORR-TZ',
                    f'engine=thompson SEARCH={cfg.search_agg} '
                    f'TARGET={cfg.target_agg} rho_search={cfg.rho_search} '
-                   f'rho_target={cfg.rho_target} rho_mode={cfg.rho_mode} '
-                   f'w_drift={W_DRIFT}'))
+                   f'rho_target={cfg.rho_target} rho_mode={cfg.rho_mode}'))
     t0 = time.time()
     c4.run_training(cfg, log=_log)
     _log(f'=== done in {time.time()-t0:.0f}s ===')
