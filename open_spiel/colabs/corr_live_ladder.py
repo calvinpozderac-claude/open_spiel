@@ -85,17 +85,42 @@ def available(which):
     return [p for p in (mk(ep) for ep in EPS) if _exists(p)]
 
 
+# The TZ-vs-TZ pairs already exist in the OLIVAW ladder, played on the identical
+# protocol with the same 12 XOT openings, so they are directly poolable.  Without
+# them this fit has no TZ-TZ edges at all and the anchor ordering is an artifact
+# of each anchor's record against the one CORR checkpoint -- observed: three TZ
+# checkpoints tied at 1857 on 24-0-0 records.
+SEED_FROM = 'olivaw_live_ladder_s400_g24_xot_greedy.json'
+
+
+def _seed_tz_pairs():
+    if not os.path.exists(SEED_FROM):
+        return {}
+    with open(SEED_FROM) as fh:
+        src = json.load(fh).get('pairs', {})
+    out = {}
+    for k, v in src.items():
+        a, b = k.split('|')
+        if a.startswith('TZ') and b.startswith('TZ'):
+            out[k] = v
+    return out
+
+
 def load_done():
+    done = dict(_seed_tz_pairs())
     if os.path.exists(OUT):
         with open(OUT) as fh:
-            return json.load(fh).get('pairs', {})
-    return {}
+            done.update(json.load(fh).get('pairs', {}))
+    return done
 
 
 def save_done(done):
+    # persist only pairs involving a CORR checkpoint; the TZ-TZ edges are seeded
+    # from the OLIVAW ladder each time and must not be duplicated here
+    mine = {k: v for k, v in done.items() if 'CO' in k}
     tmp = OUT + '.tmp'
     with open(tmp, 'w') as fh:
-        json.dump({'pairs': done, 'sims': SIMS, 'games': GAMES}, fh)
+        json.dump({'pairs': mine, 'sims': SIMS, 'games': GAMES}, fh)
     os.replace(tmp, OUT)
 
 
